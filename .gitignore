@@ -30,3 +30,7 @@ __pycache__/
 # Local backup / temporary files
 *~
 *.swp
+
+# User documentation (exclude from git)
+docs/
+
