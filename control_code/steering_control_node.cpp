@@ -42,6 +42,10 @@ public:
         this->declare_parameter<double>("base_max_accel", 4.0);
         this->declare_parameter<double>("base_max_decel", 8.0);
 
+        // IMU 센서 실물 장착 여부 스위치 및 횡슬립 방지 피드백 게인
+        this->declare_parameter<bool>("use_imu", false);               // IMU 미장착 상태에 대비한 안전 토글 (기본 OFF)
+        this->declare_parameter<double>("yaw_rate_gain", 0.1);         // 횡슬립 방지 조향 복원 게인
+
         // BEXCO 우레탄 바닥 낮은 마찰계수(0.4~0.6)에 대응하기 위해 최대 허용 횡가속도 하향 조정
         this->declare_parameter<double>("max_lat_accel", 4.0);         // 최대 허용 횡가속도 (m/s^2)
         this->declare_parameter<double>("max_speed", 7.0);             // 직선 코스 최대 한계 속도 (m/s)
@@ -59,6 +63,8 @@ public:
         this->get_parameter("decel_attenuation", decel_attenuation_);
         this->get_parameter("base_max_accel", base_max_accel_);
         this->get_parameter("base_max_decel", base_max_decel_);
+        this->get_parameter("use_imu", use_imu_);
+        this->get_parameter("yaw_rate_gain", yaw_rate_gain_);
         this->get_parameter("max_lat_accel", max_lat_accel_);
         this->get_parameter("max_speed", max_speed_);
         this->get_parameter("min_speed", min_speed_);
@@ -125,6 +131,13 @@ private:
     }
 
     void imu_callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg) {
+        if (!use_imu_) {
+            filtered_roll_ = 0.0;
+            filtered_roll_rate_ = 0.0;
+            current_yaw_rate_ = 0.0;
+            return;
+        }
+
         // 1. Quaternion -> Roll Angle 산출
         auto q = msg->orientation;
         double sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z);
@@ -137,6 +150,10 @@ private:
         // 2. Roll Rate (X축 각속도) LPF 적용
         double roll_rate = msg->angular_velocity.x;
         filtered_roll_rate_ = alpha_roll_rate_ * roll_rate + (1.0 - alpha_roll_rate_) * filtered_roll_rate_;
+
+        // 3. Yaw Rate (Z축 각속도) LPF 적용
+        double yaw_rate = msg->angular_velocity.z;
+        current_yaw_rate_ = alpha_yaw_rate_ * yaw_rate + (1.0 - alpha_yaw_rate_) * current_yaw_rate_;
     }
 
     void scan_callback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
@@ -235,11 +252,26 @@ private:
         // --------------------------------------------------------
         // Step 3. 과도기 응답 보상 제어 (IMU Roll Rate 적용)
         // --------------------------------------------------------
-        double attenuation = roll_rate_gain_ * std::abs(filtered_roll_rate_);
-        attenuation = std::min(attenuation, max_gain_attenuation_);
+        double attenuation = 0.0;
+        if (use_imu_) {
+            attenuation = roll_rate_gain_ * std::abs(filtered_roll_rate_);
+            attenuation = std::min(attenuation, max_gain_attenuation_);
+        }
         
         double current_steering_gain = base_steering_gain_ * (1.0 - attenuation);
         double final_steering_angle = raw_steering_angle * current_steering_gain;
+
+        // --------------------------------------------------------
+        // IMU Yaw Rate 피드백을 이용한 횡슬립(오버/언더스티어) 능동 조향 보정
+        // --------------------------------------------------------
+        if (use_imu_ && std::abs(current_speed_) > 0.5) {
+            // 기하학적 정상 선회에 따르는 기준 요 레이트 (Yaw Rate = V * tan(steering) / Wheelbase)
+            double expected_yaw_rate = current_speed_ * std::tan(final_steering_angle) / wheelbase_;
+            double yaw_rate_error = expected_yaw_rate - current_yaw_rate_;
+            
+            // 오차가 클 경우 비례 보상을 통해 횡방향 슬립 억제 (카운터 스티어 효과)
+            final_steering_angle += yaw_rate_gain_ * yaw_rate_error;
+        }
 
         // 조향각 물리 한계 적용 (+-0.41 rad)
         final_steering_angle = std::max(-0.41, std::min(final_steering_angle, 0.41));
@@ -315,6 +347,8 @@ private:
     double decel_attenuation_;
     double base_max_accel_;
     double base_max_decel_;
+    bool use_imu_;
+    double yaw_rate_gain_;
 
     // 곡률 제어 관련 파라미터
     double max_lat_accel_;
@@ -326,12 +360,14 @@ private:
     double current_y_ = 0.0;
     double current_yaw_ = 0.0;
     double current_speed_ = 0.0;
+    double current_yaw_rate_ = 0.0; // 실측 Z축 각속도
 
     // IMU 롤 상태 및 필터 변수
     double filtered_roll_ = 0.0;
     double filtered_roll_rate_ = 0.0;
     const double alpha_roll_ = 0.15;
     const double alpha_roll_rate_ = 0.2;
+    const double alpha_yaw_rate_ = 0.2;
 
     double last_target_speed_ = 0.0;
     rclcpp::Time last_time_;
