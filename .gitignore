@@ -1,0 +1,32 @@
+# ROS 2 Build directories
+build/
+install/
+log/
+
+# VS Code settings
+.vscode/
+.vscode-shared/
+
+# Compiled files / Object files
+*.o
+*.obj
+*.so
+*.a
+*.la
+*.lo
+
+# IDE and OS files
+.DS_Store
+Thumbs.db
+*.user
+*.suo
+*.db
+*.ipch
+
+# Python compiled cache
+__pycache__/
+*.pyc
+
+# Local backup / temporary files
+*~
+*.swp

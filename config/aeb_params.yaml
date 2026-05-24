@@ -1,0 +1,7 @@
+/**:
+  aeb_node:
+    ros__parameters:
+      ttc_threshold: 0.35       # 충돌 판단 임계 시간 (TTC, 초단위)
+      scan_fov_deg: 120.0       # 전방 충돌 감지 각도 범위 (도, +-60도)
+      min_safe_dist: 0.15       # 강제 제동 최소 정지 거리 (m, 센서 기준 차량 앞단 최소 안전 영역)
+      latch_aeb: true           # 제동 트리거 후 잠금(정지 상태 유지) 활성화 여부
