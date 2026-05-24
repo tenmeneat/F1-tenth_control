@@ -1,4 +1,4 @@
-#include "f1tenth_control/stability_controller.hpp"
+#include "f1tenth_control/imu_stability_controller.hpp"
 #include <cmath>
 #include <algorithm>
 

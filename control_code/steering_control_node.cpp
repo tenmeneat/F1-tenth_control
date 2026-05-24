@@ -17,7 +17,7 @@
 #include "f1tenth_control/geometry_utils.hpp"
 #include "f1tenth_control/gap_follower.hpp"
 #include "f1tenth_control/velocity_profiler.hpp"
-#include "f1tenth_control/stability_controller.hpp"
+#include "f1tenth_control/imu_stability_controller.hpp"
 
 using namespace f1tenth_control;
 
