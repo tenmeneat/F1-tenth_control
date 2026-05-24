@@ -69,6 +69,7 @@ add_executable(steering_control_node
   control_code/geometry_utils.cpp
   control_code/gap_follower.cpp
   control_code/velocity_profiler.cpp
+  control_code/stability_controller.cpp
 )
 target_include_directories(steering_control_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

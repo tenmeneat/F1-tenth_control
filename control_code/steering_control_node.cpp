@@ -17,6 +17,7 @@
 #include "f1tenth_control/geometry_utils.hpp"
 #include "f1tenth_control/gap_follower.hpp"
 #include "f1tenth_control/velocity_profiler.hpp"
+#include "f1tenth_control/stability_controller.hpp"
 
 using namespace f1tenth_control;
 
@@ -90,6 +91,7 @@ public:
         // 3. 알고리즘 인스턴스 초기화 및 통신 채널 설정
         // ==========================================
         gap_follower_ = std::make_unique<GapFollower>(110.0, 0.38, 1.8, 0.41);
+        stability_controller_ = std::make_unique<StabilityController>(0.15, 0.2, 0.2);
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             "/odom", 10,
@@ -132,28 +134,10 @@ private:
 
     void imu_callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg) {
         if (!use_imu_) {
-            filtered_roll_ = 0.0;
-            filtered_roll_rate_ = 0.0;
-            current_yaw_rate_ = 0.0;
+            stability_controller_->reset();
             return;
         }
-
-        // 1. Quaternion -> Roll Angle 산출
-        auto q = msg->orientation;
-        double sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z);
-        double cosr_cosp = 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
-        double roll = std::atan2(sinr_cosp, cosr_cosp);
-
-        // Roll 각도 LPF 필터 적용
-        filtered_roll_ = alpha_roll_ * roll + (1.0 - alpha_roll_) * filtered_roll_;
-
-        // 2. Roll Rate (X축 각속도) LPF 적용
-        double roll_rate = msg->angular_velocity.x;
-        filtered_roll_rate_ = alpha_roll_rate_ * roll_rate + (1.0 - alpha_roll_rate_) * filtered_roll_rate_;
-
-        // 3. Yaw Rate (Z축 각속도) LPF 적용
-        double yaw_rate = msg->angular_velocity.z;
-        current_yaw_rate_ = alpha_yaw_rate_ * yaw_rate + (1.0 - alpha_yaw_rate_) * current_yaw_rate_;
+        stability_controller_->update_imu(msg->orientation, msg->angular_velocity.x, msg->angular_velocity.z);
     }
 
     void scan_callback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
@@ -254,8 +238,7 @@ private:
         // --------------------------------------------------------
         double attenuation = 0.0;
         if (use_imu_) {
-            attenuation = roll_rate_gain_ * std::abs(filtered_roll_rate_);
-            attenuation = std::min(attenuation, max_gain_attenuation_);
+            attenuation = stability_controller_->calculate_steering_attenuation(roll_rate_gain_, max_gain_attenuation_);
         }
         
         double current_steering_gain = base_steering_gain_ * (1.0 - attenuation);
@@ -264,13 +247,10 @@ private:
         // --------------------------------------------------------
         // IMU Yaw Rate 피드백을 이용한 횡슬립(오버/언더스티어) 능동 조향 보정
         // --------------------------------------------------------
-        if (use_imu_ && std::abs(current_speed_) > 0.5) {
-            // 기하학적 정상 선회에 따르는 기준 요 레이트 (Yaw Rate = V * tan(steering) / Wheelbase)
-            double expected_yaw_rate = current_speed_ * std::tan(final_steering_angle) / wheelbase_;
-            double yaw_rate_error = expected_yaw_rate - current_yaw_rate_;
-            
-            // 오차가 클 경우 비례 보상을 통해 횡방향 슬립 억제 (카운터 스티어 효과)
-            final_steering_angle += yaw_rate_gain_ * yaw_rate_error;
+        if (use_imu_) {
+            double correction = stability_controller_->calculate_yaw_rate_correction(
+                current_speed_, final_steering_angle, wheelbase_, yaw_rate_gain_);
+            final_steering_angle += correction;
         }
 
         // 조향각 물리 한계 적용 (+-0.41 rad)
@@ -284,8 +264,10 @@ private:
         // --------------------------------------------------------
         // Step 4. 롤 상태 인지형 가변 감속 제어 (ESC 가감속 필터 적용)
         // --------------------------------------------------------
-        double roll_ratio = std::abs(filtered_roll_) / max_roll_limit_;
-        roll_ratio = std::min(roll_ratio, 1.0);
+        double roll_ratio = 0.0;
+        if (use_imu_) {
+            roll_ratio = stability_controller_->calculate_roll_ratio(max_roll_limit_);
+        }
 
         // 롤 각도 비례하여 차량 동적 허용 가감속 폭 스케일링 (접지 불균형에 의한 스핀아웃 예방)
         double max_accel = base_max_accel_ * (1.0 - roll_ratio * decel_attenuation_);
@@ -360,14 +342,6 @@ private:
     double current_y_ = 0.0;
     double current_yaw_ = 0.0;
     double current_speed_ = 0.0;
-    double current_yaw_rate_ = 0.0; // 실측 Z축 각속도
-
-    // IMU 롤 상태 및 필터 변수
-    double filtered_roll_ = 0.0;
-    double filtered_roll_rate_ = 0.0;
-    const double alpha_roll_ = 0.15;
-    const double alpha_roll_rate_ = 0.2;
-    const double alpha_yaw_rate_ = 0.2;
 
     double last_target_speed_ = 0.0;
     rclcpp::Time last_time_;
@@ -379,6 +353,7 @@ private:
 
     // 알고리즘 인스턴스 독점 소유
     std::unique_ptr<GapFollower> gap_follower_;
+    std::unique_ptr<StabilityController> stability_controller_;
 
     // ROS 2 통신 개체
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
