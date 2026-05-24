@@ -6,6 +6,10 @@ if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
 
+# compile_commands.json 생성 활성화 (VS Code Linter 연동용)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+
 # ==============================================================================
 # 임베디드 제어 성능 극대화를 위한 컴파일 최적화 플래그 (-O3, -march=native)
 # ==============================================================================
