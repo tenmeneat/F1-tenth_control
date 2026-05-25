@@ -28,6 +28,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(ackermann_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(f110_msgs REQUIRED)
 
 # ==============================================================================
 # 1. Autonomous Emergency Braking (AEB) 노드 빌드
@@ -81,6 +82,7 @@ ament_target_dependencies(steering_control_node
   nav_msgs
   ackermann_msgs
   std_msgs
+  f110_msgs
 )
 
 # ==============================================================================

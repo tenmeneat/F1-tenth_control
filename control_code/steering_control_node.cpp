@@ -18,6 +18,7 @@
 #include "f1tenth_control/gap_follower.hpp"
 #include "f1tenth_control/velocity_profiler.hpp"
 #include "f1tenth_control/imu_stability_controller.hpp"
+#include "f110_msgs/msg/wpnt_array.hpp"
 
 using namespace f1tenth_control;
 
@@ -71,21 +72,14 @@ public:
         this->get_parameter("min_speed", min_speed_);
 
         // ==========================================
-        // 2. 글로벌 경로(Waypoints) 생성 및 곡률 프로파일링
+        // 2. 글로벌 경로(Waypoints) 구독 설정 (플래닝 팀 연동)
         // ==========================================
-        VelocityProfiler profiler;
-        waypoints_ = profiler.generate_figure_eight_path(8.0, 4.0, max_speed_);
-        profiler.generate_velocity_profile(waypoints_, max_lat_accel_, max_speed_, min_speed_, base_max_accel_, base_max_decel_);
+        auto qos_gl = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+        global_path_sub_ = this->create_subscription<f110_msgs::msg::WpntArray>(
+            "/global_waypoints", qos_gl,
+            std::bind(&SteeringControlNode::global_path_callback, this, std::placeholders::_1));
 
-        // 디버그용 요약 정보 출력
-        double min_p_speed = max_speed_;
-        double max_p_speed = 0.0;
-        for (const auto& wp : waypoints_) {
-            if (wp.speed < min_p_speed) min_p_speed = wp.speed;
-            if (wp.speed > max_p_speed) max_p_speed = wp.speed;
-        }
-        RCLCPP_INFO(this->get_logger(), "최적 속도 프로파일 생성이 성공적으로 완료되었습니다.");
-        RCLCPP_INFO(this->get_logger(), " - 생성 속도 범위: [%.2f m/s ~ %.2f m/s]", min_p_speed, max_p_speed);
+        RCLCPP_INFO(this->get_logger(), "플래닝 팀의 글로벌 경로 토픽(/global_waypoints) 구독 설정 완료.");
 
         // ==========================================
         // 3. 알고리즘 인스턴스 초기화 및 통신 채널 설정
@@ -94,7 +88,7 @@ public:
         stability_controller_ = std::make_unique<StabilityController>(0.15, 0.2, 0.2);
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            "/odom", 10,
+            "/pf/pose/odom", 10,
             std::bind(&SteeringControlNode::odom_callback, this, std::placeholders::_1));
 
         imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
@@ -142,6 +136,29 @@ private:
 
     void scan_callback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
         latest_scan_ = msg;
+    }
+
+    void global_path_callback(const f110_msgs::msg::WpntArray::ConstSharedPtr msg) {
+        if (msg->wpnts.empty()) {
+            RCLCPP_WARN(this->get_logger(), "Received empty global waypoints.");
+            return;
+        }
+
+        waypoints_.clear();
+        waypoints_.reserve(msg->wpnts.size());
+
+        for (const auto& wp : msg->wpnts) {
+            Waypoint interp_wp;
+            interp_wp.x = wp.x_m;
+            interp_wp.y = wp.y_m;
+            interp_wp.speed = wp.vx_mps;
+            interp_wp.curvature = wp.kappa_radpm;
+            interp_wp.raw_speed_limit = wp.vx_mps;
+            waypoints_.push_back(interp_wp);
+        }
+
+        last_target_idx_ = 0;
+        RCLCPP_INFO(this->get_logger(), "🔄 플래닝 팀의 글로벌 경로 수신 완료! 웨이포인트 개수: %zu", waypoints_.size());
     }
 
     /**
@@ -359,6 +376,7 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+    rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr global_path_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
 
