@@ -52,6 +52,7 @@ public:
         this->declare_parameter<double>("max_lat_accel", 4.0);         // 최대 허용 횡가속도 (m/s^2)
         this->declare_parameter<double>("max_speed", 7.0);             // 직선 코스 최대 한계 속도 (m/s)
         this->declare_parameter<double>("min_speed", 2.0);             // 급코너 및 장애물 우회 최소 속도 (m/s)
+        this->declare_parameter<std::string>("odom_topic", "/pf/pose/odom"); // 오도메트리 토픽명
 
         // 파라미터 값 로드
         this->get_parameter("wheelbase", wheelbase_);
@@ -70,6 +71,7 @@ public:
         this->get_parameter("max_lat_accel", max_lat_accel_);
         this->get_parameter("max_speed", max_speed_);
         this->get_parameter("min_speed", min_speed_);
+        this->get_parameter("odom_topic", odom_topic_);
 
         // ==========================================
         // 2. 글로벌 경로(Waypoints) 구독 설정 (플래닝 팀 연동)
@@ -88,7 +90,7 @@ public:
         stability_controller_ = std::make_unique<StabilityController>(0.15, 0.2, 0.2);
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            "/pf/pose/odom", 10,
+            odom_topic_, 10,
             std::bind(&SteeringControlNode::odom_callback, this, std::placeholders::_1));
 
         imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
@@ -216,12 +218,60 @@ private:
     }
 
     void control_loop() {
-        if (waypoints_.empty()) return;
-
+        RCLCPP_INFO(this->get_logger(), "DEBUG: control_loop() entry. Waypoints empty: %d, latest_scan: %s", 
+                    waypoints_.empty(), latest_scan_ ? "YES" : "NO");
         rclcpp::Time current_time = this->now();
         double dt = (current_time - last_time_).seconds();
         if (dt <= 0.0) dt = 0.02;
         last_time_ = current_time;
+
+        // 글로벌 경로가 없는 경우 -> 순수 라이다 기반 Gap Follower로 무한 회피 주행
+        if (waypoints_.empty()) {
+            double avoid_steering_angle = 0.0;
+            RCLCPP_INFO(this->get_logger(), "DEBUG: calling process_scan...");
+            bool obstacle_detected = gap_follower_->process_scan(latest_scan_, avoid_steering_angle);
+            RCLCPP_INFO(this->get_logger(), "DEBUG: process_scan returned. Obstacle: %d, angle: %.4f", 
+                        obstacle_detected, avoid_steering_angle);
+
+            double final_steering_angle = 0.0;
+            double final_speed = 0.0;
+
+            if (obstacle_detected) {
+                final_steering_angle = avoid_steering_angle;
+                final_speed = min_speed_; // 2.0 m/s
+            } else {
+                final_steering_angle = 0.0;
+                final_speed = 3.0; // 3.0 m/s
+            }
+
+            double speed_error = final_speed - current_speed_;
+            double cmd_speed = last_target_speed_;
+            double max_accel = base_max_accel_;
+            double max_decel = base_max_decel_;
+
+            if (speed_error > 0.0) {
+                cmd_speed += std::min(speed_error, max_accel * dt);
+                if (cmd_speed > final_speed) cmd_speed = final_speed;
+            } else {
+                cmd_speed += std::max(speed_error, -max_decel * dt);
+                if (cmd_speed < final_speed) cmd_speed = final_speed;
+            }
+            last_target_speed_ = cmd_speed;
+
+            auto drive_msg = ackermann_msgs::msg::AckermannDriveStamped();
+            drive_msg.header.stamp = this->now();
+            drive_msg.header.frame_id = "base_link";
+            drive_msg.drive.steering_angle = final_steering_angle;
+            drive_msg.drive.speed = cmd_speed;
+            drive_msg.drive.acceleration = (cmd_speed - current_speed_) / dt;
+            
+            RCLCPP_INFO(this->get_logger(), "DEBUG: Publishing drive command: steer=%.4f, speed=%.4f", final_steering_angle, cmd_speed);
+            drive_pub_->publish(drive_msg);
+
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "[Pure GapFollower Mode] Steering: %.2f rad, Speed: %.2f m/s", final_steering_angle, cmd_speed);
+            return;
+        }
 
         // --------------------------------------------------------
         // Step 1. 속도 비례 동적 룩어헤드 계산 (Dynamic Look-ahead)
@@ -311,9 +361,11 @@ private:
         if (speed_error > 0.0) {
             double speed_change = std::min(speed_error, max_accel * dt);
             final_speed += speed_change;
+            if (final_speed > target_speed) final_speed = target_speed;
         } else {
             double speed_change = std::max(speed_error, -max_decel * dt);
             final_speed += speed_change;
+            if (final_speed < target_speed) final_speed = target_speed;
         }
         last_target_speed_ = final_speed;
 
@@ -348,6 +400,7 @@ private:
     double base_max_decel_;
     bool use_imu_;
     double yaw_rate_gain_;
+    std::string odom_topic_;
 
     // 곡률 제어 관련 파라미터
     double max_lat_accel_;

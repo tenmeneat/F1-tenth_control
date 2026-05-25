@@ -29,6 +29,7 @@ public:
         this->declare_parameter<int>("emergency_button", 1);         // B 버튼 (기본 1)
         this->declare_parameter<int>("boost_button", 5);             // RB 버튼 (기본 5)
         this->declare_parameter<bool>("is_simulation", false);       // 시뮬레이터 환경 모드 여부
+        this->declare_parameter<bool>("force_autonomous", false);     // 조이스틱 연결 없이 자율주행 모드 즉시 기동 여부
 
         this->get_parameter("max_steering_angle", max_steering_angle_);
         this->get_parameter("max_speed", max_speed_);
@@ -38,9 +39,12 @@ public:
         this->get_parameter("emergency_button", emergency_button_);
         this->get_parameter("boost_button", boost_button_);
         this->get_parameter("is_simulation", is_simulation_);
+        this->get_parameter("force_autonomous", force_autonomous_);
 
         // 기본 제어 모드 설정 (시뮬레이터이면 MANUAL로 대기, 실차이면 AUTONOMOUS로 시작)
-        if (is_simulation_) {
+        if (force_autonomous_) {
+            current_mode_ = ControlMode::AUTONOMOUS;
+        } else if (is_simulation_) {
             current_mode_ = ControlMode::MANUAL;
         } else {
             current_mode_ = ControlMode::AUTONOMOUS;
@@ -273,6 +277,7 @@ private:
     int emergency_button_;
     int boost_button_;
     bool is_simulation_;
+    bool force_autonomous_;
 
     // 제어 목표 변수
     double target_steering_angle_ = 0.0;
