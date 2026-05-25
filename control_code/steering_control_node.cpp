@@ -86,7 +86,7 @@ public:
         // ==========================================
         // 3. 알고리즘 인스턴스 초기화 및 통신 채널 설정
         // ==========================================
-        gap_follower_ = std::make_unique<GapFollower>(110.0, 0.38, 1.8, 0.41);
+        gap_follower_ = std::make_unique<GapFollower>(180.0, 0.38, 3.0, 0.41);
         stability_controller_ = std::make_unique<StabilityController>(0.15, 0.2, 0.2);
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -226,18 +226,28 @@ private:
         // 글로벌 경로가 없는 경우 -> 순수 라이다 기반 Gap Follower로 무한 회피 주행
         if (waypoints_.empty()) {
             double avoid_steering_angle = 0.0;
-            bool obstacle_detected = gap_follower_->process_scan(latest_scan_, avoid_steering_angle);
+            double min_obstacle_dist = 999.0;
+            bool obstacle_detected = gap_follower_->process_scan(latest_scan_, avoid_steering_angle, min_obstacle_dist);
 
-            double final_steering_angle = 0.0;
-            double final_speed = 0.0;
+            // 항상 gap 방향으로 조향 (장애물 유무 무관하게 가장 열린 방향으로) + 조향 안정화 LPF 적용
+            double final_steering_angle = avoid_steering_angle;
+            const double steer_filter_alpha = 0.70; 
+            final_steering_angle = steer_filter_alpha * final_steering_angle + (1.0 - steer_filter_alpha) * last_steering_angle_;
+            last_steering_angle_ = final_steering_angle;
 
-            if (obstacle_detected) {
-                final_steering_angle = avoid_steering_angle;
-                final_speed = min_speed_; // 2.0 m/s
-            } else {
-                final_steering_angle = 0.0;
-                final_speed = 3.0; // 3.0 m/s
-            }
+            // 최소 장애물 거리 기반 속도 스케일링
+            // dist >= 4.0m → max_speed(3.5), dist <= 1.0m → min_speed(1.2), 선형 보간
+            const double speed_dist_max = 4.0;
+            const double speed_dist_min = 1.0;
+            const double max_speed = 3.5;
+            const double target_min_speed = 1.2; // 코너 안정 속도 하향
+            double speed_ratio = (min_obstacle_dist - speed_dist_min) / (speed_dist_max - speed_dist_min);
+            speed_ratio = std::max(0.0, std::min(1.0, speed_ratio));
+            double final_speed = target_min_speed + speed_ratio * (max_speed - target_min_speed);
+
+            // 조향각이 클수록 추가 감속 (급커브 안정성)
+            double steer_ratio = std::abs(final_steering_angle) / 0.41;
+            final_speed *= (1.0 - 0.50 * steer_ratio); // 최대 조향 시 50% 감속
 
             double speed_error = final_speed - current_speed_;
             double cmd_speed = last_target_speed_;
@@ -262,7 +272,8 @@ private:
             drive_pub_->publish(drive_msg);
 
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "[Pure GapFollower Mode] Steering: %.2f rad, Speed: %.2f m/s", final_steering_angle, cmd_speed);
+                "[Pure GapFollower Mode] Steering: %.2f rad, Speed: %.2f m/s, MinDist: %.2f m",
+                final_steering_angle, cmd_speed, min_obstacle_dist);
             return;
         }
 
@@ -279,7 +290,8 @@ private:
         // Step 1-1. 장애물 감지 및 로컬 회피 조향(Reactive Gap Follower) 연산
         // --------------------------------------------------------
         double avoid_steering_angle = 0.0;
-        bool obstacle_detected = gap_follower_->process_scan(latest_scan_, avoid_steering_angle);
+        double avoid_min_dist = 999.0;
+        bool obstacle_detected = gap_follower_->process_scan(latest_scan_, avoid_steering_angle, avoid_min_dist);
 
         // --------------------------------------------------------
         // Step 2. Pure Pursuit 조향각 산출
@@ -407,6 +419,7 @@ private:
     double current_speed_ = 0.0;
 
     double last_target_speed_ = 0.0;
+    double last_steering_angle_ = 0.0;
     rclcpp::Time last_time_;
 
     // 최적화 로컬 윈도우 인덱스

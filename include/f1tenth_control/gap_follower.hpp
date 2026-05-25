@@ -15,9 +15,12 @@ public:
      * LiDAR 스캔 데이터를 바탕으로 장애물 감지 여부와 회피 조향각을 계산합니다.
      * @param msg 입력 scan 메시지
      * @param avoid_steering_angle 반환할 회피 조향각 (rad)
+     * @param min_obstacle_dist FOV 내 최소 장애물 거리 (m)
      * @return 장애물 감지 여부
      */
-    bool process_scan(const sensor_msgs::msg::LaserScan::ConstSharedPtr& msg, double& avoid_steering_angle);
+    bool process_scan(const sensor_msgs::msg::LaserScan::ConstSharedPtr& msg,
+                      double& avoid_steering_angle,
+                      double& min_obstacle_dist);
 
 private:
     double max_fov_deg_;
