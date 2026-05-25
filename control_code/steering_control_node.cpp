@@ -218,8 +218,6 @@ private:
     }
 
     void control_loop() {
-        RCLCPP_INFO(this->get_logger(), "DEBUG: control_loop() entry. Waypoints empty: %d, latest_scan: %s", 
-                    waypoints_.empty(), latest_scan_ ? "YES" : "NO");
         rclcpp::Time current_time = this->now();
         double dt = (current_time - last_time_).seconds();
         if (dt <= 0.0) dt = 0.02;
@@ -228,10 +226,7 @@ private:
         // 글로벌 경로가 없는 경우 -> 순수 라이다 기반 Gap Follower로 무한 회피 주행
         if (waypoints_.empty()) {
             double avoid_steering_angle = 0.0;
-            RCLCPP_INFO(this->get_logger(), "DEBUG: calling process_scan...");
             bool obstacle_detected = gap_follower_->process_scan(latest_scan_, avoid_steering_angle);
-            RCLCPP_INFO(this->get_logger(), "DEBUG: process_scan returned. Obstacle: %d, angle: %.4f", 
-                        obstacle_detected, avoid_steering_angle);
 
             double final_steering_angle = 0.0;
             double final_speed = 0.0;
@@ -264,8 +259,6 @@ private:
             drive_msg.drive.steering_angle = final_steering_angle;
             drive_msg.drive.speed = cmd_speed;
             drive_msg.drive.acceleration = (cmd_speed - current_speed_) / dt;
-            
-            RCLCPP_INFO(this->get_logger(), "DEBUG: Publishing drive command: steer=%.4f, speed=%.4f", final_steering_angle, cmd_speed);
             drive_pub_->publish(drive_msg);
 
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
