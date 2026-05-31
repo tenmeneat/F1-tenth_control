@@ -117,8 +117,8 @@ private:
             }
         }
 
-        // 3. 비상 정지 수동 해제 (Back: 6 + Start: 7 동시 입력)
-        if (msg->buttons[6] == 1 && msg->buttons[7] == 1) {
+        // 3. 비상 정지 수동 해제 (X 버튼: msg->buttons[2] 입력)
+        if (msg->buttons[2] == 1) {
             if (is_emergency_stop_) {
                 is_emergency_stop_ = false;
                 current_mode_ = is_simulation_ ? ControlMode::MANUAL : ControlMode::AUTONOMOUS;
@@ -263,7 +263,7 @@ private:
         std::cout << " [XBox Key Mapping Guides] \n";
         std::cout << "  * LB Button           : Toggle AUTO / MANUAL Mode\n";
         std::cout << "  * B Button            : Emergency Stop (Latch)\n";
-        std::cout << "  * Back + Start Buttons: Reset Emergency Stop Latch\n";
+        std::cout << "  * X Button            : Reset Emergency Stop Latch\n";
         std::cout << "=========================================================\n";
         std::flush(std::cout);
     }
