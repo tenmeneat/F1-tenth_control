@@ -11,6 +11,7 @@ struct Waypoint {
     double speed;      // 최종 적용되는 곡률 기반 최적 속도
     double curvature;  // 계산된 기하학적 곡률 (1/R)
     double raw_speed_limit; // 가감속 한계 적용 전의 순수 횡방향 마찰 한계 속도
+    double yaw;        // 맵 웨이포인트의 진행방향 각도 (heading)
 };
 
 #endif // F1TENTH_CONTROL_TYPES_HPP_

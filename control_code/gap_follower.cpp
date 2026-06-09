@@ -57,12 +57,13 @@ bool GapFollower::process_scan(const sensor_msgs::msg::LaserScan::ConstSharedPtr
         if (r < trigger_dist_ && r > msg->range_min) {
             obstacle_detected = true;
             // 장애물 감지 시 주변 빔들을 0으로 마스킹 (세이프티 버블)
+            // angular radius → index radius: avoids iterating all beams per obstacle O(n²→O(n))
             double bubble_angle = std::atan2(safety_bubble_dist_, r);
-            for (size_t j = 0; j < msg->ranges.size(); ++j) {
-                double other_angle = msg->angle_min + j * msg->angle_increment;
-                if (std::abs(other_angle - angle) < bubble_angle) {
-                    processed_ranges[j] = 0.0; // 갈 수 없는 공간으로 마스킹
-                }
+            int bubble_half = static_cast<int>(bubble_angle / msg->angle_increment) + 1;
+            int j_start = std::max(0, static_cast<int>(i) - bubble_half);
+            int j_end = std::min(static_cast<int>(msg->ranges.size()) - 1, static_cast<int>(i) + bubble_half);
+            for (int j = j_start; j <= j_end; ++j) {
+                processed_ranges[j] = 0.0; // 갈 수 없는 공간으로 마스킹
             }
         }
     }

@@ -1,0 +1,1 @@
+# Ignore this directory for colcon to avoid duplicate package conflict with 2026_IFAC/f1tenth_control

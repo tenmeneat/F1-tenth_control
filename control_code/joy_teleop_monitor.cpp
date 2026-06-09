@@ -140,19 +140,28 @@ private:
         }
 
         if (use_trigger_throttle_) {
-            double rt_val = msg->axes[5];
-            double lt_val = msg->axes[2];
+            double rt_val = msg->axes[5];  // RT: 1.0(놓음) → -1.0(꽉 누름)
+            double lt_val = msg->axes[2];  // LT: 1.0(놓음) → -1.0(꽉 누름)
 
-            double throttle = 0.0;
-            if (rt_val != 0.0 || rt_pressed_once_) {
+            // 트리거가 처음으로 실제 눌렸는지(1.0이 아닌 값) 감지
+            // 일부 드라이버에서는 입력 전에 0.0을 보내는데, 이를 "눌린 것"으로 처리하지 않음
+            if (!rt_pressed_once_ && rt_val != 0.0 && rt_val != 1.0) {
                 rt_pressed_once_ = true;
-                throttle = (1.0 - rt_val) / 2.0;
+            }
+            if (!lt_pressed_once_ && lt_val != 0.0 && lt_val != 1.0) {
+                lt_pressed_once_ = true;
+            }
+
+            // 트리거 입력이 한 번도 없었으면 해당 축은 0으로 처리
+            double throttle = 0.0;
+            if (rt_pressed_once_) {
+                // rt_val: 1.0(놓음)→0, -1.0(꽉 누름)→1.0
+                throttle = std::max(0.0, (1.0 - rt_val) / 2.0);
             }
 
             double brake = 0.0;
-            if (lt_val != 0.0 || lt_pressed_once_) {
-                lt_pressed_once_ = true;
-                brake = (1.0 - lt_val) / 2.0;
+            if (lt_pressed_once_) {
+                brake = std::max(0.0, (1.0 - lt_val) / 2.0);
             }
 
             target_speed_ = (throttle - brake) * current_max_speed;

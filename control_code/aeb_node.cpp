@@ -41,7 +41,7 @@ public:
             std::bind(&AutonomousEmergencyBraking::scan_callback, this, std::placeholders::_1));
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            "/pf/pose/odom", 10,
+            "/ego_racecar/odom", 10,
             std::bind(&AutonomousEmergencyBraking::odom_callback, this, std::placeholders::_1));
 
         // 수동 리셋 구독
