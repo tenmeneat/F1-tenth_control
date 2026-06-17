@@ -42,6 +42,11 @@ public:
         this->declare_parameter<double>("t_clip_max", 5.0);
         this->declare_parameter<double>("lateral_error_coeff", 1.0);
 
+        // Heading-error 댐핑 게인 (Stanley형 정렬항): 순수 L1 cross-track 제어의 복구 시
+        // heading 오버슈트(라인 가로지름→외벽 충돌)를 억제. 0이면 기존 순수 L1 동작.
+        // 런타임 파라미터로 A/B 튜닝 가능. 기본 0.0(비활성).
+        this->declare_parameter<double>("heading_damping_gain", 0.0);
+
         // 조향각 스케일러 파라미터 (가속 시 조향 급격화 방지를 위해 완화)
         this->declare_parameter<double>("acceleration_scaler_for_steering", 1.0);
         this->declare_parameter<double>("deceleration_scaler_for_steering", 0.95);
@@ -75,6 +80,12 @@ public:
         // 로컬 장애물 회피 제어
         this->declare_parameter<bool>("enable_obstacle_avoidance", false);
 
+        // 안전라인 시프트: 플래너 최적라인이 벽에 과도하게 붙은(클리어런스 부족) 구간에서
+        // 차체(길이 0.58m)가 벽을 스치는 충돌을 방지하기 위해, 메시지의 d_left/d_right(트랙 경계까지
+        // 거리)를 이용해 해당 웨이포인트를 트랙 중심 쪽으로 밀어 최소 벽 클리어런스 C를 확보한다.
+        // C는 차량 반폭+자세/추종 마진. 0이면 원본 라인 그대로(비활성).
+        this->declare_parameter<double>("wall_safety_margin", 0.6);
+
         // 파라미터 값 로드
         this->get_parameter("wheelbase", wheelbase_);
         this->get_parameter("sim", sim_);
@@ -83,6 +94,7 @@ public:
         this->get_parameter("t_clip_min", t_clip_min_);
         this->get_parameter("t_clip_max", t_clip_max_);
         this->get_parameter("lateral_error_coeff", lateral_error_coeff_);
+        this->get_parameter("heading_damping_gain", heading_damping_gain_);
         this->get_parameter("acceleration_scaler_for_steering", acceleration_scaler_for_steering_);
         this->get_parameter("deceleration_scaler_for_steering", deceleration_scaler_for_steering_);
         this->get_parameter("start_scale_speed", start_scale_speed_);
@@ -104,6 +116,7 @@ public:
         this->get_parameter("min_speed", min_speed_);
         this->get_parameter("odom_topic", odom_topic_);
         this->get_parameter("enable_obstacle_avoidance", enable_obstacle_avoidance_);
+        this->get_parameter("wall_safety_margin", wall_safety_margin_);
 
         int cl_count;
         this->get_parameter("curvature_lookahead_count", cl_count);
@@ -239,6 +252,30 @@ private:
             interp_wp.curvature = wp.kappa_radpm;
             interp_wp.raw_speed_limit = wp.vx_mps;
             interp_wp.yaw = wp.psi_rad;
+
+            // 안전라인 시프트: 벽에 너무 붙은 점을 트랙 중심 쪽으로 이동시켜 최소 클리어런스 C 확보.
+            // d_left/d_right = 경로점에서 좌/우 트랙 경계까지의 거리. normal_left=(-sin psi, cos psi)는
+            // 진행방향 좌측. +방향 이동 시 d_left↓·d_right↑ (즉 우벽에서 멀어짐).
+            if (wall_safety_margin_ > 1e-3) {
+                const double C = wall_safety_margin_;
+                const double dl = wp.d_left;
+                const double dr = wp.d_right;
+                double shift = 0.0; // +면 좌측(우벽에서 멀어짐), -면 우측(좌벽에서 멀어짐)
+                if (dr < C && dl > C) {
+                    shift = std::min(C - dr, dl - C);        // 우벽이 가까움 → 좌측으로
+                } else if (dl < C && dr > C) {
+                    shift = -std::min(C - dl, dr - C);       // 좌벽이 가까움 → 우측으로
+                } else if (dr < C && dl < C) {
+                    shift = (dl - dr) / 2.0;                 // 양쪽 다 좁음 → 통로 중앙 정렬
+                }
+                if (std::abs(shift) > 1e-4) {
+                    const double nx = -std::sin(wp.psi_rad);
+                    const double ny =  std::cos(wp.psi_rad);
+                    interp_wp.x += shift * nx;
+                    interp_wp.y += shift * ny;
+                }
+            }
+
             waypoints_.push_back(interp_wp);
         }
 
@@ -469,6 +506,17 @@ private:
         // L1 조향과 피드포워드를 블렌딩 (curvature_ff_blend_ 비율만큼 피드포워드 혼합)
         steering_angle = (1.0 - curvature_ff_blend_) * steering_angle + curvature_ff_blend_ * steer_ff;
 
+        // 3.7) Heading-error 댐핑 (Stanley형 정렬항)
+        // 순수 L1 cross-track 제어는 횡오차 복구 시 경로 접선을 지나쳐 heading이 오버슈트(라인을
+        // 비스듬히 가로질러 외벽 충돌)하는 약점이 있다. 경로 접선(psi)과 차량 헤딩의 정렬 오차에
+        // 비례하는 보정을 더해 PD형 거동으로 만들어 오버슈트/진동을 억제한다.
+        // 부호 검증: 정상 추종 시 (psi - yaw) 중앙값 ≈ 0, 좌측 정렬 필요 시 양수 → +조향(좌) 규약 일치.
+        double path_heading = waypoints_[closest_idx].yaw;
+        double heading_err = path_heading - current_yaw_;
+        while (heading_err > PI) heading_err -= 2.0 * PI;
+        while (heading_err < -PI) heading_err += 2.0 * PI;
+        steering_angle += heading_damping_gain_ * heading_err;
+
         // 4) Rate limit
         double threshold = 0.4;
         steering_angle = std::max(last_steering_angle_ - threshold, std::min(steering_angle, last_steering_angle_ + threshold));
@@ -576,6 +624,7 @@ private:
     double t_clip_min_;
     double t_clip_max_;
     double lateral_error_coeff_;
+    double heading_damping_gain_;
 
     // Steer Scaling
     double acceleration_scaler_for_steering_;
@@ -599,6 +648,7 @@ private:
     double min_speed_;
     std::string odom_topic_;
     bool enable_obstacle_avoidance_;
+    double wall_safety_margin_;
 
     // 곡률 룩어헤드 감속
     size_t curvature_lookahead_count_;
