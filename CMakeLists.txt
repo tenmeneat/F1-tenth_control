@@ -66,11 +66,9 @@ ament_target_dependencies(joy_teleop_monitor
 # ==============================================================================
 # 3. Steering Control 노드 빌드
 # ==============================================================================
-add_executable(steering_control_node 
+add_executable(steering_control_node
   control_code/steering_control_node.cpp
-  control_code/geometry_utils.cpp
   control_code/gap_follower.cpp
-  control_code/velocity_profiler.cpp
   control_code/imu_stability_controller.cpp
 )
 target_include_directories(steering_control_node PUBLIC

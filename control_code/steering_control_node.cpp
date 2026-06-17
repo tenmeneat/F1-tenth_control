@@ -15,9 +15,7 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 
 #include "f1tenth_control/types.hpp"
-#include "f1tenth_control/geometry_utils.hpp"
 #include "f1tenth_control/gap_follower.hpp"
-#include "f1tenth_control/velocity_profiler.hpp"
 #include "f1tenth_control/imu_stability_controller.hpp"
 #include "f1tenth_control/steering_lookup_table.hpp"
 #include "f110_msgs/msg/wpnt_array.hpp"
@@ -33,8 +31,7 @@ public:
         // 1. ROS 2 파라미터 선언 및 초기화
         // ==========================================
         this->declare_parameter<double>("wheelbase", 0.33);
-        this->declare_parameter<bool>("sim", true);
-        
+
         // L1 Guidance Control 파라미터
         this->declare_parameter<double>("l1_gain", 0.5);
         this->declare_parameter<double>("l1_distance", 0.3); // Python's m_l1
@@ -76,9 +73,6 @@ public:
         this->declare_parameter<double>("max_lateral_accel", 6.0);
         this->declare_parameter<double>("curvature_ff_blend", 0.0); // 곡률 FF 비활성: 검증된 순수 L1 격리 (원본 MAP 컨트롤러 미보유 항목)
         this->declare_parameter<std::string>("odom_topic", "/ego_racecar/odom");
-        
-        // 로컬 장애물 회피 제어
-        this->declare_parameter<bool>("enable_obstacle_avoidance", false);
 
         // 안전라인 시프트: 플래너 최적라인이 벽에 과도하게 붙은(클리어런스 부족) 구간에서
         // 차체(길이 0.58m)가 벽을 스치는 충돌을 방지하기 위해, 메시지의 d_left/d_right(트랙 경계까지
@@ -88,7 +82,6 @@ public:
 
         // 파라미터 값 로드
         this->get_parameter("wheelbase", wheelbase_);
-        this->get_parameter("sim", sim_);
         this->get_parameter("l1_gain", l1_gain_);
         this->get_parameter("l1_distance", l1_distance_);
         this->get_parameter("t_clip_min", t_clip_min_);
@@ -115,7 +108,6 @@ public:
         this->get_parameter("max_speed", max_speed_);
         this->get_parameter("min_speed", min_speed_);
         this->get_parameter("odom_topic", odom_topic_);
-        this->get_parameter("enable_obstacle_avoidance", enable_obstacle_avoidance_);
         this->get_parameter("wall_safety_margin", wall_safety_margin_);
 
         int cl_count;
@@ -433,7 +425,6 @@ private:
             idx_a = next_idx;
             if (idx_a == closest_idx) break; // 한바퀴 도는 것 방지
         }
-        last_lookahead_idx_ = idx_a;
 
         double L1_x = waypoints_[idx_a].x;
         double L1_y = waypoints_[idx_a].y;
@@ -616,7 +607,6 @@ private:
     // 9. 멤버 변수 선언
     // ==========================================
     double wheelbase_;
-    bool sim_;
 
     // L1 Guidance
     double l1_gain_;
@@ -647,7 +637,6 @@ private:
     double max_speed_;
     double min_speed_;
     std::string odom_topic_;
-    bool enable_obstacle_avoidance_;
     double wall_safety_margin_;
 
     // 곡률 룩어헤드 감속
@@ -672,7 +661,6 @@ private:
     rclcpp::Time last_time_;
 
     size_t last_target_idx_ = 0;
-    size_t last_lookahead_idx_ = 0;
 
     std::vector<Waypoint> waypoints_;
     double mean_track_curvature_ = 0.0;
