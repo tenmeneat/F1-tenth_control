@@ -92,6 +92,33 @@ LiDAR TTC(Time-To-Collision) 기반 독립 안전 노드.
             /aeb_active                        aeb_node가 직접 brake 송출
 ```
 
+```mermaid
+graph TD
+    SubOdom["/ego_racecar/odom<br>차량 위치 & 속도"]
+    SubIMU["/imu/data<br>롤 각도 φ, 롤레이트 φ̇"]
+    Waypoints["/global_waypoints WpntArray<br>글로벌 경로"]
+
+    Controller["steering_control_node<br>(C++, 50 Hz)"]
+
+    SubL1["1. L1 Guidance<br>기하학적 조향각 계산"]
+    SubTransient["2. 과도기 응답 보상<br>롤레이트 기반 조향 게인 감쇄"]
+    SubESC["3. 롤 인지형 가변 감속 ESC<br>롤 각도 기반 가감속 Saturation"]
+
+    PubDrive["/drive_autonomous<br>AckermannDriveStamped"]
+
+    SubOdom --> Controller
+    SubIMU --> Controller
+    Waypoints --> Controller
+
+    Controller --> SubL1
+    Controller --> SubTransient
+    Controller --> SubESC
+
+    SubL1 --> PubDrive
+    SubTransient --> SubL1
+    SubESC --> PubDrive
+```
+
 ## 핵심 제어 알고리즘 (steering_control_node)
 
 1. **최근접 웨이포인트 탐색** — 지난 인덱스 주변 윈도우 스캔, 2.5m 초과 이탈 시 전역 재탐색(failsafe)
@@ -101,7 +128,32 @@ LiDAR TTC(Time-To-Collision) 기반 독립 안전 노드.
 5. **동적 스케일러** — 가감속/속도/곡률 FF 보정, rate limit(0.4), 물리 한계 ±0.41 클리핑
 6. **롤 인지형 가변 가감속(ESC)** — IMU 롤 비율로 가속/감속 한계를 동적 축소, 전복/스핀 방지
 
-설계 배경 이론은 [steering_control_overview.md](steering_control_overview.md) 참고.
+### 제어 이론 상세
+
+#### L1 Guidance (Pure Pursuit 계열)
+
+속도 비례 룩어헤드 거리로 전방 목표점을 선정, 횡가속도 명령을 계산한 뒤 LUT로 조향각을 결정합니다.
+
+$$\delta = \arctan\!\left(\frac{2L\sin\alpha}{L_{lt}}\right), \quad L_{lt} = k_{ld} \cdot v + L_{min}$$
+
+- $L$: 휠베이스 (0.33 m), $\alpha$: 차량 헤딩과 목표점 사이 각도
+- $k_{ld}$: `l1_gain`, $L_{min}$: `l1_distance`
+
+#### 과도기 응답 보상 (Transient Response Compensation)
+
+코너 진입 시 서스펜션 Settling 전 과도 상태에서 롤레이트($\dot{\phi}$)가 급증할 때 조향 게인을 감쇄하여 타이어 슬립을 방지합니다.
+
+$$K_{p,\text{steer}} = K_{p,\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(k_{\text{roll\_rate}} \cdot |\dot{\phi}|,\ 0,\ \beta_{\max}\right)\Bigr)$$
+
+- $k_{\text{roll\_rate}}$: 감쇄 민감도 게인, $\beta_{\max}$: 최대 감쇄 한계 (예: 0.5 → 최대 50% 감쇄)
+
+#### 롤 인지형 가변 감속 — Roll-Aware ESC
+
+롤 각도($\phi$)가 크면 타이어 하중 이동으로 마찰 한계가 줄어드므로, 가감속 한계를 비례 축소하여 스핀을 방지합니다.
+
+$$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\phi_{\text{limit}}},\ 0,\ 1\right) \cdot \gamma_{\text{decel}}\Bigr)$$
+
+- $\phi_{\text{limit}}$: `max_roll_limit` (예: 0.15 rad ≈ 8.6°), $\gamma_{\text{decel}}$: `decel_attenuation`
 
 ## 주요 파라미터
 
