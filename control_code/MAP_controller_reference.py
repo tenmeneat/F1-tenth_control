@@ -1,3 +1,16 @@
+# =============================================================================
+# MAP_controller_reference.py
+# -----------------------------------------------------------------------------
+# 대회용 C++ 노드 control_code/steering_control_node.cpp 의 **포팅 원본**.
+# f110/ForzaETH 스택 기반 Frenet MAP 컨트롤러(L1 Guidance → 목표 횡가속도 →
+# Steering LUT → 조향각)로, 현재 노드 알고리즘의 원전(source of truth)이다.
+#
+# ⚠️ 참조 전용 — 빌드/실행되지 않는다.
+#    - 루트 COLCON_IGNORE 로 이 저장소에서는 빌드 대상 아님
+#    - FrenetConverter, /local_waypoints, /pf/pose/odom, /state 등 이 스택에
+#      연결돼 있지 않은 의존성을 요구하므로 단독 실행 불가
+#    대회 주행에는 사용되지 않으며, 알고리즘 대조/재포팅용으로만 보존한다.
+# =============================================================================
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy

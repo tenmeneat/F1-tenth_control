@@ -181,7 +181,7 @@ $$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\p
 
 ## 참고 / 비활성 자산
 
-- `control_code/MAP_controller_prev.py` — Frenet 기반 원본 Python MAP 컨트롤러 (참조용, 빌드 안 됨)
+- `control_code/MAP_controller_reference.py` — Frenet 기반 원본 Python MAP 컨트롤러 (steering_control_node.cpp의 포팅 원전, 참조용·빌드 안 됨)
 - `vesc_mcconf.xml` / `vesc_appconf.xml` — VESC 모터/앱 설정 (전류 max 60A, max ERPM 40000 등)
 - `docs/` — 하드웨어/IMU 통합 가이드, Technical Description Paper (.gitignore로 git 제외됨)
 

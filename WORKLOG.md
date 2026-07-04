@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-07-05 (예정) — 첫 실차 주행 & IMU/LUT 준비
+
+세션(07-04)에서 도출한 내일 현장 작업 순서. 의존관계상 순서 지킬 것.
+
+### 0. 사전: 코드 반영 · 빌드 · 깃 정리
+- F1tenth_control → 2026_IFAC rsync 동기화 후 `colcon build`(신규 `control_real.launch.py` 포함).
+- ⚠️ 깃: `simul_practice` 브랜치 non-fast-forward(팀원 선푸시) 상태.
+  `cd ~/2026_IFAC && git pull --autostash origin simul_practice && git push origin simul_practice`
+  로 병합 후 푸시. **`f1up` 재실행 금지**(빈 커밋에서 체인 끊김).
+
+### 1. 첫 실차 주행 — control_real.launch.py (신규)
+- 시뮬 런치와 차이: `odom_topic=/pf/pose/odom`, `max_speed=6.0`(직선캡), `use_imu=False`,
+  `is_simulation=True`(수동 조작 허용), AEB 포함(odom remap), `joy_node` 포함.
+- 하드웨어 브링업(vesc/lidar/particle_filter/planning) 먼저 떠서 `/scan`,`/pf/pose/odom`,
+  `/global_waypoints`,`/joy` 발행 확인.
+- 조이스틱(구형 Xbox + BT동글): `ls /dev/input/js0` 인식 확인(360 무선은 일반 동글 페어링 불가).
+  `ros2 topic echo /joy`로 버튼 매핑 실측 — 조향 axes[0], RT axes[5], LB buttons[4],
+  B buttons[1], X buttons[2], RB buttons[5]. 밀리면 코드/파라미터 조정.
+- 시작은 MANUAL 대기 → **바퀴 들고** 스틱/RT 반응 + B 비상정지·X 해제 검증 → LB로 자율 전환.
+- 자율 시 `ros2 topic echo /drive_autonomous`로 speed ≤ 6.0 캡 확인.
+
+### 2. VESC 내장 IMU 조사
+- VESC 모델 확인 → 내장 IMU 유무(VESC Tool Realtime Data의 IMU 탭 값 확인).
+- ROS: `vesc_driver` IMU publish 옵션 켜서 `sensor_msgs/Imu` 토픽 확인 → `/imu/data`로 연결(remap).
+- ⚠️ 축 검증: 손으로 롤/요 흔들며 `angular_velocity.x`(롤레이트)·`.z`(요레이트)·orientation
+  부호가 코드 가정과 맞는지(VESC 90° 장착 회전 감안).
+- VESC가 차 뒤쪽 장착(전후 중앙 아님): StabilityController는 각속도·자세만 써 **offset 영향 0**
+  → 축만 맞추면 됨. 단 LUT용 선형가속도엔 레버암 보정 필요하니 **전후거리 d를 자로 실측해 둘 것**.
+
+### 3. IMU 활성화 (조건 충족 시)
+- `use_imu=True` → 롤 인지 ESC(`calculate_roll_ratio`)는 이미 배선돼 있어 바로 동작.
+- 미배선 죽은 코드: `calculate_steering_attenuation`(과도 감쇄), `calculate_yaw_rate_correction`
+  (요레이트 카운터스티어) — A안(롤 ESC) 축검증 후 필요하면 control_loop에 배선(B안).
+
+### 4. LUT 진단 (IMU 완성 후에만)
+- 정상상태 원선회로 IMU 실측 횡가속도 vs LUT(NUC6_glc) 예측 비교(과도구간 피하면 뒤쪽 offset 무관).
+- 불일치 시: A안 스칼라 보정(CSV 셀×계수) / B안 정식 재피팅. ⚠️ 재피팅 툴체인 불완전
+  (상류 steering_lookup의 helpers·모델설정·테이블생성기 없음 → 복구 필요).
+- 교체는 `lookup_table_file` 파라미터로(코드 수정 불필요).
+
+### 오늘(07-04) 완료
+- 신규 `launch/control_real.launch.py` 작성·빌드 성공(실차 보수 프리셋 + joy_node + AEB).
+
+---
+
 ## 2026-06-17 — 코너 이탈 문제 해결 + 코드 최적화
 
 ### 1. CLAUDE.md 생성
@@ -52,7 +97,7 @@
 ### 보류/후속 과제
 - **LUT 하드코딩 절대경로**(`/home/tenmeneat/...` 폴백 3개): 대회 노트북에선 깨질 수 있어 정리 권장(현재 이 PC에선 동작해 보류).
 - **플래너 안전마진 재생성**(근본해결·속도 유지): 플래닝 담당에게 차폭+안전마진 반영 요청 시, 제어측 안전라인 시프트 없이 더 빠른 라인으로 완주 가능.
-- **`MAP_controller_prev.py`**: 선배 코드 원본(참고용, 빌드 대상 아님). VS Code 노란 줄은 ROS2 패키지 unresolved import + 미사용 import 경고(에러 아님). 참고 끝나면 삭제 가능.
+- **`MAP_controller_reference.py`**: 선배 코드 원본(참고용, 빌드 대상 아님). VS Code 노란 줄은 ROS2 패키지 unresolved import + 미사용 import 경고(에러 아님). 참고 끝나면 삭제 가능.
 - `curvature_ff_blend`·`heading_damping_gain` 토글은 기본 0(무효), 튜닝 훅으로 보존.
 
 ---
@@ -60,7 +105,7 @@
 ## 작년 대회 코드 대비 개선점 (new_map_con / MAP_controller.py)
 
 작년 대회 컨트롤러는 `2026_IFAC/new_map_con`의 Frenet 기반 Python MAP 컨트롤러
-(참조 복사본: `control_code/MAP_controller_prev.py`). 현재 `steering_control_node.cpp`는
+(참조 복사본: `control_code/MAP_controller_reference.py`). 현재 `steering_control_node.cpp`는
 그 **L1 Guidance + Steering LUT 핵심 알고리즘을 그대로 포팅**하고 주변을 강화한 것.
 
 | 항목 | 작년 (MAP_controller, Python) | 현재 (steering_control_node, C++) |
