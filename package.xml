@@ -16,6 +16,7 @@
   <depend>std_msgs</depend>
   <depend>f110_msgs</depend>
   <depend>ament_index_cpp</depend>
+  <depend>osqp_vendor</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
