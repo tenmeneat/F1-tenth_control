@@ -18,7 +18,6 @@
 #include "f1tenth_control/gap_follower.hpp"
 #include "f1tenth_control/imu_stability_controller.hpp"
 #include "f1tenth_control/steering_lookup_table.hpp"
-#include "f1tenth_control/mpc_controller.hpp"
 #include "f110_msgs/msg/wpnt_array.hpp"
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
@@ -81,26 +80,6 @@ public:
         // C는 차량 반폭+자세/추종 마진. 0이면 원본 라인 그대로(비활성).
         this->declare_parameter<double>("wall_safety_margin", 0.6);
 
-        // 속도 스케일: 플래너 vx_mps에 곱하는 계수(기본 1.0). 플래너 프로파일이 보수적일 때
-        // 랩타임 단축용으로 상향(곡률한계·max_speed가 안전캡). 1.3~1.5부터 점진 튜닝 권장.
-        this->declare_parameter<double>("speed_scale", 1.0);
-
-        // ==========================================
-        // MPC (Model Predictive Control) 파라미터
-        // ==========================================
-        // controller_type: "l1"(기본, 검증된 폴백) | "mpc"(전역좌표 kinematic LTV-MPC, 조향만)
-        // mpc는 미래 N스텝을 내다보고 조향각을 최적화하여 고속 추종력을 높인다.
-        // 종방향(속도)은 두 모드 공통으로 현행 로직 사용. solve 실패 시 그 사이클 L1로 자동 폴백.
-        this->declare_parameter<std::string>("controller_type", "l1");
-        this->declare_parameter<int>("mpc_N", 12);
-        this->declare_parameter<double>("mpc_Ts", 0.05);
-        this->declare_parameter<double>("mpc_q_x", 5.0);
-        this->declare_parameter<double>("mpc_q_y", 5.0);
-        this->declare_parameter<double>("mpc_q_yaw", 0.5);
-        this->declare_parameter<double>("mpc_r", 0.1);
-        this->declare_parameter<double>("mpc_r_delta", 5.0);
-        this->declare_parameter<double>("mpc_ddelta_max", 0.20);
-
         // 파라미터 값 로드
         this->get_parameter("wheelbase", wheelbase_);
         this->get_parameter("l1_gain", l1_gain_);
@@ -130,31 +109,6 @@ public:
         this->get_parameter("min_speed", min_speed_);
         this->get_parameter("odom_topic", odom_topic_);
         this->get_parameter("wall_safety_margin", wall_safety_margin_);
-        this->get_parameter("speed_scale", speed_scale_);
-
-        // MPC 파라미터 로드 및 컨트롤러 생성
-        std::string controller_type;
-        this->get_parameter("controller_type", controller_type);
-        use_mpc_ = (controller_type == "mpc");
-        {
-            MpcParams mp;
-            int mpc_n;
-            this->get_parameter("mpc_N", mpc_n);
-            mp.N = mpc_n;
-            this->get_parameter("mpc_Ts", mp.Ts);
-            mp.wheelbase = wheelbase_;
-            mp.lr = wheelbase_ * 0.5;
-            this->get_parameter("mpc_q_x", mp.q_x);
-            this->get_parameter("mpc_q_y", mp.q_y);
-            this->get_parameter("mpc_q_yaw", mp.q_yaw);
-            this->get_parameter("mpc_r", mp.r);
-            this->get_parameter("mpc_r_delta", mp.r_delta);
-            this->get_parameter("mpc_ddelta_max", mp.ddelta_max);
-            mp.delta_max = 0.41;  // 물리 조향 한계 (하드웨어 기준)
-            mpc_controller_ = std::make_unique<MPCController>(mp);
-            mpc_params_ = mp;
-        }
-        RCLCPP_INFO(this->get_logger(), "🧭 컨트롤러 타입: %s", use_mpc_ ? "MPC (조향)" : "L1 Guidance");
 
         int cl_count;
         this->get_parameter("curvature_lookahead_count", cl_count);
@@ -454,111 +408,14 @@ private:
         }
 
         // ==========================================
-        // 1.7 (공유) 횡오차 정규화·곡률 팩터 — L1/MPC 조향과 종방향에서 공통 사용
-        // ==========================================
-        double max_lat_e = 0.5;
-        double min_lat_e = 0.01;
-        double lat_e_clip = std::max(min_lat_e, std::min(lateral_error, max_lat_e));
-        double lat_e_norm = 0.5 * ((lat_e_clip - min_lat_e) / (max_lat_e - min_lat_e));
-        double curv_factor = std::max(0.0, std::min(2.0 * (mean_track_curvature_ / 0.8) - 2.0, 1.0));
-
-        double steering_angle = 0.0;
-        bool steering_done = false;
-
-        // 로깅/공유용 (L1 블록에서 채워지며, MPC 경로에선 기본값 유지)
-        double L1_distance = 0.0;
-        double L1_x = 0.0;
-        double L1_y = 0.0;
-        size_t idx_a = closest_idx;
-
-        // ==========================================
-        // 1.8 MPC 조향 (controller_type=mpc) — 미래 N스텝 예측 최적 조향각
-        // ==========================================
-        // 기준점을 정확히 arc-length(v·Ts) 지점에 **보간(interpolation)** 하여 샘플한다.
-        // 핵심: MPC 모델은 한 스텝에 v·Ts만 전진한다고 예측하므로, ref 간격도 정확히 v·Ts여야
-        // 위치오차가 순수 추종오차(주로 횡방향)가 된다. 웨이포인트 간격(~0.3m)에 스냅하면
-        // ref가 모델보다 앞서 달아나(종방향 오차 과대) 위빙/이상거동이 발생 → 반드시 보간.
-        // solve 실패 시 steering_done=false로 L1 폴백.
-        if (use_mpc_ && mpc_controller_) {
-            const int N = mpc_params_.N;
-            const double seg = std::max(0.02, mpc_params_.Ts);
-            std::vector<MpcRef> ref;
-            ref.reserve(static_cast<size_t>(N) + 1);
-
-            // 폴리라인 위 현재 보간 위치: 세그먼트 시작 wp(seg_i) + 세그먼트 내 진행거리(seg_off)
-            size_t seg_i = closest_idx;
-            double seg_off = 0.0;
-
-            // 현재 보간 위치의 (x,y,yaw,v)를 샘플
-            auto sample_ref = [&](MpcRef& out) {
-                size_t jn = (seg_i + 1) % n;
-                double sx = waypoints_[jn].x - waypoints_[seg_i].x;
-                double sy = waypoints_[jn].y - waypoints_[seg_i].y;
-                double seglen = std::hypot(sx, sy);
-                double t = (seglen > 1e-6) ? std::min(1.0, seg_off / seglen) : 0.0;
-                out.x = waypoints_[seg_i].x + t * sx;
-                out.y = waypoints_[seg_i].y + t * sy;
-                out.yaw = waypoints_[seg_i].yaw;  // 세그먼트 시작 yaw (unwrap은 호출부에서)
-                out.v = std::max(min_speed_, std::min(waypoints_[seg_i].speed, curvature_speed_limit));
-            };
-            // 폴리라인을 따라 dist[m]만큼 전진
-            auto advance_ref = [&](double dist) {
-                double remaining = dist;
-                while (remaining > 0.0) {
-                    size_t jn = (seg_i + 1) % n;
-                    double seglen = std::hypot(waypoints_[jn].x - waypoints_[seg_i].x,
-                                               waypoints_[jn].y - waypoints_[seg_i].y);
-                    double left = seglen - seg_off;
-                    if (remaining < left) {
-                        seg_off += remaining;
-                        remaining = 0.0;
-                    } else {
-                        remaining -= left;
-                        seg_i = jn;
-                        seg_off = 0.0;
-                        if (seg_i == closest_idx) break;  // 한바퀴 방지
-                    }
-                }
-            };
-
-            double prev_yaw = current_yaw_;
-            for (int kk = 0; kk <= N; ++kk) {
-                MpcRef rk;
-                sample_ref(rk);
-                // yaw 연속 unwrap (ref[0]은 차량 헤딩 근처로)
-                double yw = rk.yaw;
-                double base = (kk == 0) ? current_yaw_ : prev_yaw;
-                while (yw - base > PI) yw -= 2.0 * PI;
-                while (yw - base < -PI) yw += 2.0 * PI;
-                rk.yaw = yw;
-                prev_yaw = yw;
-                ref.push_back(rk);
-                advance_ref(rk.v * seg);  // 다음 스테이지: 모델 예측 이동량과 동일 간격
-            }
-
-            MpcState cur_state{current_x_, current_y_, current_yaw_};
-            double mpc_delta = 0.0;
-            if (mpc_controller_->solve(cur_state, ref, last_steering_angle_, mpc_delta)) {
-                steering_angle = mpc_delta;
-                steering_done = true;
-                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "[MPC] delta=%.4f solve=%.2fms", mpc_delta, mpc_controller_->last_solve_ms());
-            } else {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "[MPC] solve 실패 → 이 사이클 L1 폴백");
-            }
-        }
-
-        if (!steering_done) {
-        // ==========================================
         // 2. L1 Guidance Distance 계산 및 L1 Point 스캔
         // ==========================================
-        L1_distance = l1_gain_ + current_speed_ * l1_distance_;
+        double L1_distance = l1_gain_ + current_speed_ * l1_distance_;
         double lower_bound = std::max(t_clip_min_, std::sqrt(2.0) * lateral_error);
         L1_distance = std::max(lower_bound, std::min(L1_distance, t_clip_max_));
 
         // closest_idx로부터 물리적으로 L1_distance만큼 전방에 위치한 목표 인덱스 스캔
-        idx_a = closest_idx;
+        size_t idx_a = closest_idx;
         double accum_dist = 0.0;
         while (accum_dist < L1_distance) {
             size_t next_idx = (idx_a + 1) % n;
@@ -569,8 +426,8 @@ private:
             if (idx_a == closest_idx) break; // 한바퀴 도는 것 방지
         }
 
-        L1_x = waypoints_[idx_a].x;
-        L1_y = waypoints_[idx_a].y;
+        double L1_x = waypoints_[idx_a].x;
+        double L1_y = waypoints_[idx_a].y;
 
         // ==========================================
         // 3. sin(eta) 직접 계산 (차량 헤딩과 L1 point 간의 횡방향 sin 오차)
@@ -590,7 +447,14 @@ private:
         // ==========================================
         double speed_la_for_lu = waypoints_[find_lookahead_wp_idx(closest_idx, speed_lookahead_for_steering_)].speed;
 
-        // 곡률 반영 속도 (lat_e_norm·curv_factor는 위 1.7에서 공유 계산됨)
+        // 횡오차 정규화 및 가변 곡률 반영 속도
+        double max_lat_e = 0.5;
+        double min_lat_e = 0.01;
+        double lat_e_clip = std::max(min_lat_e, std::min(lateral_error, max_lat_e));
+        double lat_e_norm = 0.5 * ((lat_e_clip - min_lat_e) / (max_lat_e - min_lat_e));
+
+        double curv_factor = std::max(0.0, std::min(2.0 * (mean_track_curvature_ / 0.8) - 2.0, 1.0));
+
         double speed_for_lu = speed_la_for_lu * (1.0 - lateral_error_coeff_ + lateral_error_coeff_ * std::exp(-lat_e_norm * 2.0 * curv_factor));
 
         // ==========================================
@@ -602,7 +466,7 @@ private:
             speed_for_lu = std::min(speed_for_lu, curvature_speed_limit);
             lat_acc = 2.0 * std::pow(speed_for_lu, 2) / L1_distance * sin_eta;
         }
-        steering_angle = lookup_table_.lookup_steer_angle(lat_acc, speed_for_lu);
+        double steering_angle = lookup_table_.lookup_steer_angle(lat_acc, speed_for_lu);
 
         // ==========================================
         // 6. 조향각 물리 및 가변 스케일러 보정 (Dynamic Scalers)
@@ -643,11 +507,7 @@ private:
         while (heading_err > PI) heading_err -= 2.0 * PI;
         while (heading_err < -PI) heading_err += 2.0 * PI;
         steering_angle += heading_damping_gain_ * heading_err;
-        }  // end if(!steering_done) — L1 조향 블록 (MPC 성공 시 건너뜀)
 
-        // ==========================================
-        // 6.5 (공유) 조향 Rate limit + 물리 한계 — MPC/L1 공통 적용
-        // ==========================================
         // 4) Rate limit
         double threshold = 0.4;
         steering_angle = std::max(last_steering_angle_ - threshold, std::min(steering_angle, last_steering_angle_ + threshold));
@@ -661,12 +521,8 @@ private:
         // ==========================================
         // 속도용 룩어헤드 예측
         double global_speed = waypoints_[find_lookahead_wp_idx(closest_idx, speed_lookahead_)].speed;
-        // 랩타임 단축용 속도 스케일: 플래너 vx가 보수적(a_lat 작게 생성)일 때 곱셈으로 상향.
-        // 안전캡은 곡률한계(max_lateral_accel)와 max_speed가 담당하므로 코너는 과속 안 됨.
-        global_speed *= speed_scale_;
-        // 곡률 룩어헤드 제한 적용 + 최대속도 클램프
+        // 곡률 룩어헤드 제한 적용
         global_speed = std::min(global_speed, curvature_speed_limit);
-        global_speed = std::min(global_speed, max_speed_);
         double target_speed = global_speed * (1.0 - lateral_error_coeff_ + lateral_error_coeff_ * std::exp(-lat_e_norm * 2.0 * curv_factor));
 
         // 헤딩 에러 감속 보정 (speed_adjust_heading)
@@ -782,7 +638,6 @@ private:
     double min_speed_;
     std::string odom_topic_;
     double wall_safety_margin_;
-    double speed_scale_ = 1.0;
 
     // 곡률 룩어헤드 감속
     size_t curvature_lookahead_count_;
@@ -812,11 +667,6 @@ private:
 
     std::unique_ptr<GapFollower> gap_follower_;
     std::unique_ptr<StabilityController> stability_controller_;
-
-    // MPC (조향 전용)
-    bool use_mpc_ = false;
-    MpcParams mpc_params_;
-    std::unique_ptr<MPCController> mpc_controller_;
 
     // ROS 2 통신
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;

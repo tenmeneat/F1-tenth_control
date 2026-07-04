@@ -30,7 +30,6 @@ find_package(ackermann_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(f110_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
-find_package(osqp REQUIRED)  # MPC QP 솔버 (ros-humble-osqp-vendor 제공)
 
 # ==============================================================================
 # 1. Autonomous Emergency Braking (AEB) 노드 빌드
@@ -71,7 +70,6 @@ add_executable(steering_control_node
   control_code/steering_control_node.cpp
   control_code/gap_follower.cpp
   control_code/imu_stability_controller.cpp
-  control_code/mpc_controller.cpp
 )
 target_include_directories(steering_control_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -86,8 +84,6 @@ ament_target_dependencies(steering_control_node
   f110_msgs
   ament_index_cpp
 )
-# MPC QP 솔버(OSQP) 링크
-target_link_libraries(steering_control_node osqp::osqp)
 
 # ==============================================================================
 # 4. 파일 설치 (Install) 규칙
