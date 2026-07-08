@@ -130,6 +130,7 @@ private:
         // 4. 수동 조작 조향 및 속도 계산
         double steer_input = msg->axes[steering_axis_];
         target_steering_angle_ = steer_input * max_steering_angle_;
+        input_steer_pct_ = steer_input * 100.0; // 좌스틱 조향 입력 퍼센티지 (+좌/-우)
 
         double current_max_speed = max_speed_;
         if (msg->buttons[boost_button_] == 1) {
@@ -165,9 +166,13 @@ private:
             }
 
             target_speed_ = (throttle - brake) * current_max_speed;
+            input_throttle_pct_ = throttle * 100.0; // RT 스로틀 입력 퍼센티지
+            input_brake_pct_ = brake * 100.0;       // LT 브레이크 입력 퍼센티지
         } else {
             double throttle_input = msg->axes[throttle_axis_];
             target_speed_ = throttle_input * current_max_speed;
+            input_throttle_pct_ = throttle_input * 100.0;
+            input_brake_pct_ = 0.0;
         }
 
         raw_axes_ = msg->axes;
@@ -266,6 +271,15 @@ private:
         } else {
             std::cout << "  * Control Source      : Redirecting /drive_autonomous to /drive...\n";
         }
+
+        // 조이스틱 원입력 퍼센티지 (모드와 무관하게 항상 표시)
+        std::cout << "\n [Joystick Input] \n";
+        std::cout << std::setprecision(1);
+        std::cout << "  * Throttle (RT)       : " << input_throttle_pct_ << " %\n";
+        std::cout << "  * Brake (LT)          : " << input_brake_pct_ << " %\n";
+        std::cout << "  * Steering (L stick)  : " << std::showpos << input_steer_pct_ << std::noshowpos
+                  << " %   (+ Left / - Right)\n";
+        std::cout << std::setprecision(3);
         std::cout << "\n";
 
         // 조이스틱 버튼 상태
@@ -291,6 +305,11 @@ private:
     // 제어 목표 변수
     double target_steering_angle_ = 0.0;
     double target_speed_ = 0.0;
+
+    // 조이스틱 원입력 퍼센티지 (터미널 표시용)
+    double input_throttle_pct_ = 0.0;
+    double input_brake_pct_ = 0.0;
+    double input_steer_pct_ = 0.0;
     
     // 상태 변수
     ControlMode current_mode_ = ControlMode::MANUAL;

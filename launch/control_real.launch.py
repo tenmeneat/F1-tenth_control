@@ -117,20 +117,9 @@ def generate_launch_description():
         }]
     )
 
-    # 조이스틱 드라이버: 하드웨어(/dev/input/js0)를 읽어 /joy(sensor_msgs/Joy) 발행.
-    # joy_teleop_monitor는 이 /joy를 스틱+트리거 매핑으로 해석함(기존 D-pad teleop 노드는 띄우지 말 것).
-    # 전제: `joy` 패키지 설치(없으면 sudo apt install ros-<distro>-joy).
-    joy_node = Node(
-        package='joy',
-        executable='joy_node',
-        name='joy_node',
-        output='screen',
-        parameters=[{
-            'device_id': 0,            # /dev/input/js0
-            'deadzone': 0.05,
-            'autorepeat_rate': 20.0,   # 20Hz 재발행 — 트리거를 계속 당기고 있어도 /joy·/drive 명령 지속
-        }]
-    )
+    # 조이스틱 드라이버(joy_node)는 별도 런치로 분리됨 → `ros2 launch f1tenth_control joy.launch.py`.
+    # joy_teleop_monitor는 그 노드가 발행하는 /joy(sensor_msgs/Joy)를 스틱+트리거 매핑으로 해석함.
+    # (전제: `joy` 패키지 설치, 그리고 joy.launch.py를 함께 실행.)
 
     # AEB 노드: /scan TTC 기반 독립 비상제동. odom을 /ego_racecar/odom으로 하드코딩하므로
     # 실차 PF odom(/pf/pose/odom)으로 remapping 필요.
@@ -152,7 +141,6 @@ def generate_launch_description():
         max_speed_arg,
         speed_scale_arg,
         max_lateral_accel_arg,
-        joy_node,
         steering_control,
         joy_teleop_monitor,
         aeb_node,
