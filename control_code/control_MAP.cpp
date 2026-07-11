@@ -24,9 +24,9 @@
 
 using namespace f1tenth_control;
 
-class SteeringControlNode : public rclcpp::Node {
+class ControlMapNode : public rclcpp::Node {
 public:
-    SteeringControlNode() : Node("steering_control_node") {
+    ControlMapNode() : Node("control_map_node") {
         // ==========================================
         // 1. ROS 2 파라미터 선언 및 초기화
         // ==========================================
@@ -134,28 +134,19 @@ public:
             } catch (...) {}
         }
         
-        // 2차 시도 (install 폴더 직접 조회)
+        // 2차 시도 (f1tenth_control 패키지 자체 share/cfg — 이식성 확보. 하드코딩 홈 경로 제거)
         if (!loaded) {
-            lut_file = "/home/tenmeneat/2026_IFAC/install/steering_lookup/share/steering_lookup/cfg/NUC6_glc_pacejka_lookup_table.csv";
-            loaded = lookup_table_.load(lut_file);
-        }
-
-        // 3차 시도 (확실한 로컬 F1tenth_control 패키지 폴더)
-        if (!loaded) {
-            lut_file = "/home/tenmeneat/F1tenth_control/control_code/NUC6_glc_pacejka_lookup_table.csv";
-            loaded = lookup_table_.load(lut_file);
-        }
-
-        // 4차 시도 (싱크된 2026_IFAC 내 f1tenth_control 폴더)
-        if (!loaded) {
-            lut_file = "/home/tenmeneat/2026_IFAC/f1tenth_control/control_code/NUC6_glc_pacejka_lookup_table.csv";
-            loaded = lookup_table_.load(lut_file);
+            try {
+                std::string share_dir = ament_index_cpp::get_package_share_directory("f1tenth_control");
+                lut_file = share_dir + "/cfg/NUC6_glc_pacejka_lookup_table.csv";
+                loaded = lookup_table_.load(lut_file);
+            } catch (...) {}
         }
 
         if (!loaded) {
-            RCLCPP_ERROR(this->get_logger(), "❌ [SteeringControlNode] 모든 경로에서 룩업 테이블(LUT) 로드 실패! 조향각이 0.0으로 고정됩니다.");
+            RCLCPP_ERROR(this->get_logger(), "❌ [ControlMapNode] 모든 경로에서 룩업 테이블(LUT) 로드 실패! 조향각이 0.0으로 고정됩니다.");
         } else {
-            RCLCPP_INFO(this->get_logger(), "🟢 [SteeringControlNode] 룩업 테이블(LUT) 로드 성공: %s", lut_file.c_str());
+            RCLCPP_INFO(this->get_logger(), "🟢 [ControlMapNode] 룩업 테이블(LUT) 로드 성공: %s", lut_file.c_str());
         }
 
         // ==========================================
@@ -164,7 +155,7 @@ public:
         auto qos_gl = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
         global_path_sub_ = this->create_subscription<f110_msgs::msg::WpntArray>(
             "/global_waypoints", qos_gl,
-            std::bind(&SteeringControlNode::global_path_callback, this, std::placeholders::_1));
+            std::bind(&ControlMapNode::global_path_callback, this, std::placeholders::_1));
 
         RCLCPP_INFO(this->get_logger(), "플래닝 팀의 글로벌 경로 토픽(/global_waypoints) 구독 설정 완료.");
 
@@ -183,7 +174,7 @@ public:
         auto qos_local = rclcpp::QoS(rclcpp::KeepLast(1)).reliable(); // 로컬 퍼블리셔에 맞춰 volatile
         local_path_sub_ = this->create_subscription<f110_msgs::msg::WpntArray>(
             "/local_waypoints", qos_local,
-            std::bind(&SteeringControlNode::local_path_callback, this, std::placeholders::_1));
+            std::bind(&ControlMapNode::local_path_callback, this, std::placeholders::_1));
         local_last_recv_time_ = this->now(); // 노드 클럭 타입으로 초기화(비교 시 clock mismatch 방지)
         RCLCPP_INFO(this->get_logger(), "로컬 경로 토픽(/local_waypoints) 구독 설정 완료.");
 
@@ -195,15 +186,15 @@ public:
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             odom_topic_, 10,
-            std::bind(&SteeringControlNode::odom_callback, this, std::placeholders::_1));
+            std::bind(&ControlMapNode::odom_callback, this, std::placeholders::_1));
 
         imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
             "/imu/data", 10,
-            std::bind(&SteeringControlNode::imu_callback, this, std::placeholders::_1));
+            std::bind(&ControlMapNode::imu_callback, this, std::placeholders::_1));
 
         scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
             "/scan", 10,
-            std::bind(&SteeringControlNode::scan_callback, this, std::placeholders::_1));
+            std::bind(&ControlMapNode::scan_callback, this, std::placeholders::_1));
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             "/drive_autonomous", 10);
@@ -211,7 +202,7 @@ public:
         // 실시간 50Hz (20ms) 주기 타이머 가동
         control_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(20),
-            std::bind(&SteeringControlNode::control_loop, this));
+            std::bind(&ControlMapNode::control_loop, this));
 
         last_time_ = this->now();
         RCLCPP_INFO(this->get_logger(), "RoboRacer L1 Guidance & Steer LUT 제어 노드가 시작되었습니다.");
@@ -634,6 +625,17 @@ private:
         while (heading_err < -PI) heading_err += 2.0 * PI;
         steering_angle += heading_damping_gain_ * heading_err;
 
+        // 3.8) 요레이트 피드백 카운터스티어 (횡슬립/언더스티어 보정)
+        // 방금 확정한 명령 조향각이 기하학적으로 의도하는 기대 요레이트(v·tanδ/L) 대비
+        // IMU 실측 요레이트의 오차에 비례해 조향을 보정한다. 언더스티어(실측<기대) 시
+        // +방향으로 더 꺾어 슬립을 상쇄. rate limit·물리 클리핑 이전에 더해 보정분까지
+        // 안전 한계(±0.41, rate 0.4) 안으로 함께 수렴시킨다. IMU 미장착 시(use_imu=false)
+        // 무효. 저속(<0.5m/s) 특이점은 함수 내부에서 0으로 게이트됨.
+        if (use_imu_) {
+            steering_angle += stability_controller_->calculate_yaw_rate_correction(
+                current_speed_, steering_angle, wheelbase_, yaw_rate_gain_);
+        }
+
         // 4) Rate limit
         double threshold = 0.4;
         steering_angle = std::max(last_steering_angle_ - threshold, std::min(steering_angle, last_steering_angle_ + threshold));
@@ -830,7 +832,7 @@ private:
 
 int main(int argc, char* argv[]) {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<SteeringControlNode>();
+    auto node = std::make_shared<ControlMapNode>();
     rclcpp::spin(node);
     rclcpp::shutdown();
     return 0;

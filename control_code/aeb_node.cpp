@@ -9,7 +9,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "nav_msgs/msg/odometry.hpp"
-#include "ackermann_msgs/msg/ackermann_drive_stamped.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/empty.hpp"
 
@@ -49,10 +48,8 @@ public:
             "/aeb/reset", 10,
             std::bind(&AutonomousEmergencyBraking::reset_callback, this, std::placeholders::_1));
 
-        // 제어권 제동 명령 및 경보 플래그 발행
-        aeb_drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
-            "/drive", 10); 
-
+        // 경보 플래그만 발행. 실제 제동은 Mux(joy_teleop_monitor)가 /aeb_active를 보고 대행한다.
+        // (/drive 이중 발행 방지 → /drive는 Mux 단일 퍼블리셔로 일원화)
         aeb_active_pub_ = this->create_publisher<std_msgs::msg::Bool>(
             "/aeb_active", 10);
 
@@ -115,7 +112,6 @@ private:
         if (latch_aeb_ && is_latched_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                 "🚨 AEB 잠금 유지 중! 주행을 재개하려면 '/aeb/reset' 토픽을 발행하십시오.");
-            execute_emergency_brake();
             publish_aeb_status(true);
             return;
         }
@@ -183,7 +179,6 @@ private:
 
             RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 500,
                 "⚠️ 충돌 위험 감지! 긴급 제동 발동 (TTC: %.3f s, 속도: %.2f m/s)", min_ttc, current_speed_);
-            execute_emergency_brake();
             publish_aeb_status(true);
         } else {
             // 충돌 위험이 감지되지 않은 상황
@@ -199,7 +194,6 @@ private:
                     // 안전 대기 시간(1.0초)이 지나기 전까지는 정지 상태 유지
                     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
                         "⚠️ [Self-Recovery] 위험 요인은 사라졌으나 안전을 위해 대기 중... (경과 시간: %.2f s)", elapsed);
-                    execute_emergency_brake();
                     publish_aeb_status(true);
                 }
             } else {
@@ -207,19 +201,6 @@ private:
                 publish_aeb_status(false);
             }
         }
-    }
-
-    void execute_emergency_brake() {
-        // 감속 한계에 가까운 속도 감속 프로파일 전송 (속도 0, 급감속 적용)
-        auto brake_msg = ackermann_msgs::msg::AckermannDriveStamped();
-        brake_msg.header.stamp = this->now();
-        brake_msg.header.frame_id = "base_link";
-        
-        brake_msg.drive.speed = 0.0;             // 즉시 정지 목표
-        brake_msg.drive.acceleration = -9.0;     // 최대 제동력 (m/s^2)
-        brake_msg.drive.steering_angle = 0.0;     // 제동 시 스핀 방지를 위한 중립 조향 조치
-        
-        aeb_drive_pub_->publish(brake_msg);
     }
 
     void publish_aeb_status(bool active) {
@@ -243,7 +224,6 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub_;
-    rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr aeb_drive_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr aeb_active_pub_;
 };
 

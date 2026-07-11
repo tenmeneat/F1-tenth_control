@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 #include <vector>
 #include <string>
 #include <cmath>
@@ -62,6 +63,43 @@ public:
     }
 
     bool is_loaded() const { return is_loaded_; }
+
+    // ===== 실차 LUT 캘리브레이션(lut_calibrator_node)용 조회/저장 헬퍼 =====
+    // 기존 lookup_steer_angle() 동작에는 전혀 영향 없는 추가 전용 메서드들.
+    const std::vector<double>& velocity_axis() const { return lu_vs_; }
+    const std::vector<double>& steer_axis() const { return lu_steers_; }
+
+    // steer_idx/vel_idx는 steer_axis()/velocity_axis() 상의 0-based 인덱스(헤더 행/열 제외).
+    double raw_value(size_t steer_idx, size_t vel_idx) const {
+        size_t row = steer_idx + 1, col = vel_idx + 1;
+        if (row >= lu_.size() || col >= lu_[row].size()) return std::numeric_limits<double>::quiet_NaN();
+        return lu_[row][col];
+    }
+
+    // steer_axis() x velocity_axis() 크기의 grid를 원본과 동일한 CSV 포맷(행0=속도축, 열0=조향축)으로 저장.
+    bool save_csv(const std::string& path, const std::vector<std::vector<double>>& accel_grid) const {
+        if (!is_loaded_) return false;
+        if (accel_grid.size() != lu_steers_.size()) return false;
+
+        std::ofstream out(path);
+        if (!out.is_open()) return false;
+        out << std::scientific << std::setprecision(15);
+
+        // 행 0: 첫 칸(throwaway 0.0) + 속도축
+        out << 0.0;
+        for (double v : lu_vs_) out << "," << v;
+        out << "\n";
+
+        for (size_t i = 0; i < lu_steers_.size(); ++i) {
+            out << lu_steers_[i];
+            for (size_t j = 0; j < lu_vs_.size(); ++j) {
+                double val = (j < accel_grid[i].size()) ? accel_grid[i][j] : std::numeric_limits<double>::quiet_NaN();
+                out << "," << val;
+            }
+            out << "\n";
+        }
+        return true;
+    }
 
     double lookup_steer_angle(double accel, double vel) {
         if (!is_loaded_) return 0.0;

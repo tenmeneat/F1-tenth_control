@@ -4,6 +4,395 @@
 
 ---
 
+## 2026-07-11 (6) — control_map_node 미노출 파라미터 15개 전부 launch 인자로 승격
+
+### 배경
+CLAUDE.md 정리 중 발견한 "③ 어디에도 노출 안 됨" 그룹(15개) — `control_MAP.cpp`엔 이미
+`declare_parameter`/`get_parameter`로 코드가 다 있는데 launch 쪽에서 값을 안 넘겨 코드
+기본값만 쓰이던 파라미터들 — 을 `_control_common.py`에 추가해달라는 요청. **C++ 코드는
+전혀 안 건드림**, 파라미터 플러밍은 이미 있었으므로 launch 계층에서 인자로 노출만 하면 끝.
+
+### 대상 15개
+조향 스케일러(`acceleration_scaler_for_steering`, `deceleration_scaler_for_steering`,
+`start_scale_speed`, `end_scale_speed`, `downscale_factor`, `speed_lookahead`,
+`speed_lookahead_for_steering`), 롤 ESC(`max_roll_limit`, `decel_attenuation`),
+경로소스/장애물회피(`local_fresh_timeout`, `obstacle_avoid_enable`, `obstacle_cone_halfangle`,
+`obstacle_trigger_dist`, `obstacle_margin`, `obstacle_avoid_hold_cycles`).
+
+### 구현
+`_control_common.py`의 기존 `yaw_rate_gain` 패턴 그대로 반복: `declare_common_args()`에
+15개 `DeclareLaunchArgument`(코드 기본값과 동일한 default) 추가 + `build_control_map_node()`
+파라미터 dict에 `LaunchConfiguration('...')` 참조 추가. **`obstacle_avoid_hold_cycles`만
+int라서** `joy.launch.py`의 `device_id` 선례대로 `ParameterValue(..., value_type=int)`
+명시 캐스팅 필요(bare 문자열→int 자동추론이 불안정할 수 있어서). repo·2026_IFAC 양쪽에
+동일 적용(2026_IFAC의 `waypoint_topic`/`controller_type` 격차는 그대로 보존).
+
+### 검증
+- `colcon build` 클린 성공, `--show-args`로 15개 인자 전부 올바른 기본값으로 노출 확인.
+- 스모크 테스트: `obstacle_avoid_hold_cycles:=20`, `max_roll_limit:=0.2`로 오버라이드해
+  기동 후 `ros2 param get`으로 실제 반영값 확인(int 20/double 0.2 정상, 미변경
+  `decel_attenuation`은 기본값 0.6 정상) — 타입 캐스팅·오버라이드 모두 정상 동작.
+
+### CLAUDE.md 갱신
+"실차 튜닝 파라미터" ①번(터미널 인자) 표에 15개 추가, ③번 그룹(빈 그룹이 됨) 삭제.
+향후 MPPI 노드가 붙으면 그 파라미터도 동일 패턴(`_control_common.py`에 추가, `control_MPPI.cpp`
+코드는 안 건드림)으로 노출할 것이라는 메모 추가.
+
+---
+
+## 2026-07-11 (5) — control_sim/control_real 런치파일 공용 로직 추출 (`_control_common.py`)
+
+### 배경
+곧 실차 위주로 주행/튜닝할 예정이라 두 런치파일 관리 부담을 줄여달라는 요청. 조사해보니
+"자율/수동 시작 차이뿐"이라는 전제는 틀렸음 — `force_autonomous`/`is_simulation`은 이미
+두 파일에서 동일했고, 실제 차이는 `odom_topic`/`max_speed`/`max_lateral_accel`/
+`base_max_accel`/`lookup_table_file` 값 차이 + **AEB·조이스틱드라이버·sim_imu_bridge_node
+포함 여부**라는 구조적 차이였음. 나머지(`wheelbase, l1_gain, l1_distance, t_clip_min/max,
+lateral_error_coeff, min_speed, curvature_lookahead_count, wall_safety_margin, use_imu,
+yaw_rate_gain, curvature_ff_blend, heading_damping_gain`, `joy_teleop_monitor` 전체 설정)는
+100% 중복 — 이게 진짜 드리프트 위험 지점(오늘 `yaw_rate_gain`도 두 파일에 손으로 미러링해야 했음).
+
+### 채택안 — 진입점 파일 2개 유지 + 공용 헬퍼 추출 (완전 병합은 기각)
+완전 병합(단일 파일 + `is_real` 같은 불리언 인자 분기)도 검토했으나, 인자를 깜빡하면 실차가
+AEB·조이스틱 없이·시뮬 속도 캡으로 기동될 위험이 생겨 기각. 대신:
+- **신규 `launch/_control_common.py`**: `declare_common_args()`(공통 인자 선언),
+  `build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max_accel,
+  lookup_table_file='')`(공통 파라미터 고정 정의, 환경별 값만 인자로), `build_joy_teleop_monitor()`
+  (완전 동일 설정) 제공. 런치파일이 아니라 순수 헬퍼 모듈.
+- `control_sim.launch.py`/`control_real.launch.py`는 각자 환경별 값·AEB/조이스틱/
+  sim_imu_bridge_node 포함 여부만 결정하고 공용 함수 호출로 축약.
+- **모듈 임포트**: `ros2 launch`가 launch 파일을 스크립트로 실행해 패키지 상대임포트가 불안정할
+  수 있어, 각 진입점 파일 상단에 `sys.path.insert(0, os.path.dirname(__file__))` 후
+  `import _control_common as common`(plain top-level)으로 방어적으로 처리.
+- 2026_IFAC 사본은 `waypoint_topic`(양쪽 공통) + `controller_type`(**sim 전용, real엔 원래
+  없음 — 이 비대칭도 그대로 보존**, `build_control_map_node`에 `controller_type=None` 옵션
+  인자로 처리) 격차가 있어 repo와 다른 내용의 `_control_common.py`를 별도 작성(diff 후 반영,
+  [[steering-control-node-sync-gap]] 패턴 유지).
+- CMakeLists.txt 변경 불필요(`install(DIRECTORY launch ...)`가 신규 파일도 자동 포함).
+
+### 검증
+- `colcon build --packages-select f1tenth_control` 클린 성공.
+- `--show-args`로 리팩터 전후 인자 목록 동일 확인(sim 4개/real 8개, 회귀 없음).
+- 스모크 테스트: `control_sim.launch.py force_autonomous:=true`(gym_bridge와 함께) →
+  `sim_imu_bridge_node`/`control_map_node`(LUT 로드)/`joy_teleop_monitor` 전부 정상 기동.
+  `control_real.launch.py` 단독 실행 → `joy_node`/`control_map_node`/`joy_teleop_monitor`/
+  `aeb_node`(설정 로그 확인) 전부 정상 기동, 임포트 에러 없음.
+
+### 앞으로
+공통 파라미터를 추가/변경할 땐 `_control_common.py` 한 곳만 고치면 sim/real 양쪽에 반영됨.
+AEB·조이스틱·sim_imu_bridge_node 같은 안전/환경 구조 차이는 계속 각 진입점 파일에 직접 유지.
+
+---
+
+## 2026-07-11 (4) — VESC 내장 IMU 축/부호·단위 조사 (실차 없이 코드로 확인, 조사 전용)
+
+### 배경
+VESC Tool에서 IMU 영점·세팅 후 롤/피치/요 부호를 확인했는데(요·롤은 우측+, 피치는 nose-up+),
+"ROS에서는 방향이 반대로 인식된다"는 다른 팀 얘기를 듣고 사실 확인 요청. 실차가 없는 상태라
+`~/2026_IFAC/vesc/vesc_driver` 소스를 직접 읽어 코드로만 조사(하드웨어 검증 없이 가능한 부분).
+
+### 1. 축 반전/스왑 — vesc_driver는 순수 passthrough, ROS가 뒤집지 않음
+`vesc_driver.cpp`가 `VescPacketImu`의 `acc_x/y/z`, `gyr_x/y/z`, `q0..q3`를 `sensor_msgs/Imu`의
+`linear_acceleration`, `angular_velocity`, `orientation`에 **1:1 그대로** 대입(부호 반전·축
+스왑 전혀 없음). `vesc_packet.cpp`의 게터도 전부 raw 값 그대로 리턴. firmware의 장착보정용
+`imu_conf.rot_roll/pitch/yaw`(appconf.xml에 전부 0)도 드라이버 코드가 아예 안 읽음 — 순수
+firmware 개념. **결론: "ROS가 축을 뒤집는다"는 이 드라이버 기준으론 사실 아님.** 만약 실제로
+부호가 안 맞다면 그건 ROS 변환이 아니라 VESC 자체(펌웨어)의 roll/pitch/yaw 부호 관례와
+ROS REP-103(오른손좌표계: yaw+=반시계, pitch+=nose-down, roll+=우측다운) 관례가 원래부터
+다른 것 — VESC 펌웨어 소스가 이 저장소엔 없어 정확한 관례는 코드로 100% 확정 불가, 실측 필요.
+
+### 2. ⚠️ 확정 버그 발견 — 자이로 deg/s→rad/s 변환 누락
+`vesc_packet.cpp`: `roll()/pitch()/yaw()`는 raw(라디안)를 `*180/M_PI`로 deg 변환(디버그용)
+하는데, `gyr_x/y/z()`는 `return gyr_x_; // deg/s` 주석과 함께 **변환 없이 그대로 리턴**.
+`getFloat32Auto`는 순수 비트단위 float 디코더라 단위 변환 없음 확인. 즉 firmware가 각도는
+라디안, 각속도는 deg/s로 보내는데 드라이버가 그대로 흘려보내 **`/imu/data.angular_velocity`가
+REP-103(rad/s) 위반, 약 57.3배 스케일 버그**로 추정(경로/코드 추적으로 확정, 실측으로 최종
+확인 필요).
+
+**직결 위험**: 오늘 배선한 `calculate_yaw_rate_correction`(요레이트 카운터스티어)이
+`filtered_yaw_rate_`(=angular_velocity.z, 이 버그 영향권)를 `v·tanδ/L`(진짜 rad/s)과 직접
+비교 → 이 버그 상태로 실차에서 `use_imu=true` 켜면 "실측" 요레이트가 ~57배 부풀려져 보정항이
+과도하게 튈 위험(안전 문제 소지). **롤 ESC(`calculate_roll_ratio`)는 자이로가 아니라 쿼터니언
+기반 각도(`filtered_roll_`)를 쓰므로 이 버그와 무관 — 정상 동작 예상.**
+
+### 3. "90도 장착 회전" 보정 — 가속도만 됐고 각속도는 미보정 (재확인)
+저장소 전체 grep 결과 장착 회전 보정은 `-linear_acceleration.y`(LUT 종가속도용) **한 곳뿐**,
+`angular_velocity.x/z`(롤레이트/요레이트)는 무보정 — 07-05 로드맵의 "⚠️ 축 검증" 항목이
+여전히 미해결. 요축 90도 마운트 가설이 맞다면 현재 "롤레이트"로 쓰는 `gyr_x`가 실제론 차체
+피치레이트일 가능성(추정, 실측 전 단정 불가).
+
+### 결정 — 이번엔 코드 수정 안 함
+`vesc_driver`가 팀 공용 vendored 패키지라, deg/s→rad/s 수정은 **실측 확인 후로 보류**(사용자
+결정). 이번 세션은 조사·문서화만.
+
+### ⚠️ 다음 실차 세션 체크리스트 (07-05 로드맵 "축 검증" 항목을 아래로 구체화·대체)
+1. VESC 유닛을 손으로 각 축 회전시키며 VESC Tool 표시값과 `ros2 topic echo /imu/data`를
+   동시에 비교 — 부호 일치 여부(REP-103과 다를 것으로 예상되는 pitch·yaw 우선 확인).
+2. 알려진 각속도(대략 90도/초)로 손으로 굴려 `angular_velocity.z`가 ~1.57(정상, rad/s) vs
+   ~90(버그 확정, deg/s) 중 어느 쪽인지 확인 → 버그 확정 시 `vesc_driver`의 `gyr_x/y/z()`
+   게터(또는 `vesc_driver.cpp` 대입부)에 `* M_PI / 180.0` 추가, 팀 공지 후 반영.
+3. 요축 90도 마운트 가설 검증: 차체를 롤/피치 각각 흔들었을 때 `angular_velocity.x`(현재
+   "롤레이트"로 쓰는 축)가 실제 롤에 반응하는지, 혹은 피치에 반응하는지 확인.
+4. 이 유닛 단품(차 전체 아니어도 OK)만 있으면 위 1·2번은 트랙 없이도 검증 가능.
+
+---
+
+## 2026-07-11 (3) — IMU 보정(use_imu) 시뮬/실차 런치 디폴트 활성화 + sim_imu_bridge_node 신설
+
+### 배경
+직전 세션에서 요레이트 카운터스티어를 배선·검증했으나, `control_sim.launch.py`는
+`use_imu: False`(시뮬엔 IMU 없음)로 고정돼 있어 기본 실행에선 요레이트 보정은 물론
+롤 인지 ESC까지 전부 비활성 상태였음. "시뮬/실차 런치파일에서 IMU 보정을 디폴트로"
+요청에 따라 두 런치파일 모두에서 `use_imu` 경로가 기본으로 켜지도록 정리.
+
+### ⚠️ 짚어야 했던 함정: `use_imu:=true`를 시뮬에 그냥 켜면 안 됨
+시뮬(gym_bridge)은 `/imu/data`를 발행하지 않음 → `use_imu:=true`만 켜면 `StabilityController`가
+IMU 콜백을 한 번도 못 받아 `filtered_yaw_rate_`가 항상 0으로 고정됨. 이 상태에서
+`calculate_yaw_rate_correction`은 "실측 요레이트=0"으로 오인해 **명령 조향각이 의도하는 기대
+요레이트 전체를 매번 오차로 착각해 조향에 계속 더함** — 단순 비활성이 아니라 **적극적으로
+잘못된 조향 바이어스**가 걸리는 위험한 상태. 그래서 무작정 플래그만 켜지 않고, odom 요레이트를
+실제로 `/imu/data`에 흘려주는 브릿지 노드를 새로 만들어 정직하게 동작하도록 함.
+
+### 신규: `sim_imu_bridge_node` (control_code/sim_imu_bridge_node.cpp, 6번째 실행파일)
+- odom(`twist.twist.angular.z`, 요레이트)을 `sensor_msgs/Imu`로 중계. orientation은 identity
+  고정(롤=0 — 2D 시뮬 한계, 롤 인지 ESC는 시뮬에서 자연히 비활성으로 유지되고 이건 정상/의도됨).
+  종가속도(linear_acceleration)도 0 고정(조향 스케일러의 acc_mean 경로는 시뮬에서 중립).
+- CMakeLists.txt에 `add_executable`+`install(TARGETS)` 등록. C++ 컨벤션 유지(프로젝트가
+  "Python은 참조용"이므로 앞서 만든 scratchpad 파이썬 shim 대신 정식 C++ 노드로 승격).
+- `control_sim.launch.py`에만 포함(실차엔 절대 넣지 말 것 — 실제 VESC IMU 토픽과 충돌).
+
+### 런치파일 변경
+- **`control_sim.launch.py`**: `use_imu: False` → **`True`**(sim_imu_bridge_node가 실제 데이터를
+  공급하므로 안전하게 켤 수 있게 됨). `yaw_rate_gain` 런치 인자 신설(기본 **0.08** — 직전 세션
+  스윕 결과 0.15부터 채터링 뚜렷했던 것 반영한 보수값). `sim_imu_bridge` 노드 액션 추가.
+- **`control_real.launch.py`**: `use_imu`는 이미 True였음(변경 없음). `yaw_rate_gain` 런치 인자
+  신설(기본 0.08, 이전엔 노드 코드 기본값 0.1이 암묵 적용되던 걸 명시적으로 노출). 실차는 실제
+  슬립이 있어 시뮬보다 채터링이 더 심할 수 있으니 첫 셰이크다운은 이 보수값에서 시작 권장.
+- ⚠️ 두 런치파일 모두 `~/2026_IFAC` 사본이 `waypoint_topic`/`controller_type`(sim) 등으로
+  repo보다 앞서있어([[steering-control-node-sync-gap]]) diff 확인 후 양쪽에 동일 diff를
+  수동 반영(rsync 안 씀). CMakeLists.txt는 격차 없어 그대로 반영.
+
+### 검증
+- `colcon build --packages-select f1tenth_control` 클린 성공(신규 노드 포함).
+- 두 launch 파일 `--show-args`로 신규 `yaw_rate_gain` 인자 노출 확인.
+- 스모크 테스트(gym_bridge + control_sim.launch.py force_autonomous:=true): `sim_imu_bridge_node`
+  기동, `/imu/data` 500Hz 발행 확인, `control_map_node` LUT 로드 성공 + use_imu 경로 에러 없이
+  정상 기동 확인.
+
+---
+
+## 2026-07-11 (2) — 요레이트 피드백 카운터스티어 배선 + 시뮬 폐루프 검증
+
+### 배경
+`control_MAP.cpp`에 `StabilityController::calculate_yaw_rate_correction`이 정의만 되고
+control_loop에서 호출되지 않는 죽은 코드로 남아있었음(07-05 계획에 명시). 오늘 이걸 실제
+조향 명령에 배선하고, 시뮬(f1tenth_gym)로 폐루프 검증까지 진행.
+
+### 배선
+- 위치: `control_MAP.cpp` 헤딩 댐핑 직후 / rate limit·물리 클리핑 이전(약 627~636줄).
+  방금 확정한 명령 조향각으로 기대 요레이트(`v·tanδ/L`)를 구해 실측 요레이트와의 오차에
+  `yaw_rate_gain`을 곱해 더함 — 언더스티어(실측<기대) 시 더 꺾어 슬립 상쇄. `use_imu_` 게이트,
+  보정분까지 rate limit/±0.41 안전한계에 함께 수렴하도록 클리핑 이전에 삽입.
+- ⚠️ **`~/2026_IFAC/f1tenth_control/control_MAP.cpp`가 repo보다 `waypoint_topic`/
+  `controller_type`/`/local_waypoints` 구독 기능만큼 앞서있는 상태**(구 `steering_control_node.cpp`
+  때와 동일 패턴, 파일명만 바뀜)라 **rsync/동기화 스크립트로 반영하지 않고 2026_IFAC 사본에
+  동일 diff를 수동으로 직접 적용**함(양쪽 모두 반영, 앞선 기능은 보존). repo↔2026_IFAC 재동기화는
+  여전히 숙제로 남음.
+
+### 시뮬 폐루프 검증
+- 시뮬(gym_bridge)엔 `/imu/data`가 없어 `odom.twist.twist.angular.z`(요레이트)를 `/imu/data`로
+  중계하는 `odom_to_imu_shim.py` 작성(orientation=identity로 롤 ESC는 격리, 요레이트 보정만 검증).
+- `yaw_rate_gain` 0.0(기존)/0.08/0.15 3점 스윕(각 25초, fuck_f1 맵):
+
+  | gain | 횡오차 평균/최대(m) | 평균속도 | 2랩째 랩타임 | 조향 std | 부호전환/s |
+  |---|---|---|---|---|---|
+  | 0.0 | 0.140/0.250 | 3.523 | 9.92s | 0.077 | 0.0 |
+  | 0.08 | 0.146/0.262 | 3.522 | 9.90s | 0.084 | 0.4 |
+  | 0.15 | 0.150/0.278 | 3.523 | 9.89s | 0.187 | **3.32** |
+
+  트랙 이탈 0회, 안전한계 위반 없음. **결론**: 랩타임/속도 불변(요레이트 보정은 조향에만 개입),
+  게인이 커질수록 횡오차는 미세 악화 + 조향 채터링은 뚜렷이 증가. f1tenth_gym은 선형 타이어라
+  슬립/마찰 포화가 없어 **보정이 상쇄할 실제 오차 자체가 없음** — 시뮬은 "배선이 안전하게 도는지"만
+  검증 가능하고, 실효(언더스티어 보정)는 실차에서만 확인 가능(예상된 한계, CLAUDE.md 시뮬 타이어
+  모델 특성과 일치). **실차 첫 시도는 `yaw_rate_gain` 0.05~0.08 정도 낮게 시작해 채터링 보며
+  올릴 것 권장** — 0.15는 시뮬에서도 이미 채터링 뚜렷.
+
+### 겪은 함정 (재사용 가능한 툴링: scratchpad — 이번 세션 한정 경로라 재사용 시 재작성 필요)
+- `set -u`(nounset)로 bash 스크립트를 짜면 `/opt/ros/humble/setup.bash`가 미정의 변수
+  참조로 즉시 죽음 → ROS setup 스크립트를 소싱하는 스크립트에는 `-u` 쓰지 말 것.
+- `global_trajectory_publisher_node` 실행파일의 실제 노드명은 `global_republisher_node`(소스
+  내 하드코딩)라, launch 파일 밖에서 `ros2 run`으로 띄우며 yaml params-file(top key
+  `global_trajectory_publisher_node`)을 먹이려면 `-r __node:=global_trajectory_publisher_node`
+  리매핑이 반드시 필요(안 하면 "did not find any map_path param"로 조용히 실패).
+- **`ros2 run` 백그라운드(`&`) 후 캡처한 `$!`는 래퍼 프로세스 PID이지 실제 노드 바이너리
+  PID가 아님** — `kill $!`만 하면 실제 노드가 안 죽고 계속 `/drive_autonomous`에 발행,
+  다음 게인의 노드와 동시에 떠서 데이터가 오염됨(실측 확인: steer_samples_n이 게인마다
+  1x/2x/3x로 누적 증가). 실제 바이너리 경로(`lib/f1tenth_control/control_map_node` 등)를
+  `pkill -9 -f`로 직접 잡고, 완전히 사라질 때까지 폴링 후 다음 단계로 넘어가야 함. 스윕류
+  스크립트에서 게인/파라미터 전환 시 이 패턴 반드시 재사용.
+
+---
+
+## 2026-07-11 — 조이스틱 버튼 재배치 + MPPI 솔버 파일 리네임/빌드 연결
+
+### 배경
+다음 세션에 MPPI 컨트롤러 설계를 시작하기 전, 실차에서 조이스틱 버튼 하나로
+MAP ↔ MPPI 제어 알고리즘을 전환할 수 있는 기반을 미리 마련해두기로 함.
+
+### 조이스틱 버튼 재배치 (`joy_teleop_monitor.cpp`)
+- **부스트 버튼: RB(5) → A(0)** 이동.
+- **신규: RB(5) = MAP/MPPI 알고리즘 전환 버튼** (`algorithm_button` 파라미터, 기본 5).
+  LB 토글과 동일한 상승 엣지 감지 패턴으로 구현, `current_algorithm_`
+  (`ControlAlgorithm::MAP`/`MPPI`) 상태를 전환하고 `/teleop_dashboard`에
+  "Active Algorithm" 줄로 표시.
+- ⚠️ **현재는 상태 전환 + 대시보드 표시만** 한다. MPPI 쪽 `/drive_autonomous`
+  소스가 될 노드가 아직 없어서, 실제 소스 라우팅(`auto_drive_callback` 확장)은
+  MPPI 노드가 생기는 다음 세션으로 미룸.
+- `launch/control_real.launch.py`, `launch/control_sim.launch.py`의
+  `boost_button`/`algorithm_button` 파라미터도 함께 갱신.
+
+### MPPI 솔버 파일 리네임 + 빌드 연결
+- `control_code/mpc_controller.cpp` → `control_code/control_MPPI.cpp`,
+  `include/f1tenth_control/mpc_controller.hpp` → `include/f1tenth_control/control_MPPI.hpp`
+  로 `git mv` (include guard/include 경로만 갱신, `MPCController` 등 심볼명은 유지 —
+  다음 세션에 이 파일 내부를 MPPI 알고리즘으로 재작성할 예정).
+- 이 파일은 이전까지 **`CMakeLists.txt`에 전혀 등록되지 않은 죽은 코드**였음(확인
+  결과 OSQP C API 기반 전역좌표 LTV-MPC 조향 솔버 클래스이며 ROS 노드/`main()`
+  아님). 이번에 처음으로 빌드에 연결:
+  - `find_package(osqp REQUIRED)` 추가 — `ros-humble-osqp-vendor`가 설치한
+    업스트림 OSQP CMake 패키지(`/opt/ros/humble/lib/cmake/osqp/`)가 `osqp::osqp`
+    임포트 타겟을 제공, 기존 코드의 `#include <osqp.h>`와 그대로 호환.
+  - `add_library(control_mppi_solver STATIC control_code/control_MPPI.cpp)` +
+    `target_link_libraries(... osqp::osqp)` 추가. 아직 어떤 노드도 링크하지
+    않는 **컴파일 검증 전용** 정적 라이브러리(`install(TARGETS ...)`에도 미포함).
+  - `package.xml`에 `<depend>osqp_vendor</depend>` 추가.
+
+### MPPI 알고리즘 본체 설계 (control_MPPI.cpp 재작성)
+지난 리네임에 이어 이 파일 내용을 비우고 **샘플링 기반 MPPI 컨트롤러**로 재설계.
+- **정식화**: 정보이론 MPPI(Williams 2018, IEEE T-RO). K개 잡음 제어열 롤아웃 →
+  동역학 롤아웃 비용 → 가중 `w_k=exp(-(J_k-β)/λ)/Σ` → `u_t+=Σ w_k ε_{t,k}` →
+  첫 제어 출력 + warm-start 시프트. QP/OSQP 불필요(순수 샘플링).
+- **제어/모델**: 제어 `u=[조향 δ, 종가속 a]`(조향+종방향 동시). 롤아웃 동역학은
+  **동역학 자전거(single-track)+Pacejka 마법공식 횡력**. 저속(vx→0)에서 슬립각
+  발산 → `v_switch`(기본 2m/s) 미만은 **기구학 자전거로 블렌드**(실차 정지출발 대응).
+- **비용**: 위치·헤딩·속도 2차 추종 + 트랙 경계 소프트 페널티(반폭−마진 초과 시).
+  제어비용은 λ 항으로 암묵 반영. 종단 가중 배수(`w_terminal`). 출력 저역통과 평활화
+  (LP-MPPI 근사, 채터링 저감).
+- **구조**: control_MAP.cpp처럼 **별도 헤더 없이 단일 파일에 인라인**(`MPPIController`
+  클래스). 리네임으로 생겼던 `control_MPPI.hpp` 삭제. 파일 하단 `#ifdef MPPI_SMOKE_TEST`
+  로 ROS 없이 폐루프 검증하는 스탠드얼론 하네스 내장.
+- **빌드**: MPPI는 외부 솔버가 없으므로 `CMakeLists.txt`의 `find_package(osqp)` 및
+  `target_link_libraries(... osqp::osqp)`, `package.xml`의 `<depend>osqp_vendor</depend>`
+  제거. `control_mppi_solver` static lib 타겟은 컴파일 검증용으로 유지.
+- **참조**: [MPPI overview](https://acdslab.github.io/mppi-generic-website/docs/mppi.html),
+  [ForzaETH race_stack(참조: 상태/기준 인터페이스 규약)](https://github.com/ForzaETH/race_stack),
+  [F1TENTH MPPI 사례](https://www.tdetlefsen.com/f1tenth-mppi.html),
+  [LP-MPPI 2503.11717](https://arxiv.org/abs/2503.11717).
+- **⚠️ LUT 정직성**: 기존 NUC6 Pacejka LUT는 (횡가속도,속도)→조향각의 *역맵*이라 전방
+  롤아웃엔 직접 못 씀. 전방 Pacejka 파라미터는 f1tenth_gym 기본값 사용(추후 실차 보정).
+- **검증**: 스모크 테스트 PASS — 원호 추종에서 횡오차 0.40→0.02m 수렴, 속도 3.0m/s
+  추종, 최악 solve 12.3ms(<20ms@50Hz, -O2 기준. colcon -O3/-flto면 더 빠름),
+  제어 한계·유한성 OK, vx=0 출발 특이점 없음.
+
+### 다음 세션 To-do
+- `control_MPPI.cpp`에 `ControlMppiNode`+`main()`을 **같은 단일 파일**에 추가
+  (`control_MAP.cpp`와 유사: odom/imu/global·local_waypoints 구독, 웨이포인트→MppiRef
+  변환, `/drive_autonomous` 발행). CMake `add_library`→`add_executable(control_mppi_node)`
+  전환 + `install(TARGETS)` 등록.
+- `joy_teleop_monitor`의 `auto_drive_callback`(또는 소스 선택 로직)을 확장해
+  `current_algorithm_`(RB 토글) 상태에 따라 MAP/MPPI 소스를 실제 라우팅.
+- Pacejka 타이어 파라미터(Bf/Cf/Df…) 실차/시뮬 보정 → 아래 "Pacejka 파라미터 보정" 참조.
+
+### Pacejka 파라미터 보정 — lut_calibrator 재활용 가능성 (내일 착수)
+**질문: MPPI 전방 Pacejka 파라미터를 기존 lut 갱신 메커니즘으로 적용 가능한가?**
+결론: **직접 plug-in은 불가, "파라미터 식별(fitting)용 데이터"로는 적합.**
+
+- 지난번 "LUT는 역맵이라 못 씀" 설명은 부정확했음(정정): `lut_calibrator_node.cpp`가
+  셀 `(|δ|, v)`에 저장하는 값은 실측 **정상상태 횡가속도 `a_lat = v·ψ̇`** —
+  즉 LUT **테이블 내용물 자체는 정상상태 순방향 맵 `a_lat=f(δ,v)`**이고, MAP이 그걸
+  역방향 조회(`lookup_steer_angle`)해 쓸 뿐. 데이터는 순방향이 맞다.
+- MPPI 전방 동역학도 정상상태 코너링(ω̇=0, v̇y=0, v 일정)에 이르면 `a_lat = vx·ω`를
+  뱉는다(캘리브레이터와 동일 공식) → 정합 비교 가능.
+  - 저-δ 기울기 → 코너링강성(α≈0의 B·C·D), 고-δ 포화값 → 마찰 피크 `D=μ·Fz` → μ.
+- **한계**: ① 정상상태 정보만 → **요관성 Iz·과도(슬립 build-up) 특성은 LUT에서 안 나옴**
+  (공칭값 0.047 사용 또는 별도 식별). ② single-track 정상상태만으론 **전/후축 분리가
+  under-determined** → lf/lr로 Fzf/Fzr 고정하고 앞뒤 B,C,E(또는 μ) 공유 가정, 혹은
+  등가 단일축 곡선으로 피팅. ③ 캘리브레이터가 `/drive` 명령 조향을 실제 서보각 근사로
+  씀(조향 오프셋/지연 편향이 피팅에도 실림 — LUT가 이미 안고 가는 가정).
+
+**권장 경로 2가지:**
+- **A안 (1순위·재활용, 손 적음):** 캘리브레이션 CSV(`~/f1tenth_lut_calibration/
+  NUC6_glc_pacejka_lookup_table_calibrated.csv`)를 읽어, 각 그리드점 `(δ,v)`에서 MPPI
+  `step_dynamics`를 정상상태까지 굴려 나온 `a_lat`이 셀 값과 일치하도록 Pacejka
+  파라미터(Bf/Cf/Df/Br/Cr/Dr/E)를 **오프라인 최소자승 피팅**하는 스크립트 1개 작성 →
+  `MppiParams` 기본값 갱신. Iz·과도특성은 공칭값. 기존 캘리브 메커니즘 그대로 살림.
+- **B안 (더 정합적·나중):** MPPI 노드가 선 뒤, lut_calibrator처럼 `(δ, v, ψ̇, ψ̈, vy)`
+  로그를 모아 **전방 모델 파라미터를 직접 회귀**(B,C,D,E,Iz 동시)하는 전용 캘리브레이터
+  신설. 손은 더 가지만 과도특성까지 잡음.
+- 착수 순서 제안: 내일은 A안(재활용) 먼저 시도해 정상상태 정합만 확보 → MPPI 노드/실주행
+  검증 후 필요하면 B안으로 과도특성 보강.
+
+---
+
+## 2026-07-08 — 모터 저속 코깅/탈조 진단 (VESC FOC 센서리스)
+
+### 증상
+실차 브링업 중 VESC Tool로 duty 0.2 / rpm 1000 테스트 시 바퀴가 미세하게 움찔거리기만
+하고 매끄럽게 회전하지 않음(Fault 없음). VESC Tool RT Data로 라이브 파라미터 튜닝하며
+원인 분리.
+
+### 근본 원인 (확정)
+**FOC 센서리스 오픈루프(강제 커뮤테이션) ↔ 관측기(observer) 핸드오프 구간의 구조적
+불안정.** `foc_openloop_rpm≈800` ~ `foc_sl_erpm_start=2250` ERPM 사이("데드존")에서
+**속도를 고정 유지(정적 홀드)하려고 하면** 오버슈트 후 완전히 0으로 추락 → 재시동을
+무한 반복. 이 구간을 **그냥 통과(가속/감속 스윕)하는 것은 상대적으로 안전** —
+목표가 데드존 밖(예: 0 또는 2500 이상)이면 통과 중 한 번 흔들리고 정상적으로
+도달/정지함.
+
+- Duty(오픈루프 단독) 제어는 이 문제와 무관 — 항상 매끄러움 (`ERPM 1200 / Ramp 0.10s /
+  Boost 3.00A / Max 7.00A / Lock 0.00s` 조합에서 0→11746 ERPM 클린 램프 확인).
+- Speed(rpm) 제어 모드에서만 재현 — `Speed PID Ramp`(10000→2000), `Openloop Current
+  Max`(7→12~15A), `Heavy Inertial Load` 프리셋 등 여러 시도를 했지만 크래시 발생 지점
+  (~2100~2250 ERPM 부근)이 전혀 안 바뀜 → PID 게인/전류 캡 문제가 아니라 데드존
+  구조 자체의 문제로 결론.
+- 실차 감속(목표 rpm→0) 재현 테스트: 데드존을 하강 통과할 때 짧게(~0.2~0.3s) 덜컹인
+  뒤 정상적으로 0에 정지 — 무한루프는 아니고 "거친 정지" 수준.
+
+### 실주행 영향 분석
+`ackermann_to_vesc_node`(`~/2026_IFAC/vesc/vesc_ackermann`)가 `speed_to_erpm_gain=4614.0`
+(오프셋 0)로 m/s→ERPM 변환 후 VESC Speed(ERPM) 모드로 명령 — 즉 이번에 재현한 문제는
+**실제 주행 파이프라인과 동일한 제어 모드**임. 환산: `speed(m/s) = ERPM / 4614`.
+
+| ERPM | 실속도 |
+|---|---|
+| 800 (데드존 시작) | 0.17 m/s |
+| 2250 (데드존 끝) | 0.49 m/s |
+| `min_speed` 파라미터 (2.0 m/s) | 9228 ERPM |
+
+`steering_control_node`의 `min_speed_`는 일반 하한이 아니라 곡률 캡/롤 위험 시에만
+적용되는 하한이라(`control_code/steering_control_node.cpp` 507, 679줄), 출발/정지 시
+`final_speed`가 0에서/0으로 연속 램프되며 데드존을 매번 통과함. `min_speed=2.0m/s`
+자체는 데드존보다 훨씬 위라 **정상 순항/코너링 중 이 속도로 목표를 잡는 일은 없음**.
+결론: 출발 가속은 스윕 통과라 안전할 가능성 높고, 정지 시엔 짧은 덜컹임이 있을 수
+있으나 무한 진동은 아님. 완전 매끄러운 정지가 필요하면 추후 `Openloop Hysteresis`
+등으로 추가 튜닝 필요(보류, 다음 세션).
+
+### 부수 발견
+- **워크스페이스 동기화 어긋남**: `~/F1tenth_control/control_code/steering_control_node.cpp`
+  (이 리포)와 `~/2026_IFAC/f1tenth_control/control_code/steering_control_node.cpp`(빌드
+  대상)가 다름 — 배포본에 `controller_type`/`waypoint_topic`/MPC 파라미터가 추가돼
+  있고 리포에는 없음. 향후 코드 수정 시 어느 쪽이 최신인지 확인 필요.
+- `vesc_mcconf.xml`/`vesc_appconf.xml`(이 리포)도 실제 VESC 라이브 설정과 어긋난
+  상태(라이브에서 여러 차례 파라미터를 바꿔가며 테스트함, 프리셋 적용 이력도 있어
+  정확한 최종값 불확실). **다음 실차 세션에서 VESC Tool
+  `ConfBackup > Save Motor/App Configuration XML`로 라이브 설정을 내보내 이 리포의
+  XML을 갱신할 것.**
+
+### 보류
+- 감속 시 데드존 통과 덜컹임 추가 완화(`Openloop Hysteresis` 등) — 다음 세션.
+
+---
+
 ## 2026-07-05 (예정) — 첫 실차 주행 & IMU/LUT 준비
 
 세션(07-04)에서 도출한 내일 현장 작업 순서. 의존관계상 순서 지킬 것.

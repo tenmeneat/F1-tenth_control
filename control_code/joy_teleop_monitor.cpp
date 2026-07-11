@@ -1,14 +1,15 @@
 #include <chrono>
-#include <iostream>
 #include <memory>
 #include <vector>
 #include <iomanip>
+#include <sstream>
 #include <algorithm>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
 #include "ackermann_msgs/msg/ackermann_drive_stamped.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/string.hpp"
 
 // 수학 상수 정의
 const double PI = 3.14159265358979323846;
@@ -16,6 +17,7 @@ const double PI = 3.14159265358979323846;
 class JoyTeleopMonitor : public rclcpp::Node {
 public:
     enum class ControlMode { MANUAL, AUTONOMOUS };
+    enum class ControlAlgorithm { MAP, MPPI };
 
     JoyTeleopMonitor() : Node("joy_teleop_monitor") {
         // ==========================================
@@ -27,7 +29,8 @@ public:
         this->declare_parameter<int>("throttle_axis", 1);            // 좌측 스틱 세로 (기본 1)
         this->declare_parameter<bool>("use_trigger_throttle", true); // 트리거(RT/LT) 가감속 사용 여부
         this->declare_parameter<int>("emergency_button", 1);         // B 버튼 (기본 1)
-        this->declare_parameter<int>("boost_button", 5);             // RB 버튼 (기본 5)
+        this->declare_parameter<int>("boost_button", 0);             // A 버튼 (기본 0)
+        this->declare_parameter<int>("algorithm_button", 5);         // RB 버튼 (기본 5) — MAP/MPPI 알고리즘 전환
         this->declare_parameter<bool>("is_simulation", false);       // 시뮬레이터 환경 모드 여부
         this->declare_parameter<bool>("force_autonomous", false);     // 조이스틱 연결 없이 자율주행 모드 즉시 기동 여부
 
@@ -38,6 +41,7 @@ public:
         this->get_parameter("use_trigger_throttle", use_trigger_throttle_);
         this->get_parameter("emergency_button", emergency_button_);
         this->get_parameter("boost_button", boost_button_);
+        this->get_parameter("algorithm_button", algorithm_button_);
         this->get_parameter("is_simulation", is_simulation_);
         this->get_parameter("force_autonomous", force_autonomous_);
 
@@ -72,7 +76,13 @@ public:
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             "/drive", 10);
 
-        // 모니터 대시보드 출력용 타이머 (10Hz)
+        // 대시보드(조이스틱/모드/AEB 상태) 텍스트 발행 — 별도 뷰어 노드(teleop_dashboard_node)가
+        // /teleop_dashboard를 구독해 자기 터미널에서 렌더링. Mux는 화면을 직접 지우지 않으므로
+        // 공용 런치 터미널의 다른 노드 로그를 덮어쓰지 않는다.
+        dashboard_pub_ = this->create_publisher<std_msgs::msg::String>(
+            "/teleop_dashboard", 10);
+
+        // 대시보드 텍스트 발행용 타이머 (10Hz)
         display_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(100),
             std::bind(&JoyTeleopMonitor::display_dashboard, this));
@@ -90,7 +100,7 @@ private:
     void joy_callback(const sensor_msgs::msg::Joy::ConstSharedPtr msg) {
         size_t required_axes = use_trigger_throttle_ ? 6 : static_cast<size_t>(std::max(steering_axis_, throttle_axis_) + 1);
         if (msg->axes.size() < required_axes ||
-            msg->buttons.size() <= static_cast<size_t>(std::max({emergency_button_, boost_button_, 4, 6, 7}))) {
+            msg->buttons.size() <= static_cast<size_t>(std::max({emergency_button_, boost_button_, algorithm_button_, 4, 6, 7}))) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
                 "조이스틱 축(Axes) 또는 버튼 개수가 부족합니다. 컨트롤러 연결을 확인하세요.");
             return;
@@ -108,6 +118,21 @@ private:
             }
         }
         last_lb_state_ = current_lb_state;
+
+        // 1-1. 제어 알고리즘 전환 (RB 버튼: algorithm_button_ 상승 엣지 감지)
+        // 현재는 상태 전환 + 대시보드 표시만 한다. 실제 /drive_autonomous 소스 라우팅은
+        // MPPI 전용 노드가 생긴 뒤 auto_drive_callback에서 배선한다.
+        bool current_algorithm_button_state = (msg->buttons[algorithm_button_] == 1);
+        if (current_algorithm_button_state && !last_algorithm_button_state_) {
+            if (current_algorithm_ == ControlAlgorithm::MAP) {
+                current_algorithm_ = ControlAlgorithm::MPPI;
+                RCLCPP_INFO(this->get_logger(), "🔀 제어 알고리즘 전환: [MPPI]");
+            } else {
+                current_algorithm_ = ControlAlgorithm::MAP;
+                RCLCPP_INFO(this->get_logger(), "🔀 제어 알고리즘 전환: [MAP]");
+            }
+        }
+        last_algorithm_button_state_ = current_algorithm_button_state;
 
         // 2. 토글식 비상 정지 (B 버튼: emergency_button_)
         if (msg->buttons[emergency_button_] == 1) {
@@ -228,67 +253,79 @@ private:
     }
 
     void display_dashboard() {
-        std::cout << "\033[2J\033[H";
-        std::cout << "=========================================================\n";
-        std::cout << "        ROBORACER CONTROL MULTIPLEXER & TELEMETRY        \n";
-        std::cout << "=========================================================\n";
-        
+        // 화면 클리어(\033[2J\033[H)는 뷰어 노드(teleop_dashboard_node)가 담당한다.
+        // 여기서는 대시보드 "내용"만 조립해 /teleop_dashboard(String)로 발행한다.
+        std::ostringstream oss;
+        oss << "=========================================================\n";
+        oss << "        ROBORACER CONTROL MULTIPLEXER & TELEMETRY        \n";
+        oss << "=========================================================\n";
+
         // 제어 모드 및 비상 상태 표시
-        std::cout << " [System State & Config] \n";
-        std::cout << "  * Operating Mode      : " 
-                  << (is_simulation_ ? "\033[1;33m[SIMULATION (시뮬레이터용)]\033[0m" : "\033[1;32m[REAL CAR (대회 실차용)]\033[0m") 
+        oss << " [System State & Config] \n";
+        oss << "  * Operating Mode      : "
+                  << (is_simulation_ ? "\033[1;33m[SIMULATION (시뮬레이터용)]\033[0m" : "\033[1;32m[REAL CAR (대회 실차용)]\033[0m")
                   << "\n";
-        
+
         std::string mode_str = "";
         if (current_mode_ == ControlMode::MANUAL) {
             mode_str = "\033[1;32m[MANUAL (수동 조작)]\033[0m";
         } else {
             mode_str = "\033[1;36m[AUTONOMOUS (자율주행)]\033[0m";
         }
-        std::cout << "  * Active Control Mode : " << mode_str << "\n";
-        
-        std::cout << "  * Joystick E-Stop     : " 
-                  << (is_emergency_stop_ ? "\033[1;31m[ACTIVE - BRAKE LATCHED]\033[0m" : "\033[1;32m[NORMAL]\033[0m") 
-                  << "\n";
-                  
-        std::cout << "  * Lidar AEB State     : " 
-                  << (is_aeb_active_ ? "\033[1;31m[TRIGGERED - BRAKING]\033[0m" : "\033[1;32m[SAFE]\033[0m") 
+        oss << "  * Active Control Mode : " << mode_str << "\n";
+
+        oss << "  * Joystick E-Stop     : "
+                  << (is_emergency_stop_ ? "\033[1;31m[ACTIVE - BRAKE LATCHED]\033[0m" : "\033[1;32m[NORMAL]\033[0m")
                   << "\n";
 
-        std::cout << "  * Boost Mode (RB)     : " << (is_boost_active_ ? "\033[1;33m[BOOST ON]\033[0m" : "[OFF]") << "\n";
-        std::cout << "\n";
+        oss << "  * Lidar AEB State     : "
+                  << (is_aeb_active_ ? "\033[1;31m[TRIGGERED - BRAKING]\033[0m" : "\033[1;32m[SAFE]\033[0m")
+                  << "\n";
+
+        oss << "  * Boost Mode (A)      : " << (is_boost_active_ ? "\033[1;33m[BOOST ON]\033[0m" : "[OFF]") << "\n";
+
+        std::string algo_str = (current_algorithm_ == ControlAlgorithm::MAP)
+                                    ? "\033[1;36m[MAP]\033[0m"
+                                    : "\033[1;35m[MPPI]\033[0m";
+        oss << "  * Active Algorithm    : " << algo_str << "\n";
+        oss << "\n";
 
         // 명령 전송 상태 표시
-        std::cout << " [Current Telemetry] \n";
-        std::cout << std::fixed << std::setprecision(3);
+        oss << " [Current Telemetry] \n";
+        oss << std::fixed << std::setprecision(3);
         if (is_emergency_stop_ || is_aeb_active_) {
-            std::cout << "  * Status              : \033[1;31mEMERGENCY BRAKING ACTIVE\033[0m\n";
-            std::cout << "  * Target Speed        : 0.000 m/s (Braking)\n";
-            std::cout << "  * Target Steering     : 0.000 rad\n";
+            oss << "  * Status              : \033[1;31mEMERGENCY BRAKING ACTIVE\033[0m\n";
+            oss << "  * Target Speed        : 0.000 m/s (Braking)\n";
+            oss << "  * Target Steering     : 0.000 rad\n";
         } else if (current_mode_ == ControlMode::MANUAL) {
-            std::cout << "  * Target Speed (Joy)  : " << target_speed_ << " m/s\n";
-            std::cout << "  * Target Steering(Joy): " << target_steering_angle_ << " rad\n";
+            oss << "  * Target Speed (Joy)  : " << target_speed_ << " m/s\n";
+            oss << "  * Target Steering(Joy): " << target_steering_angle_ << " rad\n";
         } else {
-            std::cout << "  * Control Source      : Redirecting /drive_autonomous to /drive...\n";
+            oss << "  * Control Source      : Redirecting /drive_autonomous to /drive...\n";
         }
 
         // 조이스틱 원입력 퍼센티지 (모드와 무관하게 항상 표시)
-        std::cout << "\n [Joystick Input] \n";
-        std::cout << std::setprecision(1);
-        std::cout << "  * Throttle (RT)       : " << input_throttle_pct_ << " %\n";
-        std::cout << "  * Brake (LT)          : " << input_brake_pct_ << " %\n";
-        std::cout << "  * Steering (L stick)  : " << std::showpos << input_steer_pct_ << std::noshowpos
+        oss << "\n [Joystick Input] \n";
+        oss << std::setprecision(1);
+        oss << "  * Throttle (RT)       : " << input_throttle_pct_ << " %\n";
+        oss << "  * Brake (LT)          : " << input_brake_pct_ << " %\n";
+        oss << "  * Steering (L stick)  : " << std::showpos << input_steer_pct_ << std::noshowpos
                   << " %   (+ Left / - Right)\n";
-        std::cout << std::setprecision(3);
-        std::cout << "\n";
+        oss << std::setprecision(3);
+        oss << "\n";
 
         // 조이스틱 버튼 상태
-        std::cout << " [XBox Key Mapping Guides] \n";
-        std::cout << "  * LB Button           : Toggle AUTO / MANUAL Mode\n";
-        std::cout << "  * B Button            : Emergency Stop (Latch)\n";
-        std::cout << "  * X Button            : Reset Emergency Stop Latch\n";
-        std::cout << "=========================================================\n";
-        std::flush(std::cout);
+        oss << " [XBox Key Mapping Guides] \n";
+        oss << "  * LB Button           : Toggle AUTO / MANUAL Mode\n";
+        oss << "  * B Button            : Emergency Stop (Latch)\n";
+        oss << "  * X Button            : Reset Emergency Stop Latch\n";
+        oss << "  * A Button            : Boost\n";
+        oss << "  * RB Button           : Toggle MAP / MPPI Algorithm\n";
+        oss << "=========================================================\n";
+
+        auto dash_msg = std_msgs::msg::String();
+        dash_msg.data = oss.str();
+        dashboard_pub_->publish(dash_msg);
     }
 
     // 설정 파라미터
@@ -299,6 +336,7 @@ private:
     bool use_trigger_throttle_;
     int emergency_button_;
     int boost_button_;
+    int algorithm_button_;
     bool is_simulation_;
     bool force_autonomous_;
 
@@ -313,7 +351,9 @@ private:
     
     // 상태 변수
     ControlMode current_mode_ = ControlMode::MANUAL;
+    ControlAlgorithm current_algorithm_ = ControlAlgorithm::MAP;
     bool last_lb_state_ = false;
+    bool last_algorithm_button_state_ = false;
     bool is_emergency_stop_ = false;
     bool is_boost_active_ = false;
     bool rt_pressed_once_ = false;
@@ -329,6 +369,7 @@ private:
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr auto_drive_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr aeb_active_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr dashboard_pub_;
     rclcpp::TimerBase::SharedPtr display_timer_;
 };
 
