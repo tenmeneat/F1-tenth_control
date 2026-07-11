@@ -4,6 +4,39 @@
 
 ---
 
+## 2026-07-11 (7) — 젯슨 배포 대상을 `simul_practice` → `main`으로 전환, `f1tenth_control` main에 첫 등록
+
+### 배경
+젯슨(실차)이 pull할 팀 레포 브랜치를 `main`으로 옮기기로 함(팀 전체가 planning/perception도 곧
+main에 통합 예정). `main`엔 이전까지 `f1tenth_control`이 아예 없었고(`git ls-tree -r origin/main`
+으로 직접 확인), `vesc_driver`/`urg_node2`/`state_machine`도 없어 그 자체로는 실차 하드웨어를
+못 돌리는 상태였음(팀이 곧 올릴 예정, 사용자 확인 완료).
+
+### 문제 — 단순 브랜치명 변경이 위험한 이유
+기존 `f1up` alias는 `~/2026_IFAC`(현재 `simul_practice` 체크아웃, `CLAUDE.md`가 문서화한 실제
+빌드/시뮬레이션 워크스페이스)에서 직접 `git checkout <branch>`로 전환 후 커밋·푸시했음. 이 디렉토리를
+그대로 `main`으로 전환하면 `simul_practice`에만 있는 `state_machine`/`vesc`*/`urg_node2` 등이
+디스크에서 즉시 사라져 로컬 빌드/시뮬레이션이 깨짐.
+
+### 해결 — 별도 git worktree(`~/2026_IFAC_main`)로 배포 전용 작업 트리 분리
+`~/2026_IFAC`(simul_practice, 빌드용)는 절대 건드리지 않고, `git worktree add ~/2026_IFAC_main main`
+으로 `main`만 체크아웃한 별도 디렉토리를 신설(빌드 안 함, 순수 git add/commit/push 경유지).
+`f1up` alias 수정: 기존 `~/2026_IFAC/f1tenth_control/`로의 rsync(로컬 빌드 환경 최신화용)는
+그대로 유지하고, 그 뒤에 `~/2026_IFAC_main/f1tenth_control/`로도 rsync + `git add` + commit +
+`push origin main`을 추가(레포 **루트 바로 아래** 배치 — `planning/global_planner`처럼 완결된
+실행 노드 패키지 취급, 사용자 확인). 더 이상 `simul_practice`로는 푸시하지 않음.
+
+### 검증
+- `git worktree list`로 `~/2026_IFAC_main`이 `main`에 정상 연결 확인.
+- `f1up` 1회 실행 → `~/2026_IFAC_main/f1tenth_control/` 신규 생성, 커밋(`e26f005`) 후
+  `origin/main`에 정상 푸시 확인. `~/2026_IFAC`는 여전히 `simul_practice` 체크아웃 유지,
+  `state_machine`/`vesc`/`urg_node2` 디스크 유지 확인(로컬 빌드 환경 무영향).
+- 실행 중 `control_code/MAP_controller_reference.py`가 이미 디스크에서 삭제(unstaged)된 상태를
+  발견 — 사용자 확인 결과 의도된 삭제였음, `f1up`으로 그대로 커밋. `CLAUDE.md` "참고/비활성 자산"
+  목록에서도 해당 항목 제거.
+
+---
+
 ## 2026-07-11 (6) — control_map_node 미노출 파라미터 15개 전부 launch 인자로 승격
 
 ### 배경

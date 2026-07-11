@@ -71,6 +71,10 @@ def generate_launch_description():
         max_lateral_accel=LaunchConfiguration('max_lateral_accel'),
         base_max_accel=6.5,
         lookup_table_file=LaunchConfiguration('lookup_table_file'),
+        # vesc_driver_node는 IMU를 sensors/imu/raw로 발행하지만 control_MAP.cpp는
+        # /imu/data를 구독하도록 하드코딩돼있어 리매핑 필요(안 하면 IMU 미수신 → 롤 ESC/
+        # 요레이트 카운터스티어가 조용히 무효화됨).
+        remappings=[('/imu/data', 'sensors/imu/raw')],
     )
 
     joy_teleop_monitor = common.build_joy_teleop_monitor()

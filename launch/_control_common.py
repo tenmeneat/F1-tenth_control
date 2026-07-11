@@ -99,13 +99,16 @@ def declare_common_args():
 
 
 def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max_accel,
-                            lookup_table_file=''):
-    """control_map_node — 환경별로 다른 값만 인자로 받고 나머지는 공용 정의."""
+                            lookup_table_file='', remappings=None):
+    """control_map_node — 환경별로 다른 값만 인자로 받고 나머지는 공용 정의.
+    remappings: 실차에서만 필요한 토픽 리매핑(예: vesc_driver의 sensors/imu/raw →
+    코드에 하드코딩된 /imu/data). 시뮬은 sim_imu_bridge_node가 /imu/data로 바로 발행하므로 불필요."""
     return Node(
         package='f1tenth_control',
         executable='control_map_node',
         name='control_map_node',
         output='screen',
+        remappings=remappings,
         parameters=[{
             'odom_topic': odom_topic,
             'wheelbase': 0.33,
