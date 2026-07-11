@@ -95,6 +95,21 @@ def declare_common_args():
             'obstacle_avoid_hold_cycles', default_value='15',
             description='회피 폴백 유지 사이클 수(50Hz 기준, 채터링 방지)'
         ),
+
+        # ── MPPI 컨트롤러 튜너블 (control_mppi_node 전용) ──
+        # 나머지 MPPI 파라미터(N/K/차량/타이어/비용가중)는 노드 코드 기본값 사용.
+        DeclareLaunchArgument(
+            'mppi_lambda', default_value='1.0',
+            description='MPPI 역온도 λ (작을수록 저비용 롤아웃에 집중)'
+        ),
+        DeclareLaunchArgument(
+            'mppi_sigma_steer', default_value='0.15',
+            description='MPPI 조향 탐색 노이즈 σ [rad]'
+        ),
+        DeclareLaunchArgument(
+            'mppi_sigma_accel', default_value='1.5',
+            description='MPPI 종가속 탐색 노이즈 σ [m/s^2]'
+        ),
     ]
 
 
@@ -145,6 +160,28 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'obstacle_margin': LaunchConfiguration('obstacle_margin'),
             'obstacle_avoid_hold_cycles': ParameterValue(
                 LaunchConfiguration('obstacle_avoid_hold_cycles'), value_type=int),
+        }]
+    )
+
+
+def build_control_mppi_node(*, odom_topic, max_speed, remappings=None):
+    """control_mppi_node — control_map_node와 나란히 상시 구동되는 MPPI 컨트롤러.
+    /drive_mppi로 발행하며, Mux가 RB 상태에 따라 /drive_autonomous(MAP)와 라우팅한다.
+    솔버(CPU/GPU)는 빌드타임 자동선택 — 런치는 무관.
+    max_speed는 노드의 v_max(직선 최고속도 캡)로 매핑. Pacejka/차량 파라미터는 노드
+    기본값(gym) — 실차 보정 전까지 노출 최소화. remappings: 실차 /imu/data→sensors/imu/raw."""
+    return Node(
+        package='f1tenth_control',
+        executable='control_mppi_node',
+        name='control_mppi_node',
+        output='screen',
+        remappings=remappings,
+        parameters=[{
+            'odom_topic': odom_topic,
+            'v_max': max_speed,
+            'lambda': LaunchConfiguration('mppi_lambda'),
+            'sigma_steer': LaunchConfiguration('mppi_sigma_steer'),
+            'sigma_accel': LaunchConfiguration('mppi_sigma_accel'),
         }]
     )
 

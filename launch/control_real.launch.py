@@ -71,9 +71,18 @@ def generate_launch_description():
         max_lateral_accel=LaunchConfiguration('max_lateral_accel'),
         base_max_accel=6.5,
         lookup_table_file=LaunchConfiguration('lookup_table_file'),
-        # vesc_driver_node는 IMU를 sensors/imu/raw로 발행하지만 control_MAP.cpp는
+        # vesc_driver_node는 IMU를 sensors/imu/raw로 발행하지만 control_map_node.cpp는
         # /imu/data를 구독하도록 하드코딩돼있어 리매핑 필요(안 하면 IMU 미수신 → 롤 ESC/
         # 요레이트 카운터스티어가 조용히 무효화됨).
+        remappings=[('/imu/data', 'sensors/imu/raw')],
+    )
+
+    # MPPI 컨트롤러 노드 — control_map_node와 나란히 상시 구동(/drive_mppi 발행).
+    # 평소엔 Mux가 MAP을 라우팅(MPPI 출력 무시), 조이스틱 RB로 즉시 MPPI 전환.
+    # 실차 IMU 리매핑은 control_map_node와 동일(/imu/data→sensors/imu/raw).
+    mppi_control = common.build_control_mppi_node(
+        odom_topic=LaunchConfiguration('odom_topic'),
+        max_speed=LaunchConfiguration('max_speed'),
         remappings=[('/imu/data', 'sensors/imu/raw')],
     )
 
@@ -113,6 +122,7 @@ def generate_launch_description():
         lookup_table_file_arg,
         joy_launch,
         steering_control,
+        mppi_control,
         joy_teleop_monitor,
         aeb_node,
     ])

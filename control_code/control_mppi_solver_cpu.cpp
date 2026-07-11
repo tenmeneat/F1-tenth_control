@@ -1,5 +1,5 @@
 // ============================================================================
-// control_MPPI.cpp — 샘플링 기반 MPPI(Model Predictive Path Integral) 컨트롤러
+// control_mppi_solver_cpu.cpp — 샘플링 기반 MPPI(Model Predictive Path Integral) 컨트롤러
 // ----------------------------------------------------------------------------
 // 정보이론 MPPI(Williams et al. 2018, IEEE T-RO):
 //   1) 명목 제어열 U={u_0..u_{N-1}} 주위로 K개 잡음 롤아웃 v_{t,k}=u_t+ε_{t,k} 샘플
@@ -15,7 +15,7 @@
 //    전방 롤아웃에는 못 쓴다. 여기서는 전방 Pacejka 모델을 자체 파라미터로 구현하고,
 //    기본값은 f1tenth_gym/forzaETH 차량값에서 가져온다(추후 실차 보정 대상).
 //
-// 단일 파일 원칙(control_MAP.cpp와 동일): 별도 헤더 없이 알고리즘 클래스를 이 파일에
+// 단일 파일 원칙(control_map_node.cpp와 동일): 별도 헤더 없이 알고리즘 클래스를 이 파일에
 //   인라인 정의한다. 다음 세션에 ControlMppiNode + main()을 이 파일에 덧붙이고
 //   CMake를 add_library → add_executable(control_mppi_node)로 전환한다.
 //   파일 하단 #ifdef MPPI_SMOKE_TEST 블록은 ROS 없이 알고리즘을 폐루프 검증하는 하네스.
@@ -329,7 +329,7 @@ class MPPIController {
 
 // ============================================================================
 // 스탠드얼론 스모크 테스트 (ROS 무관, 알고리즘 폐루프 검증)
-//   빌드: g++ -O2 -std=c++17 -DMPPI_SMOKE_TEST control_code/control_MPPI.cpp -o /tmp/mppi_smoke
+//   빌드: g++ -O2 -std=c++17 -DMPPI_SMOKE_TEST control_code/control_mppi_solver_cpu.cpp -o /tmp/mppi_smoke
 //   static lib 빌드(colcon) 시엔 매크로 미정의라 main 없음.
 // ============================================================================
 #ifdef MPPI_SMOKE_TEST

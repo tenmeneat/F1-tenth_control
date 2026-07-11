@@ -62,10 +62,15 @@ public:
             "/joy", 10,
             std::bind(&JoyTeleopMonitor::joy_callback, this, std::placeholders::_1));
 
-        // 자율주행 제어 토픽 구독
+        // 자율주행 제어 토픽 구독 (MAP: control_map_node → /drive_autonomous)
         auto_drive_sub_ = this->create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
             "/drive_autonomous", 10,
             std::bind(&JoyTeleopMonitor::auto_drive_callback, this, std::placeholders::_1));
+
+        // 자율주행 제어 토픽 구독 (MPPI: control_mppi_node → /drive_mppi)
+        mppi_drive_sub_ = this->create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
+            "/drive_mppi", 10,
+            std::bind(&JoyTeleopMonitor::mppi_drive_callback, this, std::placeholders::_1));
 
         // AEB 활성화 여부 토픽 구독 추가
         aeb_active_sub_ = this->create_subscription<std_msgs::msg::Bool>(
@@ -75,6 +80,13 @@ public:
         // 최종 구동 토픽 발행
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             "/drive", 10);
+
+        // 현재 활성 알고리즘(MPPI 여부) 발행 — control_mppi_node가 이를 구독해 비활성일 때
+        // 매 사이클 풀 연산 대신 워밍업만 유지(젯슨 CPU/GPU 절약), RB 전환 시 즉시 복귀.
+        // transient_local(latched)이라 control_mppi_node가 나중에 떠도 최신 상태를 바로 수신.
+        mppi_active_pub_ = this->create_publisher<std_msgs::msg::Bool>(
+            "/mppi_active", rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
+        publish_mppi_active_state();
 
         // 대시보드(조이스틱/모드/AEB 상태) 텍스트 발행 — 별도 뷰어 노드(teleop_dashboard_node)가
         // /teleop_dashboard를 구독해 자기 터미널에서 렌더링. Mux는 화면을 직접 지우지 않으므로
@@ -120,8 +132,9 @@ private:
         last_lb_state_ = current_lb_state;
 
         // 1-1. 제어 알고리즘 전환 (RB 버튼: algorithm_button_ 상승 엣지 감지)
-        // 현재는 상태 전환 + 대시보드 표시만 한다. 실제 /drive_autonomous 소스 라우팅은
-        // MPPI 전용 노드가 생긴 뒤 auto_drive_callback에서 배선한다.
+        // current_algorithm_에 따라 auto_drive_callback(/drive_autonomous=MAP)과
+        // mppi_drive_callback(/drive_mppi=MPPI)이 각자 자기 차례일 때만 /drive로 포워딩한다.
+        // 두 컨트롤러 노드는 항상 켜져 있으므로 전환은 즉시 반영된다.
         bool current_algorithm_button_state = (msg->buttons[algorithm_button_] == 1);
         if (current_algorithm_button_state && !last_algorithm_button_state_) {
             if (current_algorithm_ == ControlAlgorithm::MAP) {
@@ -131,6 +144,7 @@ private:
                 current_algorithm_ = ControlAlgorithm::MAP;
                 RCLCPP_INFO(this->get_logger(), "🔀 제어 알고리즘 전환: [MAP]");
             }
+            publish_mppi_active_state();
         }
         last_algorithm_button_state_ = current_algorithm_button_state;
 
@@ -228,6 +242,21 @@ private:
     }
 
     void auto_drive_callback(const ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr msg) {
+        // MAP이 활성 알고리즘일 때만 처리(MPPI 활성 시 이 소스는 무시). 알고리즘 게이트를
+        // E-stop보다 먼저 두어 비활성 소스 콜백이 브레이크를 중복 발행하지 않게 한다 —
+        // 활성 소스(항상 흐름)가 E-stop 브레이크를 담당.
+        if (current_algorithm_ != ControlAlgorithm::MAP) return;
+        forward_autonomous(msg);
+    }
+
+    void mppi_drive_callback(const ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr msg) {
+        // MPPI가 활성 알고리즘일 때만 처리
+        if (current_algorithm_ != ControlAlgorithm::MPPI) return;
+        forward_autonomous(msg);
+    }
+
+    // 활성 자율주행 소스를 최종 /drive로 포워딩(E-stop/AEB·모드 게이트 공통 처리).
+    void forward_autonomous(const ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr& msg) {
         // 비상 정지 또는 Lidar AEB가 트리거된 경우 즉각 주행 출력을 차단하고 브레이크 송출
         if (is_emergency_stop_ || is_aeb_active_) {
             publish_brake_command();
@@ -240,6 +269,13 @@ private:
             drive_msg.header.stamp = this->now();
             drive_pub_->publish(drive_msg);
         }
+    }
+
+    // control_mppi_node에게 현재 활성 알고리즘이 MPPI인지 알려준다(latched).
+    void publish_mppi_active_state() {
+        auto msg = std_msgs::msg::Bool();
+        msg.data = (current_algorithm_ == ControlAlgorithm::MPPI);
+        mppi_active_pub_->publish(msg);
     }
 
     void publish_brake_command() {
@@ -367,9 +403,11 @@ private:
     // ROS 2 통신 개체
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr auto_drive_sub_;
+    rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr mppi_drive_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr aeb_active_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr dashboard_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mppi_active_pub_;
     rclcpp::TimerBase::SharedPtr display_timer_;
 };
 
