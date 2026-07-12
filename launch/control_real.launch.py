@@ -20,12 +20,16 @@ def generate_launch_description():
     #   - is_simulation=False: 실차 모드(수동 조작 송출 차단, 초기 AUTONOMOUS)
     #   - max_speed 기본 6.0: 직선 상한 보수적 캡(하드웨어 최고 ~9 m/s 대비 여유)
     #   - use_imu=True: VESC 내장 IMU 영점/세팅 완료 → 롤 인지 ESC 활성
-    #   - aeb_node 포함: /scan TTC 기반 독립 비상제동(odom은 PF로 remapping)
+    #   - 비상제동(AEB)은 제어 파트에서 제거됨 — 실제 비상정지는 planning 파트가 판단/발행
     #   - joy.launch.py include: 조이스틱 드라이버(joy_node)도 이 런치가 함께 기동
+    #   - ackermann_to_vesc_node 포함: 최종 /drive → VESC ERPM/서보 명령 어댑터
+    #     (⚠️ 실제 모터 구동은 vesc_driver_node가 별도로 떠야 함 — 아래 전제 참고)
     # 전제: 하드웨어 브링업(vesc_driver, LiDAR, particle_filter)과 planning이
-    #       /scan, /pf/pose/odom, /global_waypoints 를 발행 중이어야 함. (조이스틱은 이 런치가 기동)
+    #       /scan, /pf/pose/odom, /global_waypoints 를 발행 중이어야 함. (조이스틱·드라이브
+    #       어댑터는 이 런치가 기동하지만, VESC 시리얼 드라이버 vesc_driver_node는 별도 기동.)
     # 공통 파라미터(wheelbase, l1_gain 등)/joy_teleop_monitor 설정은 _control_common.py 참고 —
-    # 시뮬과 겹치는 부분은 거기 한 곳만 고치면 됨. 아래는 실차 전용 인자/노드(AEB, 조이스틱)만.
+    # 시뮬과 겹치는 부분은 거기 한 곳만 고치면 됨. 아래는 실차 전용 인자/노드(조이스틱,
+    # ackermann_to_vesc)만.
 
     # 파티클필터 odom 토픽 (로컬라이제이션 스택에 맞춰 변경 가능)
     odom_topic_arg = DeclareLaunchArgument(
@@ -65,11 +69,19 @@ def generate_launch_description():
         description='Steering LUT CSV 경로 (비워두면 기본 폴백 사용, 캘리브레이션 결과 적용 시 지정)'
     )
 
+    # 종방향 최대 가속도 한계 [m/s^2] — sim(4.0)과 값이 달라 _control_common.py 공용 선언 대신
+    # 진입점 파일에 각자 둔다(의도된 구조, CLAUDE.md 참고). base_max_decel은 sim/real 동일이라
+    # _control_common.py의 declare_common_args()에 공용으로 있음.
+    base_max_accel_arg = DeclareLaunchArgument(
+        'base_max_accel', default_value='6.5',
+        description='종방향 최대 가속도 한계 [m/s^2] (실차 보수값, sim 기본은 4.0)'
+    )
+
     steering_control = common.build_control_map_node(
         odom_topic=LaunchConfiguration('odom_topic'),
         max_speed=LaunchConfiguration('max_speed'),
         max_lateral_accel=LaunchConfiguration('max_lateral_accel'),
-        base_max_accel=6.5,
+        base_max_accel=LaunchConfiguration('base_max_accel'),
         lookup_table_file=LaunchConfiguration('lookup_table_file'),
         # vesc_driver_node는 IMU를 sensors/imu/raw로 발행하지만 control_map_node.cpp는
         # /imu/data를 구독하도록 하드코딩돼있어 리매핑 필요(안 하면 IMU 미수신 → 롤 ESC/
@@ -100,17 +112,28 @@ def generate_launch_description():
         launch_arguments={'device_id': LaunchConfiguration('device_id')}.items()
     )
 
-    # AEB 노드: /scan TTC 기반 독립 비상제동. odom을 /ego_racecar/odom으로 하드코딩하므로
-    # 실차 PF odom(/pf/pose/odom)으로 remapping 필요.
-    aeb_config = os.path.join(
-        get_package_share_directory('f1tenth_control'), 'config', 'aeb_params.yaml')
-    aeb_node = Node(
-        package='f1tenth_control',
-        executable='aeb_node',
-        name='aeb_node',
+    # ackermann_to_vesc_node: Mux가 확정한 최종 /drive(AckermannDriveStamped)를 VESC 명령
+    # (commands/motor/speed=ERPM, commands/servo/position)으로 변환하는 어댑터. 이게 있어야
+    # 컨트롤 출력이 실제 모터/서보에 도달한다. 노드 자체는 vesc_ackermann 패키지 소속.
+    #  - ⚠️ 노드는 'ackermann_cmd'를 구독하므로 우리 최종 토픽 /drive로 remapping 필수
+    #    (안 하면 아무도 발행 안 하는 ackermann_cmd를 구독해 조용히 무동작).
+    #  - 파라미터는 vesc_ackermann 레퍼런스 런치(ackermann_to_vesc_node.launch.xml)의
+    #    하드웨어 보정값. speed_to_erpm_gain=4614.0은 vesc_to_odom과 반드시 동일해야 함.
+    #    servo gain/offset은 실제 조향 링키지 기준값 — 조향 방향/중립이 어긋나면 여기서 튜닝.
+    #  - ⚠️ 이 노드만으론 모터가 안 돈다. 실제 하드웨어 구동은 vesc_driver_node가 별도로
+    #    떠서 commands/motor/speed를 시리얼로 VESC에 전달해야 함(하드웨어 브링업 소관).
+    ackermann_to_vesc_node = Node(
+        package='vesc_ackermann',
+        executable='ackermann_to_vesc_node',
+        name='ackermann_to_vesc_node',
         output='screen',
-        parameters=[aeb_config],
-        remappings=[('/ego_racecar/odom', LaunchConfiguration('odom_topic'))]
+        parameters=[{
+            'speed_to_erpm_gain': 4614.0,
+            'speed_to_erpm_offset': 0.0,
+            'steering_angle_to_servo_gain': -1.2135,
+            'steering_angle_to_servo_offset': 0.5304,
+        }],
+        remappings=[('ackermann_cmd', '/drive')]
     )
 
     return LaunchDescription([
@@ -120,9 +143,10 @@ def generate_launch_description():
         max_speed_arg,
         max_lateral_accel_arg,
         lookup_table_file_arg,
+        base_max_accel_arg,
         joy_launch,
         steering_control,
         mppi_control,
         joy_teleop_monitor,
-        aeb_node,
+        ackermann_to_vesc_node,
     ])

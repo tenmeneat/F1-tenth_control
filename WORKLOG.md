@@ -4,6 +4,112 @@
 
 ---
 
+## 2026-07-12 (3) — control_real.launch.py에 ackermann_to_vesc_node 배선(최종 /drive → VESC 명령 어댑터)
+
+### 배경
+`/drive`(Mux 최종 출력)가 실제 VESC 모터/서보에 도달하려면 AckermannDriveStamped를 VESC 명령
+(commands/motor/speed=ERPM, commands/servo/position)으로 변환하는 `ackermann_to_vesc_node`가
+떠 있어야 하는데, 조사 결과 이 노드가 워크스페이스 어디에서도 launch되지 않고 있었음(주석상
+"하드웨어 브링업" 전제로만 언급). 노드 자체는 `vesc/vesc_ackermann`에 이미 컴파일돼 있어 새로
+짤 필요는 없고 launch 배선만 필요.
+
+### 변경 (`control_real.launch.py`에만 추가, sim엔 불필요)
+`vesc_ackermann` 패키지의 `ackermann_to_vesc_node`를 `Node`로 추가:
+- **⚠️ remapping `ackermann_cmd`→`/drive` 필수**: 노드는 `ackermann_cmd`를 구독하는데 우리
+  최종 토픽은 `/drive`라, remap 안 하면 아무도 발행 안 하는 토픽을 구독해 조용히 무동작.
+- 파라미터는 `vesc_ackermann/launch/ackermann_to_vesc_node.launch.xml` 레퍼런스 값:
+  `speed_to_erpm_gain=4614.0`(vesc_to_odom과 반드시 동일 — 안 그러면 odom 속도 스케일 깨짐),
+  `speed_to_erpm_offset=0.0`, `steering_angle_to_servo_gain=-1.2135`,
+  `steering_angle_to_servo_offset=0.5304`(서보 링키지 기준값, 조향 방향/중립 어긋나면 튜닝).
+- 기존 `ackermann_to_vesc_node.launch.xml`을 IncludeLaunchDescription으로 안 쓴 이유: 그 xml엔
+  remapping이 없어 그대로 include하면 `ackermann_cmd` 구독으로 무동작. aeb_node처럼 직접 `Node`로
+  선언해 remap을 붙이는 게 깔끔(파일 내 기존 패턴과 일치).
+
+### ⚠️ 남은 것 (다음 실차 세션)
+- **이 노드만으론 모터 안 돔** — `vesc_driver_node`(commands/motor/speed를 시리얼로 VESC에 전달)가
+  별도로 떠야 함. 현재 워크스페이스에 vesc_driver를 자동 기동하는 통합 브링업 launch가 없음
+  (`vesc/vesc_driver/launch/vesc_driver_node.launch.py`를 수동으로 띄워야 함). 필요 시 통합
+  브링업 launch 신설 검토.
+- servo gain/offset(-1.2135/0.5304)은 표준 F1TENTH 레퍼런스값 — 실제 조향 방향/중립 실측 검증 필요.
+
+### 검증
+- `colcon build` 클린, `ros2 pkg executables vesc_ackermann`로 실행파일 확인,
+  `control_real.launch.py --show-args` 정상 파싱(exit 0). 실제 하드웨어 구동 검증은 실차 세션에서.
+
+---
+
+## 2026-07-12 (2) — 대시보드에 트리거→속도 표시 추가, base_max_accel/base_max_decel 터미널 인자로 승격
+
+### 배경
+"조이스틱 트리거 입력에 따른 속도도 대시보드에 보이게 해달라"는 요청과, 이어서 "수동 풀스로틀 시
+젯슨이 받는 최대속도가 어느 코드 기준이냐"는 질문에 답하는 과정에서 `base_max_accel`/
+`base_max_decel`(곡률 사전감속 제동거리 계산에 직접 쓰이는 값)을 짚었고, 사용자가
+`_control_common.py:139-140`을 보며 "여기서 `base_max_accel`은 못 바꾸냐"고 확인 — 그 줄은
+함수 인자를 그대로 통과시키는 자리라 값이 각 진입점 launch 파일에 흩어져 있고, 터미널
+`:=` 오버라이드도 안 되는 상태였음. 직전 턴에서 `base_max_decel=8.0`이 `max_lateral_accel`
+마찰피크(~6.7) 대비 낙관적일 수 있다는 점도 이미 지적된 상태라, 사용자가 "터미널 인자로 승격"을
+선택.
+
+### 변경
+1. **대시보드**: `joy_teleop_monitor.cpp`의 `display_dashboard()` `[Joystick Input]` 섹션에
+   `Commanded Speed : X.XXX m/s (limit Y.YYY m/s)` 줄 추가. `target_speed_`는 모드와 무관하게
+   `joy_callback`에서 항상 계산되므로 AUTONOMOUS 중에도 트리거를 그대로 쓰면 몇 m/s가 나갈지
+   미리 확인 가능. `launch/dashboard.launch.py` 자체는 `teleop_dashboard_node`만 띄우는
+   런치파일이라 내용에 관여하지 않아 변경 불필요.
+2. **`base_max_decel`**: sim/real 값이 동일(8.0)해서 `_control_common.py`의
+   `declare_common_args()`에 공용 `DeclareLaunchArgument`로 추가, `build_control_map_node()`
+   내부 리터럴 `8.0`을 `LaunchConfiguration('base_max_decel')`로 교체.
+3. **`base_max_accel`**: sim(4.0)/real(6.5) 값이 달라 공용 선언 대신 각 진입점 파일에
+   `DeclareLaunchArgument`를 개별 선언(`control_real.launch.py` 기본 6.5, `control_sim.launch.py`
+   기본 4.0 — 후자는 `DeclareLaunchArgument`/`LaunchConfiguration` import가 없어 새로 추가)하고
+   `build_control_map_node(base_max_accel=...)` 호출부를 `LaunchConfiguration('base_max_accel')`로
+   교체. 값 자체(4.0/6.5/8.0)는 변경하지 않음 — 구조만 터미널에서 즉시 조정 가능하게 승격.
+4. `CLAUDE.md` "실차 튜닝 파라미터" ①번 표에 두 파라미터 추가(+`base_max_decel`이 실측 전
+   추정값이라는 경고 문구 포함), ②번 그룹에서 `base_max_decel` 제거 + `base_max_accel` 예외
+   문단 삭제(더 이상 예외가 아님).
+5. `~/2026_IFAC/f1tenth_control/`(빌드 대상) 4개 사본 모두 diff 확인 후 동일 반영(격차 없음 확인).
+
+### 검증
+- `colcon build --packages-select f1tenth_control` 클린 빌드.
+- `ros2 launch f1tenth_control control_real.launch.py --show-args` / `control_sim.launch.py
+  --show-args`로 `base_max_accel`/`base_max_decel` 인자 노출 및 기본값(6.5/4.0, 8.0) 확인.
+
+---
+
+## 2026-07-12 — joy_teleop_monitor 기본 시작 모드 = MANUAL을 "의도된 동작"으로 확정 + 문서/로그 정합화
+
+### 배경
+"조이스틱만 연결하고 `control_real.launch.py`를 켜면 자율주행은 안 돼도 수동조작은 되냐"는
+질문을 계기로 `joy_teleop_monitor.cpp`를 추적. `is_simulation` 파라미터 자체 기본값은
+`false`(원 설계: 실차=AUTONOMOUS로 시작 + 수동 명령 포워딩 차단, CLAUDE.md도 그렇게 문서화돼
+있었음)인데, 07-11 `_control_common.py` 리팩터([[control-launch-common-refactor]]) 이후
+`build_joy_teleop_monitor()`가 `'is_simulation': True`를 파이썬 리터럴로 하드코딩해 sim/real
+런치 양쪽 모두 이 값을 받고 있었음 — 실차도 MANUAL로 시작하고 수동 명령이 실제로 `/drive`에
+포워딩되는 상태.
+
+### 결정
+처음엔 "안전 규칙이 리팩터 중 실수로 깨진 것"으로 보고 사용자에게 확인 질문을 던졌으나,
+**사용자가 "노드 켜면 기본이 조이스틱 수동 조작이어야 한다, 그렇게 유지되게 만들어라"고 명시적으로
+확정** — 버그가 아니라 원하는 동작. 로직은 이미 그렇게 동작 중이라 변경 불필요, 다만 코드/문서가
+"우연히 하드코딩된 것"처럼 보여 나중에 실수로 되돌리거나(is_simulation=false로 "수정"), 실차
+구동 중 터미널에 "SIMULATION (기본 수동 제어)"라는 혼란스러운 로그가 찍히는 문제가 남아있었음.
+
+### 변경 (로직 변경 없음 — 문구/주석/문서만 실제 동작에 맞게 정정)
+- `control_code/joy_teleop_monitor.cpp` 시작 로그: `is_simulation_` 대신 실제로 확정된
+  `current_mode_`를 기준으로 "MANUAL (조이스틱 수동 대기)" / "AUTONOMOUS (자율주행)"를 찍도록
+  변경 — 실차에서도 "SIMULATION"이 찍히던 오해 소지 제거.
+- `launch/_control_common.py`의 `build_joy_teleop_monitor()`: `'is_simulation': True`가
+  실차 포함 의도적 고정값이며 임의로 되돌리지 말라는 주석 추가.
+- `CLAUDE.md`의 `joy_teleop_monitor` "안전 규칙" 문단을 실제/의도 동작(기본 MANUAL 시작,
+  LB로 AUTONOMOUS 전환)으로 정정.
+- `~/2026_IFAC/f1tenth_control/`(빌드 대상) 사본 3곳 모두 diff 확인 후 동일 반영(격차 없음 확인).
+
+### 검증
+- `colcon build --packages-select f1tenth_control` 클린 빌드 확인(문자열/주석 변경만이라 로직
+  회귀 없음).
+
+---
+
 ## 2026-07-11 (7) — 젯슨 배포 대상을 `simul_practice` → `main`으로 전환, `f1tenth_control` main에 첫 등록
 
 ### 배경

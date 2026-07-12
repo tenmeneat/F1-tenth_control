@@ -72,11 +72,6 @@ public:
             "/drive_mppi", 10,
             std::bind(&JoyTeleopMonitor::mppi_drive_callback, this, std::placeholders::_1));
 
-        // AEB 활성화 여부 토픽 구독 추가
-        aeb_active_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-            "/aeb_active", 10,
-            std::bind(&JoyTeleopMonitor::aeb_active_callback, this, std::placeholders::_1));
-
         // 최종 구동 토픽 발행
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             "/drive", 10);
@@ -88,7 +83,7 @@ public:
             "/mppi_active", rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
         publish_mppi_active_state();
 
-        // 대시보드(조이스틱/모드/AEB 상태) 텍스트 발행 — 별도 뷰어 노드(teleop_dashboard_node)가
+        // 대시보드(조이스틱/모드 상태) 텍스트 발행 — 별도 뷰어 노드(teleop_dashboard_node)가
         // /teleop_dashboard를 구독해 자기 터미널에서 렌더링. Mux는 화면을 직접 지우지 않으므로
         // 공용 런치 터미널의 다른 노드 로그를 덮어쓰지 않는다.
         dashboard_pub_ = this->create_publisher<std_msgs::msg::String>(
@@ -100,15 +95,14 @@ public:
             std::bind(&JoyTeleopMonitor::display_dashboard, this));
 
         RCLCPP_INFO(this->get_logger(), "RoboRacer 자율/수동 토글 및 중계(Mux) 모니터가 시작되었습니다.");
-        RCLCPP_INFO(this->get_logger(), " - 초기 구동 모드: %s", 
-                    is_simulation_ ? "SIMULATION (기본 수동 제어)" : "REAL CAR (기본 자율주행)");
+        // is_simulation_이 아니라 실제로 확정된 current_mode_를 그대로 찍는다 — is_simulation_은
+        // sim/real 런치 양쪽 모두 true로 고정돼 있어(의도된 기본 MANUAL 시작), 이 값 자체로
+        // 메시지를 만들면 실차 구동 중에도 "SIMULATION"이 찍혀 혼동을 준다.
+        RCLCPP_INFO(this->get_logger(), " - 초기 구동 모드: %s",
+                    current_mode_ == ControlMode::MANUAL ? "MANUAL (조이스틱 수동 대기)" : "AUTONOMOUS (자율주행)");
     }
 
 private:
-    void aeb_active_callback(const std_msgs::msg::Bool::ConstSharedPtr msg) {
-        is_aeb_active_ = msg->data;
-    }
-
     void joy_callback(const sensor_msgs::msg::Joy::ConstSharedPtr msg) {
         size_t required_axes = use_trigger_throttle_ ? 6 : static_cast<size_t>(std::max(steering_axis_, throttle_axis_) + 1);
         if (msg->axes.size() < required_axes ||
@@ -217,8 +211,8 @@ private:
         raw_axes_ = msg->axes;
         raw_buttons_ = msg->buttons;
 
-        // 5. 비상 정지 또는 Lidar AEB가 트리거된 경우 제동 명령 최우선 송출
-        if (is_emergency_stop_ || is_aeb_active_) {
+        // 5. 비상 정지(수동 B버튼)가 트리거된 경우 제동 명령 최우선 송출
+        if (is_emergency_stop_) {
             publish_brake_command();
             return;
         }
@@ -255,10 +249,10 @@ private:
         forward_autonomous(msg);
     }
 
-    // 활성 자율주행 소스를 최종 /drive로 포워딩(E-stop/AEB·모드 게이트 공통 처리).
+    // 활성 자율주행 소스를 최종 /drive로 포워딩(E-stop·모드 게이트 공통 처리).
     void forward_autonomous(const ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr& msg) {
-        // 비상 정지 또는 Lidar AEB가 트리거된 경우 즉각 주행 출력을 차단하고 브레이크 송출
-        if (is_emergency_stop_ || is_aeb_active_) {
+        // 비상 정지(수동 B버튼)가 트리거된 경우 즉각 주행 출력을 차단하고 브레이크 송출
+        if (is_emergency_stop_) {
             publish_brake_command();
             return;
         }
@@ -314,10 +308,6 @@ private:
                   << (is_emergency_stop_ ? "\033[1;31m[ACTIVE - BRAKE LATCHED]\033[0m" : "\033[1;32m[NORMAL]\033[0m")
                   << "\n";
 
-        oss << "  * Lidar AEB State     : "
-                  << (is_aeb_active_ ? "\033[1;31m[TRIGGERED - BRAKING]\033[0m" : "\033[1;32m[SAFE]\033[0m")
-                  << "\n";
-
         oss << "  * Boost Mode (A)      : " << (is_boost_active_ ? "\033[1;33m[BOOST ON]\033[0m" : "[OFF]") << "\n";
 
         std::string algo_str = (current_algorithm_ == ControlAlgorithm::MAP)
@@ -329,7 +319,7 @@ private:
         // 명령 전송 상태 표시
         oss << " [Current Telemetry] \n";
         oss << std::fixed << std::setprecision(3);
-        if (is_emergency_stop_ || is_aeb_active_) {
+        if (is_emergency_stop_) {
             oss << "  * Status              : \033[1;31mEMERGENCY BRAKING ACTIVE\033[0m\n";
             oss << "  * Target Speed        : 0.000 m/s (Braking)\n";
             oss << "  * Target Steering     : 0.000 rad\n";
@@ -348,6 +338,10 @@ private:
         oss << "  * Steering (L stick)  : " << std::showpos << input_steer_pct_ << std::noshowpos
                   << " %   (+ Left / - Right)\n";
         oss << std::setprecision(3);
+        // target_speed_는 모드와 무관하게 joy_callback에서 항상 계산되므로, AUTONOMOUS 중에도
+        // "지금 트리거를 그대로 쓰면 몇 m/s가 나갈지" 미리 확인 가능하도록 여기서 항상 표시한다.
+        double trigger_speed_limit = max_speed_ * (is_boost_active_ ? 1.5 : 1.0);
+        oss << "  * Commanded Speed     : " << target_speed_ << " m/s (limit " << trigger_speed_limit << " m/s)\n";
         oss << "\n";
 
         // 조이스틱 버튼 상태
@@ -394,7 +388,6 @@ private:
     bool is_boost_active_ = false;
     bool rt_pressed_once_ = false;
     bool lt_pressed_once_ = false;
-    bool is_aeb_active_ = false;
 
     // 조이스틱 상태 캐싱
     std::vector<float> raw_axes_;
@@ -404,7 +397,6 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr auto_drive_sub_;
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr mppi_drive_sub_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr aeb_active_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr dashboard_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mppi_active_pub_;

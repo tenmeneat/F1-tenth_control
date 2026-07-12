@@ -166,7 +166,7 @@ public:
         // 신선한 로컬이 있으면 글로벌보다 우선 추종하고, 끊기면 글로벌로 폴백한다.
         local_fresh_timeout_ = this->declare_parameter<double>("local_fresh_timeout", 0.3);
         // 로컬 회피경로가 없을 때, 글로벌 추종 중 앞이 막히면 GapFollower로 회피 폴백하는 파라미터
-        obstacle_avoid_enable_ = this->declare_parameter<bool>("obstacle_avoid_enable", true);
+        obstacle_avoid_enable_ = this->declare_parameter<bool>("obstacle_avoid_enable", false);
         obstacle_cone_halfangle_ = this->declare_parameter<double>("obstacle_cone_halfangle", 0.14);
         obstacle_trigger_dist_ = this->declare_parameter<double>("obstacle_trigger_dist", 1.5);
         obstacle_margin_ = this->declare_parameter<double>("obstacle_margin", 0.3);
@@ -243,6 +243,11 @@ private:
             return;
         }
 
+        // global_republisher_node 등 플래너는 동일 경로를 주기적으로 재발행할 수 있음
+        // (예: publish_period_sec=2.0). 최초 수신 여부를 먼저 기록해 아래 인덱스 재초기화
+        // 범위를 최초 1회로 제한한다(이유는 아래 주석 참고).
+        const bool first_reception = !waypoints_initialized_;
+
         waypoints_.clear();
         waypoints_.reserve(msg->wpnts.size());
 
@@ -281,19 +286,34 @@ private:
             waypoints_.push_back(interp_wp);
         }
 
-        // 새 경로 수신 시 최단 거리 인덱스로 초기화
-        double min_dist = std::numeric_limits<double>::max();
-        size_t closest_idx = 0;
-        for (size_t i = 0; i < waypoints_.size(); ++i) {
-            double dx = waypoints_[i].x - current_x_;
-            double dy = waypoints_[i].y - current_y_;
-            double dist = std::hypot(dx, dy);
-            if (dist < min_dist) {
-                min_dist = dist;
-                closest_idx = i;
+        // 경로 수신 시 최단 거리 인덱스로 초기화 — 단 "최초 수신"이거나 기존 인덱스가
+        // 새 배열 범위를 벗어났을 때만 전체 무제한 재탐색을 수행한다.
+        //
+        // 재발행마다 매번 전체 재탐색으로 last_target_idx_를 덮어쓰면, 트랙이 스스로에게
+        // 가까워지는 구간(스타트/피니시 등: 직전 랩의 마지막 웨이포인트와 다음 랩의 첫
+        // 웨이포인트가 유클리드 거리로는 가깝지만 인덱스로는 트랙 반대편만큼 멂)에서
+        // "물리적으로는 가깝지만 인덱스는 완전히 다른" 지점으로 인덱스가 잘못 스냅될 수
+        // 있다. 이후 control_loop의 윈도우 탐색이 그 오인덱스에서부터 재수렴을 시도하며
+        // 조향 포화(±0.41 rad)·속도 붕괴가 반복 발생함(2026-07-12, 촘촘한 웨이포인트
+        // 경로에서 실측 확인 — global_republisher_node 기본 publish_period_sec=2.0로 실제
+        // 운영에서도 상시 발생 가능한 버그였음). 최초 수신 이후에는 control_loop이 매
+        // 사이클 윈도우 탐색으로 계속 인덱스를 추적 중이므로 여기서 다시 초기화할 필요가
+        // 없다 — 그대로 두면 다음 control_loop 틱이 이어서 갱신한다.
+        if (first_reception || last_target_idx_ >= waypoints_.size()) {
+            double min_dist = std::numeric_limits<double>::max();
+            size_t closest_idx = 0;
+            for (size_t i = 0; i < waypoints_.size(); ++i) {
+                double dx = waypoints_[i].x - current_x_;
+                double dy = waypoints_[i].y - current_y_;
+                double dist = std::hypot(dx, dy);
+                if (dist < min_dist) {
+                    min_dist = dist;
+                    closest_idx = i;
+                }
             }
+            last_target_idx_ = closest_idx;
+            waypoints_initialized_ = true;
         }
-        last_target_idx_ = closest_idx;
 
         // 전체 경로의 평균 곡률을 한 번만 계산 (control_loop에서 매 사이클 반복 제거)
         double sum_kappa = 0.0;
@@ -301,6 +321,52 @@ private:
             sum_kappa += std::abs(wp.curvature);
         }
         mean_track_curvature_ = waypoints_.empty() ? 0.0 : (sum_kappa / waypoints_.size());
+
+        // 평균 웨이포인트 간격(닫힌 루프 둘레/개수) — closest_idx 윈도우 탐색 크기와 아래
+        // 곡률 평활 창 크기를 물리 거리 기준으로 산출하는 데 사용(웨이포인트 밀도가 소스마다
+        // 크게 다를 수 있음).
+        double total_path_length = 0.0;
+        for (size_t i = 0; i + 1 < waypoints_.size(); ++i) {
+            total_path_length += std::hypot(waypoints_[i + 1].x - waypoints_[i].x,
+                                             waypoints_[i + 1].y - waypoints_[i].y);
+        }
+        if (waypoints_.size() > 1) {
+            total_path_length += std::hypot(waypoints_.front().x - waypoints_.back().x,
+                                             waypoints_.front().y - waypoints_.back().y);
+        }
+        avg_waypoint_spacing_ = waypoints_.empty() ? 0.36
+                                                    : std::max(0.01, total_path_length / waypoints_.size());
+
+        // 곡률 사전감속(1.5절)용 물리거리 창 평활 곡률 계산.
+        //
+        // wp.curvature(kappa_radpm)는 인접점 간 헤딩 차분으로 산출되는 값이라, 웨이포인트가
+        // 촘촘할수록(예: 0.18m) 아주 짧은 구간의 헤딩 노이즈가 그대로 증폭되어 개별 포인트
+        // kappa가 실제 지속 곡률보다 훨씬 크게(또는 부호가 흔들리며) 튀는 경우가 잦다. 사전감속
+        // 로직이 "윈도우 내 최대 단일점 kappa"를 그대로 써서 v_max=sqrt(a_lat/kappa)를 계산하면,
+        // 이 노이즈 스파이크 하나가 이미 오프라인 최적화된 플래너 자체 속도 프로파일(vx_mps,
+        // new_map_con 기준 이 구간 ~5.0~5.1m/s 유지)보다 훨씬 낮은 속도로 순간적으로 과잉 감속시켜
+        // (실측: kappa=0.79 스파이크 → sqrt(6.0/0.79)=2.76m/s로 서브함) 코너를 불필요하게 느리고
+        // 덜걱거리게 통과하게 만든다(2026-07-13, fuck_f1.csv 헤어핀 구간 랩타임 정체 원인 분석
+        // 중 확인 — 0.36m 간격 기존 프로덕션 트랙에서는 포인트당 헤딩 노이즈가 작아 거의 드러나지
+        // 않던 문제). 물리 거리 ±0.3m(총 0.6m) 창으로 |kappa| 평균을 내면 순간 노이즈는 눌리되
+        // 진짜 지속되는 헤어핀 곡률(윈도우 전체가 한 방향으로 굽는 구간)은 거의 그대로 반영되어,
+        // 오탐 감속을 줄이면서 실제 급커브 보호 기능은 유지한다. 원본 wp.curvature 필드는 FF
+        // 조향(curvature_ff_blend_, 기본 비활성) 등 다른 용도를 위해 그대로 둔다.
+        {
+            const double window_half_m = 0.3;
+            const int half_n = std::max(1, static_cast<int>(std::round(window_half_m / avg_waypoint_spacing_)));
+            const int n = static_cast<int>(waypoints_.size());
+            for (int i = 0; i < n; ++i) {
+                double sum = 0.0;
+                int cnt = 0;
+                for (int off = -half_n; off <= half_n; ++off) {
+                    int idx = ((i + off) % n + n) % n;
+                    sum += std::abs(waypoints_[idx].curvature);
+                    ++cnt;
+                }
+                waypoints_[i].smoothed_curvature = (cnt > 0) ? (sum / cnt) : std::abs(waypoints_[i].curvature);
+            }
+        }
 
         RCLCPP_INFO(this->get_logger(), "🔄 플래닝 팀의 글로벌 경로 수신 완료! 웨이포인트 개수: %zu, 초기 인덱스: %zu", waypoints_.size(), last_target_idx_);
     }
@@ -320,6 +386,7 @@ private:
             w.y = wp.y_m;
             w.speed = wp.vx_mps;
             w.curvature = wp.kappa_radpm;
+            w.smoothed_curvature = wp.kappa_radpm; // 로컬(짧은 회피경로)은 창 평활 미적용, 원본 그대로
             w.raw_speed_limit = wp.vx_mps;
             w.yaw = wp.psi_rad;
             local_waypoints_.push_back(w);
@@ -423,8 +490,25 @@ private:
 
         if (closed) {
             // 글로벌(닫힌 루프): 직전 인덱스 주변 윈도우 스캔 + 이탈 시 전역 재탐색
+            //
+            // 윈도우 크기는 고정 인덱스 개수가 아니라 물리 거리(후방 1m·전방 3m) 기준으로
+            // 웨이포인트 밀도에 맞춰 동적 산출한다. 고정 개수(-2..+8)였을 때는 소스마다
+            // 다른 웨이포인트 간격에서 물리적 탐색 반경이 절반 이하로 줄어들 수 있었다
+            // (예: 0.36m 간격 기준 설계값이 0.18m 간격 경로에선 전방 reach가 2.9m→1.44m로
+            // 축소) — 트랙이 스스로에게 가까워지는 구간(스타트/피니시 인접 구간 등)에서
+            // 윈도우가 진짜 최근접점을 놓치고 "윈도우 내에서는 그나마 가까운" 엉뚱한 인덱스에
+            // 잠기는 문제를 유발함. 이때 min_dist 자체는 fail-safe 임계(2.5m) 밑이라 전역
+            // 재탐색도 발동하지 않아 인덱스가 역행/진동하며 조향 포화·속도 붕괴로 이어짐
+            // (2026-07-12, 작년 완성형(new_map_con) 컨트롤러와의 폐루프 비교로 실측 확인).
+            const double spacing = std::max(0.01, avg_waypoint_spacing_);
+            int back_count = std::max(2, static_cast<int>(std::ceil(1.0 / spacing)));
+            int fwd_count = std::max(8, static_cast<int>(std::ceil(3.0 / spacing)));
+            const int half_n = static_cast<int>(n / 2);
+            back_count = std::min(back_count, half_n);
+            fwd_count = std::min(fwd_count, half_n);
+
             closest_idx = last_target_idx_;
-            for (int i = -2; i <= 8; ++i) {
+            for (int i = -back_count; i <= fwd_count; ++i) {
                 size_t idx = (last_target_idx_ + i + n) % n;
                 double dx = wps[idx].x - current_x_;
                 double dy = wps[idx].y - current_y_;
@@ -475,7 +559,9 @@ private:
         double accum_curv_dist = 0.0;
         size_t curv_scan_idx = closest_idx;
         while (accum_curv_dist < curv_lookahead_dist) {
-            double kappa_abs = std::abs(wps[curv_scan_idx].curvature);
+            // 평활 곡률 사용(위 global_path_callback 주석 참고) — 촘촘한 웨이포인트의
+            // 단일점 헤딩차분 노이즈로 인한 과잉 사전감속을 방지.
+            double kappa_abs = std::abs(wps[curv_scan_idx].smoothed_curvature);
             if (kappa_abs > max_upcoming_kappa) {
                 max_upcoming_kappa = kappa_abs;
             }
@@ -798,6 +884,8 @@ private:
     rclcpp::Time last_time_;
 
     size_t last_target_idx_ = 0;
+    bool waypoints_initialized_ = false; // 최초 global_waypoints 수신 여부(재발행 시 인덱스 오초기화 방지)
+    double avg_waypoint_spacing_ = 0.36; // global_path_callback에서 실측 갱신, 수신 전 보수적 기본값
 
     std::vector<Waypoint> waypoints_;          // 글로벌 경로 (닫힌 루프)
     double mean_track_curvature_ = 0.0;
@@ -808,7 +896,7 @@ private:
     double local_fresh_timeout_ = 0.3;         // 이 시간(s) 넘게 로컬 미수신 시 글로벌로 폴백
 
     // 장애물 차단 시 GapFollower 회피 폴백 (글로벌 추종 중, 로컬 회피경로 없을 때)
-    bool obstacle_avoid_enable_ = true;
+    bool obstacle_avoid_enable_ = false;
     double obstacle_cone_halfangle_ = 0.14;    // L1 방향 콘 반각 [rad] (~8도)
     double obstacle_trigger_dist_ = 1.5;       // 이 거리[m] 이내 근접 시 차단 판정
     double obstacle_margin_ = 0.3;             // 목표점 거리 대비 최소 여유[m]

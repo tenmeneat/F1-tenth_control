@@ -9,7 +9,7 @@ from launch.substitutions import LaunchConfiguration
 # 런치파일이 아니라 순수 헬퍼 모듈 — ros2 launch 진입점으로 직접 실행되지 않음.
 # 두 환경에서 100% 동일했던 파라미터/노드 정의를 여기 한 곳에만 두어, 파라미터
 # 추가/변경 시 두 파일에 수동으로 미러링해야 하는 드리프트 위험을 없앤다.
-# ⚠️ AEB·조이스틱 드라이버·sim_imu_bridge_node 포함 여부 등 안전 관련 구조 차이는
+# ⚠️ 조이스틱 드라이버·sim_imu_bridge_node 포함 여부 등 안전 관련 구조 차이는
 # 일부러 여기로 옮기지 않고 각 진입점 파일에 그대로 둔다(환경을 잘못 골라 안전
 # 기능이 빠진 채 기동되는 실수를 구조적으로 차단하기 위함).
 
@@ -76,8 +76,10 @@ def declare_common_args():
             description='이 시간(s) 넘게 /local_waypoints 미수신 시 글로벌 경로로 폴백'
         ),
         DeclareLaunchArgument(
-            'obstacle_avoid_enable', default_value='true',
-            description='글로벌 추종 중 장애물 차단 감지 시 GapFollower 회피 폴백 활성화'
+            'obstacle_avoid_enable', default_value='false',
+            description='글로벌 추종 중 장애물 차단 감지 시 GapFollower 회피 폴백 활성화. '
+                        '기본 false — overtake 방해 방지(앞차를 장애물로 오인해 회피 전환하는 것 차단). '
+                        'obstacle_avoid_enable:=true로 되살릴 수 있음.'
         ),
         DeclareLaunchArgument(
             'obstacle_cone_halfangle', default_value='0.14',
@@ -94,6 +96,43 @@ def declare_common_args():
         DeclareLaunchArgument(
             'obstacle_avoid_hold_cycles', default_value='15',
             description='회피 폴백 유지 사이클 수(50Hz 기준, 채터링 방지)'
+        ),
+
+        # ── L1 Guidance 룩어헤드 거리 (2026-07-13, initial_minimum/new_map_con 비교 기반 승격) ──
+        # new_map_con(작년 완성형, fuck_f1.csv 0.18m 촘촘 웨이포인트에서 7.1s/랩) 대비 우리
+        # control_map_node가 동일 웨이포인트에서 16.6s/랩 + 매랩 스핀. 공식 자체는 거의 동일
+        # (L1 = clamp(l1_gain + v*l1_distance, max(t_clip_min, sqrt2*lat_err), t_clip_max)
+        #  vs new_map_con의 clamp(lookahead_gain + v*lookahead_speed_gain, max(min_lookahead_distance,
+        #  sqrt2*lat_err), max_lookahead_distance) — l1_gain/l1_distance 기본값 0.5/0.3이
+        #  new_map_con의 lookahead_gain/lookahead_speed_gain과 완전히 동일), 유일한 실질 차이가
+        #  하한 바닥값: 우리 t_clip_min=0.8 vs new_map_con min_lookahead_distance=1.5. 하한이
+        #  낮으면 저속/시케인 구간에서 L1 목표점이 촘촘한 웨이포인트의 국소 지그재그를 그대로
+        #  쫓아가며 조향이 고주파로 흔들릴 여지가 커짐 — 스핀의 유력 원인으로 추정, 시뮬 검증 중.
+        DeclareLaunchArgument(
+            'l1_gain', default_value='0.5',
+            description='L1 룩어헤드 거리 베이스 오프셋 [m] (공식: l1_gain + v*l1_distance)'
+        ),
+        DeclareLaunchArgument(
+            'l1_distance', default_value='0.3',
+            description='L1 룩어헤드 거리 속도 게인 [s] (공식: l1_gain + v*l1_distance)'
+        ),
+        DeclareLaunchArgument(
+            't_clip_min', default_value='0.8',
+            description='L1 룩어헤드 거리 하한 [m] (new_map_con 대응값 min_lookahead_distance=1.5 — '
+                        '촘촘/시케인 웨이포인트에서 낮을수록 국소 지그재그를 쫓아 고주파 조향 유발 가능)'
+        ),
+        DeclareLaunchArgument(
+            't_clip_max', default_value='5.0',
+            description='L1 룩어헤드 거리 상한 [m]'
+        ),
+
+        # ── 종방향 감속 한계 (곡률 사전감속 제동거리 계산에도 직접 쓰임) ──
+        # sim/real 둘 다 동일값이라 base_max_accel과 달리 여기서 공용 선언. 8.0은 실측 검증
+        # 전 추정값 — max_lateral_accel 마찰피크(~6.7) 대비 낙관적일 수 있어 실차에서 급제동
+        # IMU 실측(acc_mean) 후 재조정 권장(2026-07-12 논의).
+        DeclareLaunchArgument(
+            'base_max_decel', default_value='8.0',
+            description='종방향 최대 감속도 한계 [m/s^2] (곡률 사전감속 제동거리 계산에 사용, 실측 전 추정값)'
         ),
 
         # ── MPPI 컨트롤러 튜너블 (control_mppi_node 전용) ──
@@ -127,17 +166,17 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
         parameters=[{
             'odom_topic': odom_topic,
             'wheelbase': 0.33,
-            'l1_gain': 0.5,
-            'l1_distance': 0.3,
-            't_clip_min': 0.8,
-            't_clip_max': 5.0,
+            'l1_gain': LaunchConfiguration('l1_gain'),
+            'l1_distance': LaunchConfiguration('l1_distance'),
+            't_clip_min': LaunchConfiguration('t_clip_min'),
+            't_clip_max': LaunchConfiguration('t_clip_max'),
             'lateral_error_coeff': 1.0,
             'max_speed': max_speed,
             'min_speed': 2.0,
             'max_lateral_accel': max_lateral_accel,
             'curvature_lookahead_count': 20,
             'base_max_accel': base_max_accel,
-            'base_max_decel': 8.0,
+            'base_max_decel': LaunchConfiguration('base_max_decel'),
             'wall_safety_margin': 0.6,
             'lookup_table_file': lookup_table_file,
             'use_imu': True,
@@ -187,7 +226,12 @@ def build_control_mppi_node(*, odom_topic, max_speed, remappings=None):
 
 
 def build_joy_teleop_monitor():
-    """joy_teleop_monitor — sim/real 완전 동일 설정."""
+    """joy_teleop_monitor — sim/real 완전 동일 설정.
+    'is_simulation': True는 sim/real 양쪽 다 의도적으로 고정한 값이다(2026-07-12 사용자 확정) —
+    노드 파라미터 자체 기본값은 false(실차=AUTONOMOUS 시작+수동 차단)이지만, 이 프로젝트는 실차
+    포함 항상 MANUAL(조이스틱 수동 대기)로 시작해 LB로 AUTONOMOUS 전환하는 쪽을 원한다. "실수로
+    하드코딩된 sim 기본값"이 아니니 실차 안전 차단이 필요해졌다고 해서 임의로 false로 되돌리지
+    말 것 — 그 결정은 joy_teleop_monitor 노드 설명(CLAUDE.md)에도 반영돼 있다."""
     return Node(
         package='f1tenth_control',
         executable='joy_teleop_monitor',

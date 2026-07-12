@@ -35,22 +35,6 @@ find_package(f110_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 
 # ==============================================================================
-# 1. Autonomous Emergency Braking (AEB) 노드 빌드
-# ==============================================================================
-add_executable(aeb_node control_code/aeb_node.cpp)
-target_include_directories(aeb_node PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-ament_target_dependencies(aeb_node
-  rclcpp
-  sensor_msgs
-  nav_msgs
-  ackermann_msgs
-  std_msgs
-)
-
-# ==============================================================================
 # 2. Xbox Teleop Monitor 노드 빌드
 # ==============================================================================
 add_executable(joy_teleop_monitor control_code/joy_teleop_monitor.cpp)
@@ -203,7 +187,6 @@ endif()
 # 8. 파일 설치 (Install) 규칙
 # ==============================================================================
 install(TARGETS
-  aeb_node
   joy_teleop_monitor
   control_map_node
   control_mppi_node
