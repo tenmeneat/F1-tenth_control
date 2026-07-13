@@ -16,9 +16,8 @@
 //    기본값은 f1tenth_gym/forzaETH 차량값에서 가져온다(추후 실차 보정 대상).
 //
 // 단일 파일 원칙(control_map_node.cpp와 동일): 별도 헤더 없이 알고리즘 클래스를 이 파일에
-//   인라인 정의한다. 다음 세션에 ControlMppiNode + main()을 이 파일에 덧붙이고
-//   CMake를 add_library → add_executable(control_mppi_node)로 전환한다.
-//   파일 하단 #ifdef MPPI_SMOKE_TEST 블록은 ROS 없이 알고리즘을 폐루프 검증하는 하네스.
+//   인라인 정의한다(노드 본체는 control_mppi_node.cpp가 별도로 #include). 파일 하단
+//   #ifdef MPPI_SMOKE_TEST 블록은 ROS 없이 알고리즘을 폐루프 검증하는 하네스.
 // ============================================================================
 
 #include <algorithm>

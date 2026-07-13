@@ -24,7 +24,7 @@ public:
         // 1. 파라미터 정의 및 설정
         // ==========================================
         this->declare_parameter<double>("max_steering_angle", 0.41); // 최대 조향각 (rad, 약 23.5도)
-        this->declare_parameter<double>("max_speed", 6.0);           // 최대 제어 속도 (m/s)
+        this->declare_parameter<double>("max_speed", 4.0);           // 최대 제어 속도 (m/s)
         this->declare_parameter<int>("steering_axis", 0);            // 좌측 스틱 가로 (기본 0)
         this->declare_parameter<int>("throttle_axis", 1);            // 좌측 스틱 세로 (기본 1)
         this->declare_parameter<bool>("use_trigger_throttle", true); // 트리거(RT/LT) 가감속 사용 여부
@@ -33,6 +33,10 @@ public:
         this->declare_parameter<int>("algorithm_button", 5);         // RB 버튼 (기본 5) — MAP/MPPI 알고리즘 전환
         this->declare_parameter<bool>("is_simulation", false);       // 시뮬레이터 환경 모드 여부
         this->declare_parameter<bool>("force_autonomous", false);     // 조이스틱 연결 없이 자율주행 모드 즉시 기동 여부
+        // 속도[m/s]→VESC ERPM 환산 게인. ackermann_to_vesc_node(vesc_ackermann)의
+        // speed_to_erpm_gain과 반드시 동일해야 함(대시보드 표시 전용, 실제 변환은 그쪽이 수행) —
+        // _control_common.py의 공용 launch 인자로 양쪽에 동일하게 전달됨.
+        this->declare_parameter<double>("speed_to_erpm_gain", 4614.0);
 
         this->get_parameter("max_steering_angle", max_steering_angle_);
         this->get_parameter("max_speed", max_speed_);
@@ -44,6 +48,7 @@ public:
         this->get_parameter("algorithm_button", algorithm_button_);
         this->get_parameter("is_simulation", is_simulation_);
         this->get_parameter("force_autonomous", force_autonomous_);
+        this->get_parameter("speed_to_erpm_gain", speed_to_erpm_gain_);
 
         // 기본 제어 모드 설정 (시뮬레이터이면 MANUAL로 대기, 실차이면 AUTONOMOUS로 시작)
         if (force_autonomous_) {
@@ -226,6 +231,7 @@ private:
                 drive_msg.header.frame_id = "base_link";
                 drive_msg.drive.steering_angle = target_steering_angle_;
                 drive_msg.drive.speed = target_speed_;
+                last_drive_speed_ = drive_msg.drive.speed;
                 drive_pub_->publish(drive_msg);
             } else {
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
@@ -261,6 +267,7 @@ private:
         if (current_mode_ == ControlMode::AUTONOMOUS) {
             auto drive_msg = *msg;
             drive_msg.header.stamp = this->now();
+            last_drive_speed_ = drive_msg.drive.speed;
             drive_pub_->publish(drive_msg);
         }
     }
@@ -279,6 +286,7 @@ private:
         brake_msg.drive.speed = 0.0;
         brake_msg.drive.acceleration = -9.0;     // 최대 감속 가속도
         brake_msg.drive.steering_angle = 0.0;     // 제동 중 스핀 방지 정렬
+        last_drive_speed_ = brake_msg.drive.speed;
         drive_pub_->publish(brake_msg);
     }
 
@@ -330,6 +338,11 @@ private:
             oss << "  * Control Source      : Redirecting /drive_autonomous to /drive...\n";
         }
 
+        // 실제 /drive에 나가는 속도(수동/자율/E-stop 어느 경로든)를 ERPM으로 환산해 표시.
+        // 값 자체가 아니라 표시용 환산이라, 실제 VESC 변환(ackermann_to_vesc_node)과는 별개 계산.
+        oss << "  * Commanded RPM(ERPM) : " << (last_drive_speed_ * speed_to_erpm_gain_)
+                  << "  (= /drive speed " << last_drive_speed_ << " m/s x " << speed_to_erpm_gain_ << ")\n";
+
         // 조이스틱 원입력 퍼센티지 (모드와 무관하게 항상 표시)
         oss << "\n [Joystick Input] \n";
         oss << std::setprecision(1);
@@ -369,10 +382,14 @@ private:
     int algorithm_button_;
     bool is_simulation_;
     bool force_autonomous_;
+    double speed_to_erpm_gain_;
 
     // 제어 목표 변수
     double target_steering_angle_ = 0.0;
     double target_speed_ = 0.0;
+
+    // 대시보드 표시용 — 실제 /drive로 나간 마지막 속도(ERPM 환산 대상)
+    double last_drive_speed_ = 0.0;
 
     // 조이스틱 원입력 퍼센티지 (터미널 표시용)
     double input_throttle_pct_ = 0.0;

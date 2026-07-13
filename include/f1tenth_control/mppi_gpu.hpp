@@ -5,10 +5,10 @@
 // mppi_gpu.hpp — MPPI GPU 솔버(MPPIControllerGPU)의 순수 C++ 인터페이스
 // ----------------------------------------------------------------------------
 // control_mppi_solver_gpu.cu의 thrust/CUDA 구현을 PImpl로 감춰, 이 헤더를 include하는
-// 쪽(교차검증 .cpp, 향후 ControlMppiNode 등)은 CUDA 없이 컴파일된다.
-// 공개 인터페이스는 CPU 레퍼런스 MPPIController(control_mppi_solver_cpu.cpp)와 동일한 형태
-// (reset/last_solve_ms/params/propagate/solve)로 맞춰, 나중에 노드가 두 컨트롤러를
-// 상호 교체 가능하게 쓸 수 있게 한다. 단 자료형은 float32 버전(...F)을 쓴다.
+// 쪽은 CUDA 없이 컴파일된다. 공개 인터페이스는 CPU 레퍼런스 MPPIController
+// (control_mppi_solver_cpu.cpp)와 동일한 형태(reset/last_solve_ms/params/propagate/solve)로
+// 맞춰 control_mppi_node가 CPU/GPU 어느 쪽이든 동일 코드로 다룰 수 있다. 단 자료형은
+// float32 버전(...F)을 쓴다.
 // ============================================================================
 
 #include <memory>

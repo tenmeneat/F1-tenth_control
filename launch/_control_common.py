@@ -98,16 +98,8 @@ def declare_common_args():
             description='회피 폴백 유지 사이클 수(50Hz 기준, 채터링 방지)'
         ),
 
-        # ── L1 Guidance 룩어헤드 거리 (2026-07-13, initial_minimum/new_map_con 비교 기반 승격) ──
-        # new_map_con(작년 완성형, fuck_f1.csv 0.18m 촘촘 웨이포인트에서 7.1s/랩) 대비 우리
-        # control_map_node가 동일 웨이포인트에서 16.6s/랩 + 매랩 스핀. 공식 자체는 거의 동일
-        # (L1 = clamp(l1_gain + v*l1_distance, max(t_clip_min, sqrt2*lat_err), t_clip_max)
-        #  vs new_map_con의 clamp(lookahead_gain + v*lookahead_speed_gain, max(min_lookahead_distance,
-        #  sqrt2*lat_err), max_lookahead_distance) — l1_gain/l1_distance 기본값 0.5/0.3이
-        #  new_map_con의 lookahead_gain/lookahead_speed_gain과 완전히 동일), 유일한 실질 차이가
-        #  하한 바닥값: 우리 t_clip_min=0.8 vs new_map_con min_lookahead_distance=1.5. 하한이
-        #  낮으면 저속/시케인 구간에서 L1 목표점이 촘촘한 웨이포인트의 국소 지그재그를 그대로
-        #  쫓아가며 조향이 고주파로 흔들릴 여지가 커짐 — 스핀의 유력 원인으로 추정, 시뮬 검증 중.
+        # ── L1 Guidance 룩어헤드 거리 ──
+        # 공식: L1 = clamp(l1_gain + v*l1_distance, max(t_clip_min, sqrt2*lat_err), t_clip_max)
         DeclareLaunchArgument(
             'l1_gain', default_value='0.5',
             description='L1 룩어헤드 거리 베이스 오프셋 [m] (공식: l1_gain + v*l1_distance)'
@@ -118,8 +110,8 @@ def declare_common_args():
         ),
         DeclareLaunchArgument(
             't_clip_min', default_value='0.8',
-            description='L1 룩어헤드 거리 하한 [m] (new_map_con 대응값 min_lookahead_distance=1.5 — '
-                        '촘촘/시케인 웨이포인트에서 낮을수록 국소 지그재그를 쫓아 고주파 조향 유발 가능)'
+            description='L1 룩어헤드 거리 하한 [m] (낮을수록 저속/시케인 구간에서 국소 지그재그를 '
+                        '쫓아 고주파 조향 유발 가능)'
         ),
         DeclareLaunchArgument(
             't_clip_max', default_value='5.0',
@@ -129,7 +121,7 @@ def declare_common_args():
         # ── 종방향 감속 한계 (곡률 사전감속 제동거리 계산에도 직접 쓰임) ──
         # sim/real 둘 다 동일값이라 base_max_accel과 달리 여기서 공용 선언. 8.0은 실측 검증
         # 전 추정값 — max_lateral_accel 마찰피크(~6.7) 대비 낙관적일 수 있어 실차에서 급제동
-        # IMU 실측(acc_mean) 후 재조정 권장(2026-07-12 논의).
+        # IMU 실측(acc_mean) 후 재조정 권장.
         DeclareLaunchArgument(
             'base_max_decel', default_value='8.0',
             description='종방향 최대 감속도 한계 [m/s^2] (곡률 사전감속 제동거리 계산에 사용, 실측 전 추정값)'
@@ -148,6 +140,14 @@ def declare_common_args():
         DeclareLaunchArgument(
             'mppi_sigma_accel', default_value='1.5',
             description='MPPI 종가속 탐색 노이즈 σ [m/s^2]'
+        ),
+
+        # ── VESC 속도→ERPM 변환 게인 (대시보드 RPM 표시 + 실차 ackermann_to_vesc_node 공용) ──
+        # 두 곳이 서로 다른 값을 쓰면 대시보드에 찍히는 "명령 RPM"이 실제 VESC 변환과
+        # 어긋나므로 반드시 하나의 인자로 공유한다.
+        DeclareLaunchArgument(
+            'speed_to_erpm_gain', default_value='4614.0',
+            description='속도[m/s]→VESC ERPM 변환 게인 (vesc_to_odom과 동일해야 함)'
         ),
     ]
 
@@ -246,5 +246,6 @@ def build_joy_teleop_monitor():
             'emergency_button': 1,
             'boost_button': 0,
             'algorithm_button': 5,
+            'speed_to_erpm_gain': LaunchConfiguration('speed_to_erpm_gain'),
         }]
     )

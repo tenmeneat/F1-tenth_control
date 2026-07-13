@@ -287,18 +287,12 @@ private:
         }
 
         // 경로 수신 시 최단 거리 인덱스로 초기화 — 단 "최초 수신"이거나 기존 인덱스가
-        // 새 배열 범위를 벗어났을 때만 전체 무제한 재탐색을 수행한다.
-        //
-        // 재발행마다 매번 전체 재탐색으로 last_target_idx_를 덮어쓰면, 트랙이 스스로에게
-        // 가까워지는 구간(스타트/피니시 등: 직전 랩의 마지막 웨이포인트와 다음 랩의 첫
-        // 웨이포인트가 유클리드 거리로는 가깝지만 인덱스로는 트랙 반대편만큼 멂)에서
-        // "물리적으로는 가깝지만 인덱스는 완전히 다른" 지점으로 인덱스가 잘못 스냅될 수
-        // 있다. 이후 control_loop의 윈도우 탐색이 그 오인덱스에서부터 재수렴을 시도하며
-        // 조향 포화(±0.41 rad)·속도 붕괴가 반복 발생함(2026-07-12, 촘촘한 웨이포인트
-        // 경로에서 실측 확인 — global_republisher_node 기본 publish_period_sec=2.0로 실제
-        // 운영에서도 상시 발생 가능한 버그였음). 최초 수신 이후에는 control_loop이 매
-        // 사이클 윈도우 탐색으로 계속 인덱스를 추적 중이므로 여기서 다시 초기화할 필요가
-        // 없다 — 그대로 두면 다음 control_loop 틱이 이어서 갱신한다.
+        // 새 배열 범위를 벗어났을 때만 전체 재탐색을 수행한다. 매 재발행마다 전체
+        // 재탐색하면 스타트/피니시처럼 유클리드 거리는 가깝지만 인덱스는 트랙 반대편인
+        // 구간에서 엉뚱한 인덱스로 스냅되어 조향 포화·속도 붕괴로 이어질 수 있다
+        // (global_republisher_node의 주기 재발행 시 상시 발생 가능). 최초 수신 이후엔
+        // control_loop이 매 사이클 윈도우 탐색으로 인덱스를 계속 추적하므로 재초기화가
+        // 필요 없다.
         if (first_reception || last_target_idx_ >= waypoints_.size()) {
             double min_dist = std::numeric_limits<double>::max();
             size_t closest_idx = 0;
@@ -339,19 +333,13 @@ private:
 
         // 곡률 사전감속(1.5절)용 물리거리 창 평활 곡률 계산.
         //
-        // wp.curvature(kappa_radpm)는 인접점 간 헤딩 차분으로 산출되는 값이라, 웨이포인트가
-        // 촘촘할수록(예: 0.18m) 아주 짧은 구간의 헤딩 노이즈가 그대로 증폭되어 개별 포인트
-        // kappa가 실제 지속 곡률보다 훨씬 크게(또는 부호가 흔들리며) 튀는 경우가 잦다. 사전감속
-        // 로직이 "윈도우 내 최대 단일점 kappa"를 그대로 써서 v_max=sqrt(a_lat/kappa)를 계산하면,
-        // 이 노이즈 스파이크 하나가 이미 오프라인 최적화된 플래너 자체 속도 프로파일(vx_mps,
-        // new_map_con 기준 이 구간 ~5.0~5.1m/s 유지)보다 훨씬 낮은 속도로 순간적으로 과잉 감속시켜
-        // (실측: kappa=0.79 스파이크 → sqrt(6.0/0.79)=2.76m/s로 서브함) 코너를 불필요하게 느리고
-        // 덜걱거리게 통과하게 만든다(2026-07-13, fuck_f1.csv 헤어핀 구간 랩타임 정체 원인 분석
-        // 중 확인 — 0.36m 간격 기존 프로덕션 트랙에서는 포인트당 헤딩 노이즈가 작아 거의 드러나지
-        // 않던 문제). 물리 거리 ±0.3m(총 0.6m) 창으로 |kappa| 평균을 내면 순간 노이즈는 눌리되
-        // 진짜 지속되는 헤어핀 곡률(윈도우 전체가 한 방향으로 굽는 구간)은 거의 그대로 반영되어,
-        // 오탐 감속을 줄이면서 실제 급커브 보호 기능은 유지한다. 원본 wp.curvature 필드는 FF
-        // 조향(curvature_ff_blend_, 기본 비활성) 등 다른 용도를 위해 그대로 둔다.
+        // wp.curvature(kappa_radpm)는 인접점 헤딩차분으로 산출되어, 웨이포인트가 촘촘할수록
+        // 짧은 구간의 헤딩 노이즈가 증폭돼 개별 포인트 kappa가 실제 지속 곡률보다 훨씬 크게
+        // 튈 수 있다. 사전감속이 "윈도우 내 최대 단일점 kappa"를 그대로 쓰면 노이즈 스파이크
+        // 하나로 오프라인 최적화된 프로파일 속도보다 훨씬 낮게 순간 과잉감속된다. 물리거리
+        // ±0.3m(총 0.6m) 창으로 |kappa| 평균을 내면 순간 노이즈는 눌리되 실제 지속 곡률(헤어핀
+        // 등)은 거의 그대로 반영된다. 원본 wp.curvature 필드는 FF 조향(curvature_ff_blend_,
+        // 기본 비활성) 등 다른 용도를 위해 그대로 둔다.
         {
             const double window_half_m = 0.3;
             const int half_n = std::max(1, static_cast<int>(std::round(window_half_m / avg_waypoint_spacing_)));
@@ -492,14 +480,11 @@ private:
             // 글로벌(닫힌 루프): 직전 인덱스 주변 윈도우 스캔 + 이탈 시 전역 재탐색
             //
             // 윈도우 크기는 고정 인덱스 개수가 아니라 물리 거리(후방 1m·전방 3m) 기준으로
-            // 웨이포인트 밀도에 맞춰 동적 산출한다. 고정 개수(-2..+8)였을 때는 소스마다
-            // 다른 웨이포인트 간격에서 물리적 탐색 반경이 절반 이하로 줄어들 수 있었다
-            // (예: 0.36m 간격 기준 설계값이 0.18m 간격 경로에선 전방 reach가 2.9m→1.44m로
-            // 축소) — 트랙이 스스로에게 가까워지는 구간(스타트/피니시 인접 구간 등)에서
-            // 윈도우가 진짜 최근접점을 놓치고 "윈도우 내에서는 그나마 가까운" 엉뚱한 인덱스에
-            // 잠기는 문제를 유발함. 이때 min_dist 자체는 fail-safe 임계(2.5m) 밑이라 전역
-            // 재탐색도 발동하지 않아 인덱스가 역행/진동하며 조향 포화·속도 붕괴로 이어짐
-            // (2026-07-12, 작년 완성형(new_map_con) 컨트롤러와의 폐루프 비교로 실측 확인).
+            // 웨이포인트 밀도에 맞춰 동적 산출한다. 고정 개수였다면 웨이포인트 간격이 촘촘한
+            // 소스에서 물리적 탐색 반경이 크게 줄어, 트랙이 스스로에게 가까워지는 구간(스타트/
+            // 피니시 등)에서 윈도우가 진짜 최근접점을 놓치고 엉뚱한 인덱스에 잠길 수 있다.
+            // 이때 min_dist가 fail-safe 임계(2.5m) 밑이면 전역 재탐색도 발동하지 않아
+            // 인덱스가 역행/진동하며 조향 포화·속도 붕괴로 이어진다.
             const double spacing = std::max(0.01, avg_waypoint_spacing_);
             int back_count = std::max(2, static_cast<int>(std::ceil(1.0 / spacing)));
             int fwd_count = std::max(8, static_cast<int>(std::ceil(3.0 / spacing)));
@@ -555,15 +540,26 @@ private:
         double min_lookahead_dist = static_cast<double>(curvature_lookahead_count_) * 0.1; // 기존 고정값을 하한으로 유지
         double curv_lookahead_dist = std::max(min_lookahead_dist, brake_dist);
 
-        double max_upcoming_kappa = 0.0;
+        // 프로파일 신뢰형 사전감속 (backward-pass): 오프라인 최적화된 프로파일 vx_mps는 이미
+        // 각 지점의 최적 속도(코너 감속 램프 포함)를 담고 있다는 전제로, 전방 각 지점의 그립
+        // 제한 목표속도 v_cap[i] = min(vx_profile[i], √(a_lat/κ_smoothed[i]))까지
+        // base_max_decel로 감속 가능한 현재 최대 속도 v_reach = √(v_cap[i]² + 2·a_decel·d_i)의
+        // 최소값을 사전감속 캡으로 쓴다(accum=0인 현재 위치 항이 순간 그립 클램프 역할도 겸함).
+        // 직선·완만구간은 κ≈0 → v_cap=프로파일이라 안 눌리고, 코너는 제동거리만큼 앞에서부터
+        // 정확히 그립속도로 선제동된다. (구 방식인 "창 내 최대 κ로 √(a_lat/κ) 블랭킷 재캡"은
+        // 프로파일보다 낮은 속도로 전 구간을 과잉감속시켜 폐기 — 상세 비교는 CLAUDE.md 참고.)
+        double curvature_speed_limit = std::numeric_limits<double>::max();
         double accum_curv_dist = 0.0;
         size_t curv_scan_idx = closest_idx;
         while (accum_curv_dist < curv_lookahead_dist) {
-            // 평활 곡률 사용(위 global_path_callback 주석 참고) — 촘촘한 웨이포인트의
-            // 단일점 헤딩차분 노이즈로 인한 과잉 사전감속을 방지.
-            double kappa_abs = std::abs(wps[curv_scan_idx].smoothed_curvature);
-            if (kappa_abs > max_upcoming_kappa) {
-                max_upcoming_kappa = kappa_abs;
+            double v_cap_i = wps[curv_scan_idx].speed;
+            double k_i = std::abs(wps[curv_scan_idx].smoothed_curvature);
+            if (k_i > 0.01) {
+                v_cap_i = std::min(v_cap_i, std::sqrt(max_lateral_accel_ / k_i));
+            }
+            double v_reach = std::sqrt(v_cap_i * v_cap_i + 2.0 * base_max_decel_ * accum_curv_dist);
+            if (v_reach < curvature_speed_limit) {
+                curvature_speed_limit = v_reach;
             }
             size_t next_idx;
             if (closed) {
@@ -578,12 +574,7 @@ private:
             curv_scan_idx = next_idx;
             if (closed && curv_scan_idx == closest_idx) break; // 한바퀴 방지
         }
-        // v_max = sqrt(a_lat_max / kappa_max) — 곡률이 높으면 속도를 제한
-        double curvature_speed_limit = max_speed_;
-        if (max_upcoming_kappa > 0.01) {
-            curvature_speed_limit = std::sqrt(max_lateral_accel_ / max_upcoming_kappa);
-            curvature_speed_limit = std::max(min_speed_, curvature_speed_limit);
-        }
+        curvature_speed_limit = std::max(min_speed_, curvature_speed_limit);
 
         // ==========================================
         // 2. L1 Guidance Distance 계산 및 L1 Point 스캔
