@@ -38,11 +38,11 @@ def generate_launch_description():
         description='실차 위치추정 odom 토픽 (파티클필터/EKF)'
     )
 
-    # 직선 최대 속도 [m/s] — 첫 실주행은 6.0 보수 캡. 셰이크다운 후 라이브 상향.
-    # ⚠️ 하드웨어 ERPM(40000) 상한 = 바퀴 ~9 m/s. 6.0은 그 2/3 수준.
+    # 직선 최대 속도 [m/s] — 첫 실주행 셰이크다운 캡. 안정성 확인 후 단계적으로 상향.
+    # ⚠️ 하드웨어 ERPM(40000) 상한 = 바퀴 ~9 m/s. 7.0은 그 약 78% 수준.
     max_speed_arg = DeclareLaunchArgument(
         'max_speed',
-        default_value='6.0',
+        default_value='7.0',
         description='control_map_node 직선 최대 속도 [m/s] (실차 보수 캡)'
     )
 
