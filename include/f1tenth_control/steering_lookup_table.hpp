@@ -3,7 +3,6 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <iomanip>
 #include <vector>
 #include <string>
 #include <cmath>
@@ -64,43 +63,6 @@ public:
 
     bool is_loaded() const { return is_loaded_; }
 
-    // ===== 실차 LUT 캘리브레이션(lut_calibrator_node)용 조회/저장 헬퍼 =====
-    // 기존 lookup_steer_angle() 동작에는 전혀 영향 없는 추가 전용 메서드들.
-    const std::vector<double>& velocity_axis() const { return lu_vs_; }
-    const std::vector<double>& steer_axis() const { return lu_steers_; }
-
-    // steer_idx/vel_idx는 steer_axis()/velocity_axis() 상의 0-based 인덱스(헤더 행/열 제외).
-    double raw_value(size_t steer_idx, size_t vel_idx) const {
-        size_t row = steer_idx + 1, col = vel_idx + 1;
-        if (row >= lu_.size() || col >= lu_[row].size()) return std::numeric_limits<double>::quiet_NaN();
-        return lu_[row][col];
-    }
-
-    // steer_axis() x velocity_axis() 크기의 grid를 원본과 동일한 CSV 포맷(행0=속도축, 열0=조향축)으로 저장.
-    bool save_csv(const std::string& path, const std::vector<std::vector<double>>& accel_grid) const {
-        if (!is_loaded_) return false;
-        if (accel_grid.size() != lu_steers_.size()) return false;
-
-        std::ofstream out(path);
-        if (!out.is_open()) return false;
-        out << std::scientific << std::setprecision(15);
-
-        // 행 0: 첫 칸(throwaway 0.0) + 속도축
-        out << 0.0;
-        for (double v : lu_vs_) out << "," << v;
-        out << "\n";
-
-        for (size_t i = 0; i < lu_steers_.size(); ++i) {
-            out << lu_steers_[i];
-            for (size_t j = 0; j < lu_vs_.size(); ++j) {
-                double val = (j < accel_grid[i].size()) ? accel_grid[i][j] : std::numeric_limits<double>::quiet_NaN();
-                out << "," << val;
-            }
-            out << "\n";
-        }
-        return true;
-    }
-
     double lookup_steer_angle(double accel, double vel) {
         if (!is_loaded_) return 0.0;
 
@@ -119,30 +81,6 @@ public:
                 col_accel.push_back(lu_[i][target_col]);
             } else {
                 col_accel.push_back(std::numeric_limits<double>::quiet_NaN());
-            }
-        }
-
-        // 각 속도 열은 조향각(row)이 커질수록 lat_acc가 단조 증가하다가 타이어가 슬립각
-        // 한계(Pacejka 피크)를 넘으면 다시 감소하는 "봉우리형" 곡선이다(전 속도축 실측 확인,
-        // 단일 피크). find_closest_neighbors는 target에 가장 가까운 값과 그 이웃으로
-        // 선형보간하는데, 피크를 넘는 목표 lat_acc가 들어오면 피크 양쪽(저조향/고조향)의
-        // 서로 다른 두 조향각이 "같은 정도로 가까운 값"이 되어 매 사이클 어느 쪽이 선택되는지
-        // 진동해 조향 채터링/포화가 반복된다. 피크 이후 구간을 NaN 처리해 검색을 "피크
-        // 이전(그립 내)" 단조 구간으로 제한하면, 피크를 넘는 요청은 그 속도의 최대 그립
-        // 조향각으로 자연히 saturate되어 항상 하나의 안정적인 해로 수렴한다
-        // (find_closest_neighbors는 첫 NaN에서 순회를 멈추므로 피크 이후를 NaN으로 채우기만
-        // 하면 됨).
-        {
-            size_t peak_idx = 0;
-            double peak_val = -std::numeric_limits<double>::infinity();
-            for (size_t i = 0; i < col_accel.size(); ++i) {
-                if (!std::isnan(col_accel[i]) && col_accel[i] > peak_val) {
-                    peak_val = col_accel[i];
-                    peak_idx = i;
-                }
-            }
-            for (size_t i = peak_idx + 1; i < col_accel.size(); ++i) {
-                col_accel[i] = std::numeric_limits<double>::quiet_NaN();
             }
         }
 
