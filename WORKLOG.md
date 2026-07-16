@@ -4,6 +4,166 @@
 
 ---
 
+## 2026-07-11 — 조이스틱 버튼 재배치 + MPPI 솔버 파일 리네임/빌드 연결
+
+### 배경
+다음 세션에 MPPI 컨트롤러 설계를 시작하기 전, 실차에서 조이스틱 버튼 하나로
+MAP ↔ MPPI 제어 알고리즘을 전환할 수 있는 기반을 미리 마련해두기로 함.
+
+### 조이스틱 버튼 재배치 (`joy_teleop_monitor.cpp`)
+- **부스트 버튼: RB(5) → A(0)** 이동.
+- **신규: RB(5) = MAP/MPPI 알고리즘 전환 버튼** (`algorithm_button` 파라미터, 기본 5).
+  LB 토글과 동일한 상승 엣지 감지 패턴으로 구현, `current_algorithm_`
+  (`ControlAlgorithm::MAP`/`MPPI`) 상태를 전환하고 `/teleop_dashboard`에
+  "Active Algorithm" 줄로 표시.
+- ⚠️ **현재는 상태 전환 + 대시보드 표시만** 한다. MPPI 쪽 `/drive_autonomous`
+  소스가 될 노드가 아직 없어서, 실제 소스 라우팅(`auto_drive_callback` 확장)은
+  MPPI 노드가 생기는 다음 세션으로 미룸.
+- `launch/control_real.launch.py`, `launch/control_sim.launch.py`의
+  `boost_button`/`algorithm_button` 파라미터도 함께 갱신.
+
+### MPPI 솔버 파일 리네임 + 빌드 연결
+- `control_code/mpc_controller.cpp` → `control_code/control_MPPI.cpp`,
+  `include/f1tenth_control/mpc_controller.hpp` → `include/f1tenth_control/control_MPPI.hpp`
+  로 `git mv` (include guard/include 경로만 갱신, `MPCController` 등 심볼명은 유지 —
+  다음 세션에 이 파일 내부를 MPPI 알고리즘으로 재작성할 예정).
+- 이 파일은 이전까지 **`CMakeLists.txt`에 전혀 등록되지 않은 죽은 코드**였음(확인
+  결과 OSQP C API 기반 전역좌표 LTV-MPC 조향 솔버 클래스이며 ROS 노드/`main()`
+  아님). 이번에 처음으로 빌드에 연결:
+  - `find_package(osqp REQUIRED)` 추가 — `ros-humble-osqp-vendor`가 설치한
+    업스트림 OSQP CMake 패키지(`/opt/ros/humble/lib/cmake/osqp/`)가 `osqp::osqp`
+    임포트 타겟을 제공, 기존 코드의 `#include <osqp.h>`와 그대로 호환.
+  - `add_library(control_mppi_solver STATIC control_code/control_MPPI.cpp)` +
+    `target_link_libraries(... osqp::osqp)` 추가. 아직 어떤 노드도 링크하지
+    않는 **컴파일 검증 전용** 정적 라이브러리(`install(TARGETS ...)`에도 미포함).
+  - `package.xml`에 `<depend>osqp_vendor</depend>` 추가.
+
+### MPPI 알고리즘 본체 설계 (control_MPPI.cpp 재작성)
+지난 리네임에 이어 이 파일 내용을 비우고 **샘플링 기반 MPPI 컨트롤러**로 재설계.
+- **정식화**: 정보이론 MPPI(Williams 2018, IEEE T-RO). K개 잡음 제어열 롤아웃 →
+  동역학 롤아웃 비용 → 가중 `w_k=exp(-(J_k-β)/λ)/Σ` → `u_t+=Σ w_k ε_{t,k}` →
+  첫 제어 출력 + warm-start 시프트. QP/OSQP 불필요(순수 샘플링).
+- **제어/모델**: 제어 `u=[조향 δ, 종가속 a]`(조향+종방향 동시). 롤아웃 동역학은
+  **동역학 자전거(single-track)+Pacejka 마법공식 횡력**. 저속(vx→0)에서 슬립각
+  발산 → `v_switch`(기본 2m/s) 미만은 **기구학 자전거로 블렌드**(실차 정지출발 대응).
+- **비용**: 위치·헤딩·속도 2차 추종 + 트랙 경계 소프트 페널티(반폭−마진 초과 시).
+  제어비용은 λ 항으로 암묵 반영. 종단 가중 배수(`w_terminal`). 출력 저역통과 평활화
+  (LP-MPPI 근사, 채터링 저감).
+- **구조**: control_MAP.cpp처럼 **별도 헤더 없이 단일 파일에 인라인**(`MPPIController`
+  클래스). 리네임으로 생겼던 `control_MPPI.hpp` 삭제. 파일 하단 `#ifdef MPPI_SMOKE_TEST`
+  로 ROS 없이 폐루프 검증하는 스탠드얼론 하네스 내장.
+- **빌드**: MPPI는 외부 솔버가 없으므로 `CMakeLists.txt`의 `find_package(osqp)` 및
+  `target_link_libraries(... osqp::osqp)`, `package.xml`의 `<depend>osqp_vendor</depend>`
+  제거. `control_mppi_solver` static lib 타겟은 컴파일 검증용으로 유지.
+- **참조**: [MPPI overview](https://acdslab.github.io/mppi-generic-website/docs/mppi.html),
+  [ForzaETH race_stack(참조: 상태/기준 인터페이스 규약)](https://github.com/ForzaETH/race_stack),
+  [F1TENTH MPPI 사례](https://www.tdetlefsen.com/f1tenth-mppi.html),
+  [LP-MPPI 2503.11717](https://arxiv.org/abs/2503.11717).
+- **⚠️ LUT 정직성**: 기존 NUC6 Pacejka LUT는 (횡가속도,속도)→조향각의 *역맵*이라 전방
+  롤아웃엔 직접 못 씀. 전방 Pacejka 파라미터는 f1tenth_gym 기본값 사용(추후 실차 보정).
+- **검증**: 스모크 테스트 PASS — 원호 추종에서 횡오차 0.40→0.02m 수렴, 속도 3.0m/s
+  추종, 최악 solve 12.3ms(<20ms@50Hz, -O2 기준. colcon -O3/-flto면 더 빠름),
+  제어 한계·유한성 OK, vx=0 출발 특이점 없음.
+
+### 다음 세션 To-do
+- `control_MPPI.cpp`에 `ControlMppiNode`+`main()`을 **같은 단일 파일**에 추가
+  (`control_MAP.cpp`와 유사: odom/imu/global·local_waypoints 구독, 웨이포인트→MppiRef
+  변환, `/drive_autonomous` 발행). CMake `add_library`→`add_executable(control_mppi_node)`
+  전환 + `install(TARGETS)` 등록.
+- `joy_teleop_monitor`의 `auto_drive_callback`(또는 소스 선택 로직)을 확장해
+  `current_algorithm_`(RB 토글) 상태에 따라 MAP/MPPI 소스를 실제 라우팅.
+- Pacejka 타이어 파라미터(Bf/Cf/Df…) 실차/시뮬 보정 → 아래 "Pacejka 파라미터 보정" 참조.
+
+### Pacejka 파라미터 보정 — lut_calibrator 재활용 가능성 (내일 착수)
+**질문: MPPI 전방 Pacejka 파라미터를 기존 lut 갱신 메커니즘으로 적용 가능한가?**
+결론: **직접 plug-in은 불가, "파라미터 식별(fitting)용 데이터"로는 적합.**
+
+- 지난번 "LUT는 역맵이라 못 씀" 설명은 부정확했음(정정): `lut_calibrator_node.cpp`가
+  셀 `(|δ|, v)`에 저장하는 값은 실측 **정상상태 횡가속도 `a_lat = v·ψ̇`** —
+  즉 LUT **테이블 내용물 자체는 정상상태 순방향 맵 `a_lat=f(δ,v)`**이고, MAP이 그걸
+  역방향 조회(`lookup_steer_angle`)해 쓸 뿐. 데이터는 순방향이 맞다.
+- MPPI 전방 동역학도 정상상태 코너링(ω̇=0, v̇y=0, v 일정)에 이르면 `a_lat = vx·ω`를
+  뱉는다(캘리브레이터와 동일 공식) → 정합 비교 가능.
+  - 저-δ 기울기 → 코너링강성(α≈0의 B·C·D), 고-δ 포화값 → 마찰 피크 `D=μ·Fz` → μ.
+- **한계**: ① 정상상태 정보만 → **요관성 Iz·과도(슬립 build-up) 특성은 LUT에서 안 나옴**
+  (공칭값 0.047 사용 또는 별도 식별). ② single-track 정상상태만으론 **전/후축 분리가
+  under-determined** → lf/lr로 Fzf/Fzr 고정하고 앞뒤 B,C,E(또는 μ) 공유 가정, 혹은
+  등가 단일축 곡선으로 피팅. ③ 캘리브레이터가 `/drive` 명령 조향을 실제 서보각 근사로
+  씀(조향 오프셋/지연 편향이 피팅에도 실림 — LUT가 이미 안고 가는 가정).
+
+**권장 경로 2가지:**
+- **A안 (1순위·재활용, 손 적음):** 캘리브레이션 CSV(`~/f1tenth_lut_calibration/
+  NUC6_glc_pacejka_lookup_table_calibrated.csv`)를 읽어, 각 그리드점 `(δ,v)`에서 MPPI
+  `step_dynamics`를 정상상태까지 굴려 나온 `a_lat`이 셀 값과 일치하도록 Pacejka
+  파라미터(Bf/Cf/Df/Br/Cr/Dr/E)를 **오프라인 최소자승 피팅**하는 스크립트 1개 작성 →
+  `MppiParams` 기본값 갱신. Iz·과도특성은 공칭값. 기존 캘리브 메커니즘 그대로 살림.
+- **B안 (더 정합적·나중):** MPPI 노드가 선 뒤, lut_calibrator처럼 `(δ, v, ψ̇, ψ̈, vy)`
+  로그를 모아 **전방 모델 파라미터를 직접 회귀**(B,C,D,E,Iz 동시)하는 전용 캘리브레이터
+  신설. 손은 더 가지만 과도특성까지 잡음.
+- 착수 순서 제안: 내일은 A안(재활용) 먼저 시도해 정상상태 정합만 확보 → MPPI 노드/실주행
+  검증 후 필요하면 B안으로 과도특성 보강.
+
+---
+
+## 2026-07-08 — 모터 저속 코깅/탈조 진단 (VESC FOC 센서리스)
+
+### 증상
+실차 브링업 중 VESC Tool로 duty 0.2 / rpm 1000 테스트 시 바퀴가 미세하게 움찔거리기만
+하고 매끄럽게 회전하지 않음(Fault 없음). VESC Tool RT Data로 라이브 파라미터 튜닝하며
+원인 분리.
+
+### 근본 원인 (확정)
+**FOC 센서리스 오픈루프(강제 커뮤테이션) ↔ 관측기(observer) 핸드오프 구간의 구조적
+불안정.** `foc_openloop_rpm≈800` ~ `foc_sl_erpm_start=2250` ERPM 사이("데드존")에서
+**속도를 고정 유지(정적 홀드)하려고 하면** 오버슈트 후 완전히 0으로 추락 → 재시동을
+무한 반복. 이 구간을 **그냥 통과(가속/감속 스윕)하는 것은 상대적으로 안전** —
+목표가 데드존 밖(예: 0 또는 2500 이상)이면 통과 중 한 번 흔들리고 정상적으로
+도달/정지함.
+
+- Duty(오픈루프 단독) 제어는 이 문제와 무관 — 항상 매끄러움 (`ERPM 1200 / Ramp 0.10s /
+  Boost 3.00A / Max 7.00A / Lock 0.00s` 조합에서 0→11746 ERPM 클린 램프 확인).
+- Speed(rpm) 제어 모드에서만 재현 — `Speed PID Ramp`(10000→2000), `Openloop Current
+  Max`(7→12~15A), `Heavy Inertial Load` 프리셋 등 여러 시도를 했지만 크래시 발생 지점
+  (~2100~2250 ERPM 부근)이 전혀 안 바뀜 → PID 게인/전류 캡 문제가 아니라 데드존
+  구조 자체의 문제로 결론.
+- 실차 감속(목표 rpm→0) 재현 테스트: 데드존을 하강 통과할 때 짧게(~0.2~0.3s) 덜컹인
+  뒤 정상적으로 0에 정지 — 무한루프는 아니고 "거친 정지" 수준.
+
+### 실주행 영향 분석
+`ackermann_to_vesc_node`(`~/2026_IFAC/vesc/vesc_ackermann`)가 `speed_to_erpm_gain=4614.0`
+(오프셋 0)로 m/s→ERPM 변환 후 VESC Speed(ERPM) 모드로 명령 — 즉 이번에 재현한 문제는
+**실제 주행 파이프라인과 동일한 제어 모드**임. 환산: `speed(m/s) = ERPM / 4614`.
+
+| ERPM | 실속도 |
+|---|---|
+| 800 (데드존 시작) | 0.17 m/s |
+| 2250 (데드존 끝) | 0.49 m/s |
+| `min_speed` 파라미터 (2.0 m/s) | 9228 ERPM |
+
+`steering_control_node`의 `min_speed_`는 일반 하한이 아니라 곡률 캡/롤 위험 시에만
+적용되는 하한이라(`control_code/steering_control_node.cpp` 507, 679줄), 출발/정지 시
+`final_speed`가 0에서/0으로 연속 램프되며 데드존을 매번 통과함. `min_speed=2.0m/s`
+자체는 데드존보다 훨씬 위라 **정상 순항/코너링 중 이 속도로 목표를 잡는 일은 없음**.
+결론: 출발 가속은 스윕 통과라 안전할 가능성 높고, 정지 시엔 짧은 덜컹임이 있을 수
+있으나 무한 진동은 아님. 완전 매끄러운 정지가 필요하면 추후 `Openloop Hysteresis`
+등으로 추가 튜닝 필요(보류, 다음 세션).
+
+### 부수 발견
+- **워크스페이스 동기화 어긋남**: `~/F1tenth_control/control_code/steering_control_node.cpp`
+  (이 리포)와 `~/2026_IFAC/f1tenth_control/control_code/steering_control_node.cpp`(빌드
+  대상)가 다름 — 배포본에 `controller_type`/`waypoint_topic`/MPC 파라미터가 추가돼
+  있고 리포에는 없음. 향후 코드 수정 시 어느 쪽이 최신인지 확인 필요.
+- `vesc_mcconf.xml`/`vesc_appconf.xml`(이 리포)도 실제 VESC 라이브 설정과 어긋난
+  상태(라이브에서 여러 차례 파라미터를 바꿔가며 테스트함, 프리셋 적용 이력도 있어
+  정확한 최종값 불확실). **다음 실차 세션에서 VESC Tool
+  `ConfBackup > Save Motor/App Configuration XML`로 라이브 설정을 내보내 이 리포의
+  XML을 갱신할 것.**
+
+### 보류
+- 감속 시 데드존 통과 덜컹임 추가 완화(`Openloop Hysteresis` 등) — 다음 세션.
+
+---
+
 ## 2026-07-05 (예정) — 첫 실차 주행 & IMU/LUT 준비
 
 세션(07-04)에서 도출한 내일 현장 작업 순서. 의존관계상 순서 지킬 것.
@@ -95,7 +255,7 @@
 - **커밋:** `88da8dc` refactor(control): 대회 미사용 죽은 코드 제거 (IMU 관련은 보존)
 
 ### 보류/후속 과제
-- **LUT 하드코딩 절대경로**(`/home/myungsub/...` 폴백 3개): 대회 노트북에선 깨질 수 있어 정리 권장(현재 이 PC에선 동작해 보류).
+- **LUT 하드코딩 절대경로**(`/home/tenmeneat/...` 폴백 3개): 대회 노트북에선 깨질 수 있어 정리 권장(현재 이 PC에선 동작해 보류).
 - **플래너 안전마진 재생성**(근본해결·속도 유지): 플래닝 담당에게 차폭+안전마진 반영 요청 시, 제어측 안전라인 시프트 없이 더 빠른 라인으로 완주 가능.
 - **`MAP_controller_reference.py`**: 선배 코드 원본(참고용, 빌드 대상 아님). VS Code 노란 줄은 ROS2 패키지 unresolved import + 미사용 import 경고(에러 아님). 참고 끝나면 삭제 가능.
 - `curvature_ff_blend`·`heading_damping_gain` 토글은 기본 0(무효), 튜닝 훅으로 보존.
