@@ -4,6 +4,79 @@
 
 ---
 
+## 2026-07-17 — 실차 원격(SSH) 브링업 중 발견된 문제 3건 해결 (도메인ID 충돌 / joy_teleop 오배선 / 조향 서보 트림)
+
+### 배경
+젯슨에 모니터·키보드 없이 무선 SSH로만 접속해 `f110`(f1tenth_stack bringup) 첫 실차 조이스틱
+테스트 진행. PC↔젯슨 SSH 키 인증 + VS Code Remote-SSH 세팅 완료 후, 실제 조작 중 문제 3가지를
+순차 발견·해결.
+
+### 문제 1: VESC USB 미연결로 `vesc_driver_node` 기동 직후 사망
+- 증상: 조이스틱 입력이 차에 전혀 안 먹힘.
+- 로그(`~/.ros/log/.../launch.log`): `vesc_driver_node FATAL: Failed to open the serial port
+  /dev/sensors/vesc ... No such file or directory`.
+- `lsusb`에 VESC 관련 장치 자체가 없었음(허브·블루투스·Xbox 컨트롤러만 보임) → USB 케이블
+  실물 미연결/전원 문제로 확인, 재연결로 해결.
+
+### 문제 2: `ROS_DOMAIN_ID` 충돌 — 팀원 시뮬레이션이 실차 서보를 직접 명령
+- 증상: `f110` 켜자마자 바퀴가 오른쪽으로 확 꺾이고 안 풀림. `vesc_driver_node` 로그에
+  `servo command value (0.970716) above maximum limit (0.850000), clipping.`이 초당 수십 회
+  반복(수천 줄, 3분 넘게 고정값).
+- 원인: 젯슨 `~/.zshrc`의 `ROS_DOMAIN_ID=67`이 같은 Wi-Fi(MIRU) 네트워크의 **다른 팀원 PC가
+  돌리던 시뮬레이터(f1tenth_gym+planning stack)와 겹침**. `/drive` 토픽 발행자를 추적
+  (`ros2 topic info /drive --verbose`)한 결과 로컬에 존재하지 않는 `map_controller` 노드였고,
+  `/ego_racecar/odom` 등 시뮬 전용 토픽까지 같은 도메인에서 보였음 — 팀원의 시뮬 조향 명령이
+  DDS 도메인 충돌로 그대로 실차 `ackermann_mux`→서보에 새어 들어간 것.
+- 해결: 젯슨 `.zshrc`의 `ROS_DOMAIN_ID`를 `67 → 88`로 변경. 이후 `ros2 node list`에서 팀원 쪽
+  노드 전부 사라짐, `/drive` 누수 중단 확인.
+- ⚠️ **재발 방지 필요**: 88도 임시값이라 팀 전체가 도메인ID를 사전 조율(예: 팀원별 고정
+  배정)하지 않으면 같은 문제가 다시 날 수 있음. 팀 공지 필요.
+
+### 문제 3: f1tenth_stack `joy_teleop.yaml` 조향축 오배선(axis 2 = LT 트리거)
+- 증상: LB(딥맨) 누르면 바퀴가 왼쪽으로 확 꺾임(조이스틱 스틱은 안 건드린 상태).
+- 원인: `~/f1tenth_ws/install/f1tenth_stack/share/f1tenth_stack/config/joy_teleop.yaml`의
+  `human_control.axis_mappings.drive-steering_angle.axis`가 `2`(LT 트리거, 실측 rest값
+  `1.0`)로 잘못 매핑됨. `scale=0.34` 곱해져 LB 누르는 즉시 `steering_angle≈0.34 rad`
+  (풀락에 근접) 고정 명령.
+  - 실측 `/joy` axes: `axes[0]`(좌스틱 좌우, rest≈0) / `axes[2]`(LT, rest=1.0) / `axes[5]`
+    (RT, rest=1.0) — `f1tenth_control` 자체 조향 축 관례(`axes[0]`, CLAUDE.md)와도 불일치.
+  - ⚠️ f1tenth_stack의 `ackermann_mux`는 자체 `teleop`(우선순위100)을 `f1tenth_control`의
+    `/drive`(우선순위10, `control_real.launch.py`의 `joy_teleop_monitor` 출력)보다 항상
+    우선하므로, **`control_real.launch.py`를 켜도 이 버그는 안 고쳐짐** — f1tenth_stack
+    자체 설정 파일을 직접 고쳐야 함.
+- 해결: `human_control.drive-steering_angle.axis`를 `2 → 0`으로 수정.
+
+### 조향 서보 중립(트림) 캘리브레이션
+`vesc.yaml`의 `steering_angle_to_servo_offset`을 실측 2점 선형보간으로 확정.
+
+| offset | 실측 오차 |
+|---|---|
+| 0.5304 (원본) | 살짝 오른쪽 (정량 미측정) |
+| 0.51 | +7° (오른쪽) |
+| 0.362 | −12° (왼쪽, 과보정) |
+| 0.4555 (2점 보간) | 거의 정중앙 |
+| **0.4633 (최종)** | **오른쪽 미세 트림 +1° 반영, 확정값** |
+
+- 이론 게인(`steering_angle_to_servo_gain=-1.2135`, 1도≈0.0212 서보값)보다 **실측 민감도가
+  약 2.7배 낮음**(1도≈0.00779 서보값) — 서보 범위 클리핑/조향 링키지 기구학 비선형 때문으로
+  추정. 향후 이런 트림 작업은 이론 게인이 아니라 **실측 2점 보간**으로 하는 게 정확함.
+- **최종값 `steering_angle_to_servo_offset: 0.4633`**, 위치:
+  `~/f1tenth_ws/install/f1tenth_stack/share/f1tenth_stack/config/vesc.yaml`. 서보/조향
+  링키지를 물리적으로 재장착하지 않는 한 유효.
+
+### 기타 — 젯슨 원격 접속 세팅
+- PC↔젯슨: SSH 키 인증(`~/.ssh/config`의 `Host jetson`, 사용자 `miru`, `10.1.1.3` — MIRU
+  네트워크 DHCP라 유동적일 수 있음) + VS Code Remote-SSH 확장 설치, `~/2026_IFAC` 원격
+  편집 가능.
+- 젯슨 `joy_node`가 `/joy`를 발행 안 하던 문제 → `miru` 계정이 `input` 그룹에 없어서였음
+  (`/dev/input/js0`가 `group input` 소유). `sudo usermod -aG input miru` + 재로그인으로 해결.
+- 젯슨 colcon 빌드 시 `f110_msgs`/`f1tenth_control` 둘 다 `CMake Error: source ... does not
+  match ... used to generate cache` — 예전 워크스페이스 구조(최상위 패키지)에서 `src/`
+  구조로 바뀌며 생긴 stale 빌드 캐시. `rm -rf build install && colcon build`(전체 재빌드)로
+  해결.
+
+---
+
 ## 2026-07-11 — 조이스틱 버튼 재배치 + MPPI 솔버 파일 리네임/빌드 연결
 
 ### 배경

@@ -3,7 +3,6 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 from launch import LaunchDescription
-from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 import _control_common as common
@@ -97,29 +96,22 @@ def generate_launch_description():
 
     joy_teleop_monitor = common.build_joy_teleop_monitor()
 
-    # ackermann_to_vesc_node: Mux가 확정한 최종 /drive(AckermannDriveStamped)를 VESC 명령
-    # (commands/motor/speed=ERPM, commands/servo/position)으로 변환하는 어댑터. 이게 있어야
-    # 컨트롤 출력이 실제 모터/서보에 도달한다. 노드 자체는 vesc_ackermann 패키지 소속.
-    #  - ⚠️ 노드는 'ackermann_cmd'를 구독하므로 우리 최종 토픽 /drive로 remapping 필수
-    #    (안 하면 아무도 발행 안 하는 ackermann_cmd를 구독해 조용히 무동작).
-    #  - 파라미터는 vesc_ackermann 레퍼런스 런치(ackermann_to_vesc_node.launch.xml)의
-    #    하드웨어 보정값. speed_to_erpm_gain=4614.0은 vesc_to_odom과 반드시 동일해야 함.
-    #    servo gain/offset은 실제 조향 링키지 기준값 — 조향 방향/중립이 어긋나면 여기서 튜닝.
-    #  - ⚠️ 이 노드만으론 모터가 안 돈다. 실제 하드웨어 구동은 vesc_driver_node가 별도로
-    #    떠서 commands/motor/speed를 시리얼로 VESC에 전달해야 함(하드웨어 브링업 소관).
-    ackermann_to_vesc_node = Node(
-        package='vesc_ackermann',
-        executable='ackermann_to_vesc_node',
-        name='ackermann_to_vesc_node',
-        output='screen',
-        parameters=[{
-            'speed_to_erpm_gain': LaunchConfiguration('speed_to_erpm_gain'),
-            'speed_to_erpm_offset': 0.0,
-            'steering_angle_to_servo_gain': -1.2135,
-            'steering_angle_to_servo_offset': 0.5304,
-        }],
-        remappings=[('ackermann_cmd', '/drive')]
-    )
+    # ackermann_to_vesc_node는 이 launch에 없다(2026-07-17 제거). f110(f1tenth_stack)이
+    # 이미 자체 ackermann_to_vesc_node를 띄우고, 그 노드의 입력('ackermann_drive')은
+    # 자체 ackermann_mux가 'teleop'(자체 조이스틱, 우선순위100)과 'drive'(navigation,
+    # 우선순위10 — 바로 우리 joy_teleop_monitor의 최종 /drive 출력)를 중재해서 만든다.
+    # 즉 우리 /drive는 이미 f1tenth_stack의 navigation 입력과 토픽명이 일치해 자동으로
+    # 흘러들어간다 — 우리가 별도로 ackermann_to_vesc_node를 또 띄우면 같은 VESC 명령
+    # 토픽(commands/motor/speed, commands/servo/position)에 중복 발행되어 두 소스가
+    # 경합(조향 덜컹거림)하는 문제가 있었음.
+    # ⚠️ 전제조건 2가지(f1tenth_stack 쪽 설정, 이 repo 밖 — WORKLOG 2026-07-17 참고):
+    #   1. joy_teleop.yaml의 default 섹션 제거 — 안 하면 'teleop'이 딥맨 없이도 항상
+    #      발행돼 navigation('drive')이 절대 못 이김(자율/RT 액셀 무반응 원인).
+    #   2. human_control의 deadman_buttons를 LB(4, 우리 AUTO/MANUAL 토글과 겹침) 밖의
+    #      버튼으로 재배정 — f1tenth_stack 자체 조이스틱 조작은 순수 비상 로우레벨
+    #      폴백으로만 남겨둠.
+    #   3. vesc.yaml의 steering_angle_to_servo_offset이 실측 캘리브레이션값(0.4633,
+    #      2026-07-17)과 동기화돼 있어야 함.
 
     return LaunchDescription([
         *common.declare_common_args(),
@@ -131,5 +123,4 @@ def generate_launch_description():
         steering_control,
         mppi_control,
         joy_teleop_monitor,
-        ackermann_to_vesc_node,
     ])

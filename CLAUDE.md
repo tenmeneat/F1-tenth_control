@@ -50,6 +50,12 @@ ros2 launch f1tenth_control control_sim.launch.py
 ros2 launch f1tenth_control control_sim.launch.py force_autonomous:=true yaw_rate_gain:=0.1
 
 # 실차 실행 (하드웨어 브링업·planning이 먼저 떠 있어야 함)
+# ⚠️ f1tenth_control의 ackermann_to_vesc_node가 vesc_ackermann 패키지(f1tenth_stack 소속,
+#    2026_IFAC가 아니라 별도 워크스페이스 ~/f1tenth_ws에 설치됨)에 의존 — 2026_IFAC만
+#    소싱하면 "Package 'vesc_ackermann' not found"로 실패함. 두 워크스페이스 다 소싱할 것
+#    (순서는 무관, 패키지명 안 겹침):
+source ~/f1tenth_ws/install/setup.zsh
+source ~/2026_IFAC/install/setup.zsh
 ros2 launch f1tenth_control control_real.launch.py
 ros2 launch f1tenth_control control_real.launch.py max_speed:=8.0 max_lateral_accel:=7.0
 
