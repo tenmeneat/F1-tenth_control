@@ -148,8 +148,12 @@ MAP/MPPI 선택은 대신 `drive_source_selector`(아래 노드 2-B)가 담당.
 실차(젯슨)엔 `joy_teleop_monitor`가 없어 `/teleop_dashboard`가 없으므로, 젯슨의 **원시 토픽을
 직접 구독**해 **우리 컴 터미널에서** 조립·렌더링하는 노드 → 젯슨 렌더 연산 0. 원격 wifi 뷰라
 각 토픽의 마지막 수신 경과(age)도 색으로 표시(끊김 감지).
-- 구독: `/drive_mode`(drive_mode_manager 모드), `/mppi_active`(MAP/MPPI, transient_local),
-  `/drive`(최종 VESC 명령), `<odom_topic>`(기본 `/pf/pose/odom`, 실측 속도), `/joy` / 발행: 없음
+- 구독: `/drive_mode`(estop/manual/autonomous), `/mppi_active`(MAP/MPPI, transient_local),
+  `<odom_topic>`(기본 `/pf/pose/odom`), `/joy` / 발행: 없음
+- 표시: E-Stop on/off + 주행모드, 알고리즘, 스로틀·조향 %(조이스틱 입력), 현재 속도,
+  ERPM(=속도×`speed_to_erpm_gain` 환산 — 실 VESC 피드백은 vesc_msgs 부재로 미사용),
+  종가속도(odom `d(vx)/dt` EMA), 횡가속도(`vx×yaw_rate`). odom 파생이라 SI 단위 안전
+  (IMU 축/단위 미확정 회피). E-stop은 자율 중 눌러도 drive_mode_manager가 최우선 처리
 - 실행: `ros2 launch f1tenth_control dashboard.launch.py mode:=real` (또는 `.zshrc`의 `realdash` alias)
 - ⚠️ **무선 연결 전제 = Fast DDS Discovery Server**: wifi가 DDS 멀티캐스트를 막고 우리 컴·젯슨
   둘 다 멀티홈이라 유니캐스트 피어만으론 디스커버리가 안 붙는다. 팀원이 젯슨을 Discovery

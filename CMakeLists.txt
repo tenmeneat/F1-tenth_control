@@ -208,7 +208,6 @@ ament_target_dependencies(realcar_dashboard_node
   rclcpp
   std_msgs
   sensor_msgs
-  ackermann_msgs
   nav_msgs
 )
 
