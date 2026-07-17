@@ -185,10 +185,40 @@ else()
 endif()
 
 # ==============================================================================
-# 7. 파일 설치 (Install) 규칙
+# 7. Drive Source Selector 노드 (실차 전용 MAP/MPPI 슬림 셀렉터)
+#    실차는 수동/자율/E-stop Mux를 f1tenth_stack(drive_mode_manager+ackermann_mux)이 맡고,
+#    joy_teleop_monitor는 실차 런치에서 제외된다. 그 스택엔 MAP/MPPI 개념이 없으므로 이 노드가
+#    RB로 /drive_autonomous(MAP)↔/drive_mppi(MPPI)를 골라 /drive(navigation 채널)로 포워딩한다.
+# ==============================================================================
+add_executable(drive_source_selector control_code/drive_source_selector.cpp)
+ament_target_dependencies(drive_source_selector
+  rclcpp
+  sensor_msgs
+  ackermann_msgs
+  std_msgs
+)
+
+# ==============================================================================
+# 7-B. Real-car Dashboard 노드 (실차 젯슨 원격 모니터링 — 우리 컴에서 실행)
+#    젯슨 원시 토픽(/drive_mode,/mppi_active,/drive,odom,/joy)을 직접 구독해 로컬에서
+#    렌더링(젯슨 렌더 연산 0). 시뮬용 teleop_dashboard_node(문자열 뷰어)와 별개 노드.
+# ==============================================================================
+add_executable(realcar_dashboard_node control_code/realcar_dashboard_node.cpp)
+ament_target_dependencies(realcar_dashboard_node
+  rclcpp
+  std_msgs
+  sensor_msgs
+  ackermann_msgs
+  nav_msgs
+)
+
+# ==============================================================================
+# 8. 파일 설치 (Install) 규칙
 # ==============================================================================
 install(TARGETS
   joy_teleop_monitor
+  drive_source_selector
+  realcar_dashboard_node
   control_map_node
   control_mppi_node
   teleop_dashboard_node

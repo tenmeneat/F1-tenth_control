@@ -64,7 +64,8 @@ ros2 run f1tenth_control control_map_node
 ros2 run f1tenth_control joy_teleop_monitor
 
 # 조이스틱/제어 상태 대시보드 (별도 터미널에서 — 뷰어 노드)
-ros2 launch f1tenth_control dashboard.launch.py
+ros2 launch f1tenth_control dashboard.launch.py            # 시뮬(mode:=sim 기본)
+ros2 launch f1tenth_control dashboard.launch.py mode:=real  # 실차 원격(우리 컴, ROS_DISCOVERY_SERVER 필요)
 ```
 
 - 두 launch 파일의 공용 파라미터·노드 정의는 `launch/_control_common.py`에 있음 — 조정 방법은
@@ -72,7 +73,7 @@ ros2 launch f1tenth_control dashboard.launch.py
 - CMake가 `-O3 -march=native -flto`로 최적화 빌드합니다 (임베디드 실시간 제어 성능 목적).
 - `compile_commands.json`이 생성되어 VS Code linter와 연동됩니다.
 
-## 노드 구성 (6개 실행 파일)
+## 노드 구성 (8개 실행 파일)
 
 ### 1. `control_map_node` (control_code/control_map_node.cpp) — 메인 자율주행 제어
 50 Hz 제어 루프. **L1 Guidance + Steering Lookup Table(LUT)** 기반.
@@ -95,19 +96,27 @@ ros2 launch f1tenth_control dashboard.launch.py
 - 출력: MPPI가 (조향, 종가속) 출력 → `speed = vx + accel·dt`(다음스텝 속도 적분)로 변환해 발행.
 - **`/scan` 불필요**(갭팔로워 없음, 비상제동은 planning 파트가 판단). LUT 불필요(전방 Pacejka 자체 모델). ⚠️ Pacejka는 gym 기본값 — 실차 보정은 별도 작업.
 
-### 2. `joy_teleop_monitor` (control_code/joy_teleop_monitor.cpp) — 제어권 Mux & 텔레메트리
+### 2. `joy_teleop_monitor` (control_code/joy_teleop_monitor.cpp) — 제어권 Mux & 텔레메트리 (⚠️ 2026-07-17부터 시뮬 전용)
 Xbox 조이스틱으로 수동/자율 전환하고, 최종 `/drive`를 결정하는 **멀티플렉서**.
+⚠️ **실차 런치에서는 제외됨**(2026-07-17) — 실차는 팀 공용 `f1tenth_stack`의 `drive_mode_manager`
++ `ackermann_mux`가 수동/자율/E-stop Mux를 담당하므로 이 노드를 띄우면 `/drive` 이중 발행 충돌.
+시뮬(`control_sim.launch.py`)엔 f1tenth_stack이 없어 이 노드가 여전히 전체 Mux 역할. 실차의
+MAP/MPPI 선택은 대신 `drive_source_selector`(아래 노드 2-B)가 담당.
 - 구독: `/joy`(원본: 조이스틱 드라이버 `joy_node`, `joy` 패키지 — 실차는 2026-07-14부터 이 저장소가 기동하지 않음. 팀 공용 `f1tenth_stack`(f110 단축어)이 라이다/조이스틱/vesc드라이버를 함께 기동하므로 중복 방지 위해 `control_real.launch.py`의 include와 자체 `launch/joy.launch.py` 모두 제거, joy_teleop_monitor는 f1tenth_stack이 띄운 `/joy`를 그대로 구독. 시뮬은 2026-07-17부터 `control_sim.launch.py`가 `joy_node`를 직접 번들, 아래 참고), `/drive_autonomous`(MAP), `/drive_mppi`(MPPI)
 - 발행: `/drive` (최종 구동 명령), `/teleop_dashboard`(`std_msgs/String`, 10Hz — 상태 대시보드 텍스트)
 - 대시보드는 화면에 직접 출력하지 않고 텍스트로 발행만 한다(화면 클리어를 Mux 밖으로 분리). 실제 렌더링은 `teleop_dashboard_node`가 별도 터미널에서 담당 → 공용 런치 터미널의 다른 노드 로그를 덮지 않음.
-- 버튼 매핑: **LB(4)** AUTO/MANUAL 토글, **B(1)** 비상정지 Latch, **X(2)** 비상정지 해제, **A(0)** 부스트, **RB(5)** MAP/MPPI 알고리즘 전환(**배선 완료** — `current_algorithm_`에 따라 `auto_drive_callback`이 `/drive_autonomous`(MAP)를, `mppi_drive_callback`이 `/drive_mppi`(MPPI)를 각자 자기 차례일 때만 `/drive`로 포워딩. 알고리즘 게이트가 E-stop보다 앞 → 비활성 소스 중복 브레이크 방지, 활성 소스가 E-stop 담당)
-- 트리거 스로틀(RT=axes[5], LT=axes[2]), 좌스틱(조향=axes[0])
-- 기본 시작 모드: `is_simulation`은 `_control_common.py`에서 **sim/real 런치 양쪽 모두 `True`로
-  고정**돼 있음(2026-07-12 확정 — "실차는 안전상 수동 차단"이 아니라 "기본은 항상 조이스틱 수동
-  대기"가 의도된 동작). 그 결과 `control_real.launch.py`를 켜도 **MANUAL로 시작**하고 조이스틱
-  스틱/트리거 조작이 곧바로 `/drive`에 포워딩됨 — LB로 AUTONOMOUS 전환. 노드 자체 파라미터
-  기본값(`false`, 실차 자율 시작+수동 차단)은 더 이상 어느 launch에서도 쓰이지 않음.
-  `force_autonomous=true`면 이 기본을 덮어써 조이스틱 없이 AUTONOMOUS로 즉시 기동.
+- 버튼/축 매핑(2026-07-17 실차 `drive_mode_manager`와 정렬 — 시뮬↔실차 조작감 통일): **A(0)**
+  AUTONOMOUS(+E-stop 해제), **B(1)** 비상정지 Latch, **X(2)** MANUAL(+E-stop 해제), **RB(5)**
+  MAP/MPPI 알고리즘 전환. 축: **좌스틱 세로(axis1)** 속도(scale 5.0), **우스틱 가로(axis3)**
+  조향(scale 0.34). A/B/X는 drive_mode_manager와 동일한 래칭 시맨틱(구 LB 토글/X-해제/A-부스트
+  방식 폐지, 부스트 제거). RB 전환은 `current_algorithm_`에 따라 `auto_drive_callback`(MAP)/
+  `mppi_drive_callback`(MPPI)이 자기 차례일 때만 `/drive`로 포워딩(알고리즘 게이트가 E-stop보다
+  앞 → 비활성 소스 중복 브레이크 방지)
+- 기본 시작 모드(시뮬): `is_simulation`은 `_control_common.py`에서 **`True`로 고정**돼 있음
+  (2026-07-12 확정 — "기본은 항상 조이스틱 수동 대기"가 의도된 동작). 시뮬은 **MANUAL로 시작**하고
+  조이스틱 좌스틱 조작이 곧바로 `/drive`에 포워딩됨 — A로 AUTONOMOUS 전환. `force_autonomous=true`면
+  조이스틱 없이 AUTONOMOUS로 즉시 기동. (실차는 이 노드가 없고 drive_mode_manager가 ESTOP으로
+  시작 → 운전자가 A를 눌러 자율 진입.)
 - 수동 비상정지(B버튼 Latch) 활성 시 `/drive`에 brake(speed 0, accel -9.0) 최우선 송출
   (라이다 AEB는 제거됨 — 비상정지는 planning 파트가 판단)
 - 대시보드 표시(2026-07-14): "Joystick E-Stop" 상태(`[ACTIVE - BRAKE LATCHED]`/`[NORMAL]`)가
@@ -118,11 +127,36 @@ Xbox 조이스틱으로 수동/자율 전환하고, 최종 `/drive`를 결정하
   `vesc_msgs/msg/VescStateStamped.state.speed`)은 `vesc_msgs`가 워크스페이스에 없을 수 있어
   보류 — 확보되면 이어서 추가 가능.
 
-### 3. `teleop_dashboard_node` (control_code/teleop_dashboard_node.cpp) — 대시보드 뷰어
-`joy_teleop_monitor`가 발행하는 `/teleop_dashboard`(`std_msgs/String`)를 구독해, **자기 터미널에서** 화면을 지우고(`\033[2J\033[H`) 상태 대시보드를 렌더링하는 표시 전용 노드.
+### 2-B. `drive_source_selector` (control_code/drive_source_selector.cpp) — 실차 전용 MAP/MPPI 슬림 셀렉터
+실차는 수동/자율/E-stop Mux를 팀 공용 `f1tenth_stack`(`drive_mode_manager` + `ackermann_mux`)이
+맡고 `joy_teleop_monitor`는 실차 런치에서 제외되므로(2026-07-17), MAP/MPPI 알고리즘 선택만
+담당하는 슬림 노드. `joy_teleop_monitor`에서 RB 선택 부분만 떼어낸 것(수동/E-stop/대시보드 없음).
+- 구독: `/joy`(RB 토글), `/drive_autonomous`(MAP), `/drive_mppi`(MPPI)
+- 발행: `/drive`(= `ackermann_mux`의 navigation 채널 `drive`, 우선순위10 — 자율모드에서 teleop
+  침묵 시 통과), `/mppi_active`(latched — `control_mppi_node` 활성/워밍업 게이트)
+- RB(5)로 MAP↔MPPI 토글 → 활성 소스를 `/drive`로 재스탬프 포워딩. **E-stop을 몰라도 됨** —
+  `drive_mode_manager`가 `estop_lock`으로 mux 입력 전체를 마스킹하므로 제동 중엔 이 노드의 `/drive`도
+  자동 차단됨. `control_real.launch.py`에만 포함(시뮬은 joy_teleop_monitor가 이 역할까지 겸함).
+
+### 3. `teleop_dashboard_node` (control_code/teleop_dashboard_node.cpp) — 시뮬 대시보드 뷰어
+`joy_teleop_monitor`가 발행하는 `/teleop_dashboard`(`std_msgs/String`)를 구독해, **자기 터미널에서** 화면을 지우고(`\033[2J\033[H`) 상태 대시보드를 렌더링하는 표시 전용 노드. (완성된 문자열을 그대로 그리는 뷰어라 시뮬 전용 — 실차엔 joy_teleop_monitor가 없어 이 토픽이 없음)
 - 구독: `/teleop_dashboard` / 발행: 없음
-- **별도 터미널**에서 실행: `ros2 launch f1tenth_control dashboard.launch.py` (또는 `ros2 run f1tenth_control teleop_dashboard_node`). control_real 런치에는 넣지 말 것(화면 클리어가 공용 터미널을 덮음).
+- **별도 터미널**에서 실행: `ros2 launch f1tenth_control dashboard.launch.py` (기본 `mode:=sim`). control_real 런치에는 넣지 말 것(화면 클리어가 공용 터미널을 덮음).
 - 안전/제어 경로와 무관한 표시 전용 → 안 띄워도 주행에는 영향 없음.
+
+### 3-B. `realcar_dashboard_node` (control_code/realcar_dashboard_node.cpp) — 실차 원격 대시보드 (우리 컴에서 실행)
+실차(젯슨)엔 `joy_teleop_monitor`가 없어 `/teleop_dashboard`가 없으므로, 젯슨의 **원시 토픽을
+직접 구독**해 **우리 컴 터미널에서** 조립·렌더링하는 노드 → 젯슨 렌더 연산 0. 원격 wifi 뷰라
+각 토픽의 마지막 수신 경과(age)도 색으로 표시(끊김 감지).
+- 구독: `/drive_mode`(drive_mode_manager 모드), `/mppi_active`(MAP/MPPI, transient_local),
+  `/drive`(최종 VESC 명령), `<odom_topic>`(기본 `/pf/pose/odom`, 실측 속도), `/joy` / 발행: 없음
+- 실행: `ros2 launch f1tenth_control dashboard.launch.py mode:=real` (또는 `.zshrc`의 `realdash` alias)
+- ⚠️ **무선 연결 전제 = Fast DDS Discovery Server**: wifi가 DDS 멀티캐스트를 막고 우리 컴·젯슨
+  둘 다 멀티홈이라 유니캐스트 피어만으론 디스커버리가 안 붙는다. 팀원이 젯슨을 Discovery
+  Server(`10.1.1.3:11811`)로 세팅함 → 우리 컴에서 `export ROS_DISCOVERY_SERVER="10.1.1.3:11811"`
+  후 실행하면 붙는다(런치는 DDS를 따로 설정 안 함, env에 위임). `ros2 topic list`로 열거하려면
+  `ROS_SUPER_CLIENT=true`도 필요할 수 있으나, 이 노드는 특정 토픽 구독이라 일반 client로도 뜬다.
+  유선(피트)에선 멀티캐스트가 되므로 env 없이도 붙음. (2026-07-17 코드 완료, 실차 라이브 검증 대기)
 
 ### 4. `lut_calibrator_node` (control_code/lut_calibrator_node.cpp) — LUT 실측 보정 (관찰 전용)
 실차 주행 데이터로 Steering LUT를 실측 보정하는 오프라인 캘리브레이션 노드. **`/drive`를 발행하지 않는 순수 관찰자**라 control_real과 같이 켜둬도 제어에 영향 없음.
@@ -155,9 +189,13 @@ f1tenth_gym(gym_bridge)은 `/imu/data`를 발행하지 않으므로, `control_ma
         control_map_node  ──/drive_autonomous──┐ (MAP)
         control_mppi_node ──/drive_mppi────────┤ (MPPI)
                                                     ↓  RB 버튼으로 소스 선택
-   /joy ──→ joy_teleop_monitor (Mux) ────────────/drive──→ 차량(VESC)
+  [시뮬] /joy ──→ joy_teleop_monitor (수동/자율/MAP·MPPI/E-stop Mux) ──/drive──→ gym_bridge
+  [실차] /joy ──→ drive_source_selector (MAP/MPPI만) ──/drive(navigation,pri10)─┐
+         /joy ──→ f1tenth_stack drive_mode_manager ──teleop(pri100)+estop_lock─┤
+                                          f1tenth_stack ackermann_mux ──────────┴─→ VESC
 ```
-(두 컨트롤러 노드는 항상 나란히 구동 — 기본은 MAP, RB로 MPPI 즉시 전환)
+(두 컨트롤러 노드는 항상 나란히 구동 — 기본은 MAP, RB로 MPPI 즉시 전환.
+ 실차 수동/자율/E-stop은 f1tenth_stack 담당, 우리 셀렉터는 MAP/MPPI 선택만)
 
 ```mermaid
 graph TD

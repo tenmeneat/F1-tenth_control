@@ -23,14 +23,19 @@ public:
         // ==========================================
         // 1. 파라미터 정의 및 설정
         // ==========================================
-        this->declare_parameter<double>("max_steering_angle", 0.41); // 최대 조향각 (rad, 약 23.5도)
-        this->declare_parameter<double>("max_speed", 4.0);           // 최대 제어 속도 (m/s)
-        this->declare_parameter<int>("steering_axis", 0);            // 좌측 스틱 가로 (기본 0)
-        this->declare_parameter<int>("throttle_axis", 1);            // 좌측 스틱 세로 (기본 1)
-        this->declare_parameter<bool>("use_trigger_throttle", true); // 트리거(RT/LT) 가감속 사용 여부
-        this->declare_parameter<int>("emergency_button", 1);         // B 버튼 (기본 1)
-        this->declare_parameter<int>("boost_button", 0);             // A 버튼 (기본 0)
-        this->declare_parameter<int>("algorithm_button", 5);         // RB 버튼 (기본 5) — MAP/MPPI 알고리즘 전환
+        // 버튼/축 매핑은 실차 젯슨 f1tenth_stack의 drive_mode_manager와 일치시킨다(2026-07-17) —
+        // 시뮬(이 노드)과 실차의 조이스틱 조작감을 같게 해 근육기억이 그대로 전이되게 하기 위함.
+        //   A(0)=자율, B(1)=비상정지, X(2)=수동, 좌스틱 세로(axis1)=속도, 우스틱 가로(axis3)=조향.
+        //   RB(5)=MAP/MPPI 전환은 drive_mode_manager가 안 쓰는 버튼이라 충돌 없이 유지.
+        this->declare_parameter<double>("max_steering_angle", 0.41); // 수동 조향 풀스틱 출력 [rad] (launch에서 drive_mode_manager steering_scale=0.34로 정렬)
+        this->declare_parameter<double>("max_speed", 4.0);           // 수동 속도 풀스틱 출력 [m/s] (launch에서 speed_scale=5.0로 정렬)
+        this->declare_parameter<int>("steering_axis", 3);            // 우측 스틱 가로 (drive_mode_manager steering_axis)
+        this->declare_parameter<int>("throttle_axis", 1);            // 좌측 스틱 세로 (drive_mode_manager speed_axis)
+        this->declare_parameter<bool>("use_trigger_throttle", false);// 트리거(RT/LT) 대신 좌스틱 세로 속도 사용(실차 정렬)
+        this->declare_parameter<int>("autonomous_button", 0);        // A 버튼 — AUTONOMOUS 전환(+E-stop 해제)
+        this->declare_parameter<int>("emergency_button", 1);         // B 버튼 — 비상정지 Latch
+        this->declare_parameter<int>("manual_button", 2);            // X 버튼 — MANUAL 전환(+E-stop 해제)
+        this->declare_parameter<int>("algorithm_button", 5);         // RB 버튼 — MAP/MPPI 알고리즘 전환
         this->declare_parameter<bool>("is_simulation", false);       // 시뮬레이터 환경 모드 여부
         this->declare_parameter<bool>("force_autonomous", false);     // 조이스틱 연결 없이 자율주행 모드 즉시 기동 여부
         // 속도[m/s]→VESC ERPM 환산 게인. ackermann_to_vesc_node(vesc_ackermann)의
@@ -43,8 +48,9 @@ public:
         this->get_parameter("steering_axis", steering_axis_);
         this->get_parameter("throttle_axis", throttle_axis_);
         this->get_parameter("use_trigger_throttle", use_trigger_throttle_);
+        this->get_parameter("autonomous_button", autonomous_button_);
         this->get_parameter("emergency_button", emergency_button_);
-        this->get_parameter("boost_button", boost_button_);
+        this->get_parameter("manual_button", manual_button_);
         this->get_parameter("algorithm_button", algorithm_button_);
         this->get_parameter("is_simulation", is_simulation_);
         this->get_parameter("force_autonomous", force_autonomous_);
@@ -111,24 +117,36 @@ private:
     void joy_callback(const sensor_msgs::msg::Joy::ConstSharedPtr msg) {
         size_t required_axes = use_trigger_throttle_ ? 6 : static_cast<size_t>(std::max(steering_axis_, throttle_axis_) + 1);
         if (msg->axes.size() < required_axes ||
-            msg->buttons.size() <= static_cast<size_t>(std::max({emergency_button_, boost_button_, algorithm_button_, 4, 6, 7}))) {
+            msg->buttons.size() <= static_cast<size_t>(std::max({autonomous_button_, emergency_button_, manual_button_, algorithm_button_}))) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "조이스틱 축(Axes) 또는 버튼 개수가 부족합니다. 컨트롤러 연결을 확인하세요.");
             return;
         }
 
-        // 1. 모드 토글 전환 (LB 버튼: msg->buttons[4] 상승 엣지 감지)
-        bool current_lb_state = (msg->buttons[4] == 1);
-        if (current_lb_state && !last_lb_state_) {
-            if (current_mode_ == ControlMode::MANUAL) {
-                current_mode_ = ControlMode::AUTONOMOUS;
-                RCLCPP_INFO(this->get_logger(), "🔄 제어 권한 전환: [AUTONOMOUS] 자율주행 활성화");
-            } else {
-                current_mode_ = ControlMode::MANUAL;
-                RCLCPP_INFO(this->get_logger(), "🔄 제어 권한 전환: [MANUAL] 수동 조작 활성화");
+        // 1. 모드/비상정지 전환 (A/B/X) — 실차 drive_mode_manager와 동일 시맨틱.
+        //    B(비상정지)를 최우선 검사하고, 한 콜백당 하나의 전환만 반영(상승 엣지).
+        //    A·X는 각각 자율/수동으로 전환하며 걸려 있던 E-stop Latch도 함께 해제한다
+        //    (drive_mode_manager는 A/X로만 E-stop을 빠져나옴 — 별도 해제 버튼 없음).
+        bool estop_pressed = (msg->buttons[emergency_button_] == 1);
+        bool auto_pressed = (msg->buttons[autonomous_button_] == 1);
+        bool manual_pressed = (msg->buttons[manual_button_] == 1);
+        if (estop_pressed && !last_emergency_button_state_) {
+            if (!is_emergency_stop_) {
+                is_emergency_stop_ = true;
+                RCLCPP_ERROR(this->get_logger(), "🚨 비상 제동 활성화 (B 버튼)! Latch 상태 유지.");
             }
+        } else if (auto_pressed && !last_autonomous_button_state_) {
+            is_emergency_stop_ = false;
+            if (current_mode_ != ControlMode::AUTONOMOUS) current_mode_ = ControlMode::AUTONOMOUS;
+            RCLCPP_INFO(this->get_logger(), "🔄 제어 권한 전환: [AUTONOMOUS] 자율주행 (A 버튼)");
+        } else if (manual_pressed && !last_manual_button_state_) {
+            is_emergency_stop_ = false;
+            if (current_mode_ != ControlMode::MANUAL) current_mode_ = ControlMode::MANUAL;
+            RCLCPP_INFO(this->get_logger(), "🔄 제어 권한 전환: [MANUAL] 수동 조작 (X 버튼)");
         }
-        last_lb_state_ = current_lb_state;
+        last_emergency_button_state_ = estop_pressed;
+        last_autonomous_button_state_ = auto_pressed;
+        last_manual_button_state_ = manual_pressed;
 
         // 1-1. 제어 알고리즘 전환 (RB 버튼: algorithm_button_ 상승 엣지 감지)
         // current_algorithm_에 따라 auto_drive_callback(/drive_autonomous=MAP)과
@@ -147,36 +165,12 @@ private:
         }
         last_algorithm_button_state_ = current_algorithm_button_state;
 
-        // 2. 토글식 비상 정지 (B 버튼: emergency_button_)
-        if (msg->buttons[emergency_button_] == 1) {
-            if (!is_emergency_stop_) {
-                is_emergency_stop_ = true;
-                RCLCPP_ERROR(this->get_logger(), "🚨 비상 제동 활성화 (B 버튼 감지)! Latch 상태 유지.");
-            }
-        }
-
-        // 3. 비상 정지 수동 해제 (X 버튼: msg->buttons[2] 입력)
-        if (msg->buttons[2] == 1) {
-            if (is_emergency_stop_) {
-                is_emergency_stop_ = false;
-                current_mode_ = is_simulation_ ? ControlMode::MANUAL : ControlMode::AUTONOMOUS;
-                RCLCPP_INFO(this->get_logger(), "🔄 비상 제동 해제. 시스템이 [%s] 모드로 안전 복귀합니다.",
-                            is_simulation_ ? "MANUAL" : "AUTONOMOUS");
-            }
-        }
-
-        // 4. 수동 조작 조향 및 속도 계산
+        // 2. 수동 조작 조향 및 속도 계산 (우스틱 가로=조향, 좌스틱 세로=속도 — 실차 정렬)
         double steer_input = msg->axes[steering_axis_];
         target_steering_angle_ = steer_input * max_steering_angle_;
-        input_steer_pct_ = steer_input * 100.0; // 좌스틱 조향 입력 퍼센티지 (+좌/-우)
+        input_steer_pct_ = steer_input * 100.0; // 조향 입력 퍼센티지 (+좌/-우)
 
         double current_max_speed = max_speed_;
-        if (msg->buttons[boost_button_] == 1) {
-            current_max_speed *= 1.5;
-            is_boost_active_ = true;
-        } else {
-            is_boost_active_ = false;
-        }
 
         if (use_trigger_throttle_) {
             double rt_val = msg->axes[5];  // RT: 1.0(놓음) → -1.0(꽉 누름)
@@ -316,8 +310,6 @@ private:
                   << (is_emergency_stop_ ? "\033[1;31m[ACTIVE - BRAKE LATCHED]\033[0m" : "\033[1;32m[NORMAL]\033[0m")
                   << "\n";
 
-        oss << "  * Boost Mode (A)      : " << (is_boost_active_ ? "\033[1;33m[BOOST ON]\033[0m" : "[OFF]") << "\n";
-
         std::string algo_str = (current_algorithm_ == ControlAlgorithm::MAP)
                                     ? "\033[1;36m[MAP]\033[0m"
                                     : "\033[1;35m[MPPI]\033[0m";
@@ -353,16 +345,15 @@ private:
         oss << std::setprecision(3);
         // target_speed_는 모드와 무관하게 joy_callback에서 항상 계산되므로, AUTONOMOUS 중에도
         // "지금 트리거를 그대로 쓰면 몇 m/s가 나갈지" 미리 확인 가능하도록 여기서 항상 표시한다.
-        double trigger_speed_limit = max_speed_ * (is_boost_active_ ? 1.5 : 1.0);
-        oss << "  * Commanded Speed     : " << target_speed_ << " m/s (limit " << trigger_speed_limit << " m/s)\n";
+        oss << "  * Commanded Speed     : " << target_speed_ << " m/s (limit " << max_speed_ << " m/s)\n";
         oss << "\n";
 
         // 조이스틱 버튼 상태
-        oss << " [XBox Key Mapping Guides] \n";
-        oss << "  * LB Button           : Toggle AUTO / MANUAL Mode\n";
+        oss << " [XBox Key Mapping Guides] (실차 drive_mode_manager와 정렬) \n";
+        oss << "  * A Button            : AUTONOMOUS Mode (clears E-stop)\n";
         oss << "  * B Button            : Emergency Stop (Latch)\n";
-        oss << "  * X Button            : Reset Emergency Stop Latch\n";
-        oss << "  * A Button            : Boost\n";
+        oss << "  * X Button            : MANUAL Mode (clears E-stop)\n";
+        oss << "  * L-Stick Vert (ax1)  : Speed   |   R-Stick Horiz (ax3) : Steering\n";
         oss << "  * RB Button           : Toggle MAP / MPPI Algorithm\n";
         oss << "=========================================================\n";
 
@@ -377,8 +368,9 @@ private:
     int steering_axis_;
     int throttle_axis_;
     bool use_trigger_throttle_;
+    int autonomous_button_;
     int emergency_button_;
-    int boost_button_;
+    int manual_button_;
     int algorithm_button_;
     bool is_simulation_;
     bool force_autonomous_;
@@ -399,10 +391,11 @@ private:
     // 상태 변수
     ControlMode current_mode_ = ControlMode::MANUAL;
     ControlAlgorithm current_algorithm_ = ControlAlgorithm::MAP;
-    bool last_lb_state_ = false;
+    bool last_autonomous_button_state_ = false;
+    bool last_manual_button_state_ = false;
+    bool last_emergency_button_state_ = false;
     bool last_algorithm_button_state_ = false;
     bool is_emergency_stop_ = false;
-    bool is_boost_active_ = false;
     bool rt_pressed_once_ = false;
     bool lt_pressed_once_ = false;
 

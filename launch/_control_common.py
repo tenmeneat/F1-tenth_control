@@ -226,12 +226,18 @@ def build_control_mppi_node(*, odom_topic, max_speed, remappings=None):
 
 
 def build_joy_teleop_monitor():
-    """joy_teleop_monitor — sim/real 완전 동일 설정.
-    'is_simulation': True는 sim/real 양쪽 다 의도적으로 고정한 값이다(2026-07-12 사용자 확정) —
-    노드 파라미터 자체 기본값은 false(실차=AUTONOMOUS 시작+수동 차단)이지만, 이 프로젝트는 실차
-    포함 항상 MANUAL(조이스틱 수동 대기)로 시작해 LB로 AUTONOMOUS 전환하는 쪽을 원한다. "실수로
-    하드코딩된 sim 기본값"이 아니니 실차 안전 차단이 필요해졌다고 해서 임의로 false로 되돌리지
-    말 것 — 그 결정은 joy_teleop_monitor 노드 설명(CLAUDE.md)에도 반영돼 있다."""
+    """joy_teleop_monitor — 2026-07-17부터 시뮬 전용(실차 런치에서는 제외).
+    실차는 f1tenth_stack의 drive_mode_manager + ackermann_mux가 수동/자율/E-stop Mux를 담당하므로
+    이 노드를 띄우면 /drive가 이중 발행되어 충돌한다. 시뮬에는 f1tenth_stack이 없으므로 이 노드가
+    여전히 전체 Mux(수동/자율/MAP·MPPI/E-stop) 역할을 한다.
+
+    버튼/축 매핑은 실차 drive_mode_manager와 일치시킨다(A=자율/B=정지/X=수동, 좌스틱세로=속도/
+    우스틱가로=조향) — 시뮬↔실차 조작감을 같게 해 근육기억을 전이시키기 위함. 스케일도 정렬:
+    speed_scale 5.0(max_speed), steering_scale 0.34(max_steering_angle). RB(5)=MAP/MPPI 전환은
+    drive_mode_manager가 안 쓰는 버튼이라 유지.
+
+    'is_simulation': True는 의도적으로 고정한 값이다(2026-07-12 사용자 확정) — 항상 MANUAL(조이스틱
+    수동 대기)로 시작. 실차 안전 차단이 필요해졌다고 임의로 false로 되돌리지 말 것."""
     return Node(
         package='f1tenth_control',
         executable='joy_teleop_monitor',
@@ -240,12 +246,15 @@ def build_joy_teleop_monitor():
         parameters=[{
             'is_simulation': True,
             'force_autonomous': LaunchConfiguration('force_autonomous'),
-            'max_speed': 6.0,
-            'max_steering_angle': 0.41,
-            'use_trigger_throttle': True,
-            'emergency_button': 1,
-            'boost_button': 0,
-            'algorithm_button': 5,
+            'max_speed': 5.0,             # drive_mode_manager speed_scale와 정렬
+            'max_steering_angle': 0.34,   # drive_mode_manager steering_scale와 정렬
+            'use_trigger_throttle': False,
+            'steering_axis': 3,           # 우스틱 가로
+            'throttle_axis': 1,           # 좌스틱 세로
+            'autonomous_button': 0,       # A
+            'emergency_button': 1,        # B
+            'manual_button': 2,           # X
+            'algorithm_button': 5,        # RB (MAP/MPPI)
             'speed_to_erpm_gain': LaunchConfiguration('speed_to_erpm_gain'),
         }]
     )

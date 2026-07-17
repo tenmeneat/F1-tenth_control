@@ -3,6 +3,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 from launch import LaunchDescription
+from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 import _control_common as common
@@ -14,21 +15,19 @@ def generate_launch_description():
     # ==========================================================================
     # 시뮬 런치(control_sim.launch.py)와의 차이 = 실차 안전/환경 정합:
     #   - odom_topic: /pf/pose/odom (파티클필터) — 시뮬의 /ego_racecar/odom 대체
-    #   - is_simulation=False: 실차 모드(수동 조작 송출 차단, 초기 AUTONOMOUS)
-    #   - max_speed 기본 7.0: 직선 상한 보수적 캡(하드웨어 최고 ~9 m/s 대비 여유)
     #   - use_imu=True: VESC 내장 IMU 영점/세팅 완료 → 롤 인지 ESC 활성
     #   - 비상제동(AEB)은 제어 파트에서 제거됨 — 실제 비상정지는 planning 파트가 판단/발행
-    #   - joy_node(조이스틱 드라이버)는 이 런치에 없음 — f1tenth_stack(f110 단축어)이
-    #     라이다/조이스틱/vesc드라이버를 함께 기동하므로 중복 기동 방지 위해 여기서 제거함
-    #     (2026-07-14). joy_teleop_monitor는 그쪽이 띄운 /joy를 그대로 구독.
-    #   - ackermann_to_vesc_node 포함: 최종 /drive → VESC ERPM/서보 명령 어댑터
-    #     (⚠️ 실제 모터 구동은 vesc_driver_node가 별도로 떠야 함 — 아래 전제 참고)
-    # 전제: 하드웨어 브링업(f1tenth_stack의 vesc_driver, LiDAR, joy_node)과 particle_filter,
-    #       planning이 /scan, /joy, /pf/pose/odom, /global_waypoints 를 발행 중이어야 함.
-    #       (VESC 시리얼 드라이버 vesc_driver_node도 f1tenth_stack 쪽에서 기동.)
-    # 공통 파라미터(wheelbase, l1_gain 등)/joy_teleop_monitor 설정은 _control_common.py 참고 —
-    # 시뮬과 겹치는 부분은 거기 한 곳만 고치면 됨. 아래는 실차 전용 인자/노드(조이스틱,
-    # ackermann_to_vesc)만.
+    #   - 수동/자율/E-stop Mux는 f1tenth_stack(drive_mode_manager + ackermann_mux)이 담당 →
+    #     우리 joy_teleop_monitor는 이 런치에서 제외(2026-07-17). 대신 MAP/MPPI만 고르는
+    #     drive_source_selector가 /joy(RB)를 구독해 /drive(navigation 채널)로 포워딩(아래 참고).
+    #   - joy_node(조이스틱 드라이버)도 이 런치에 없음 — f1tenth_stack이 라이다/조이스틱/vesc
+    #     드라이버를 함께 기동하므로 중복 방지 위해 제거(2026-07-14). 셀렉터는 그쪽 /joy를 구독.
+    #   - ackermann_to_vesc_node도 없음(f1tenth_stack이 자체 기동, 아래 참고)
+    # 전제: 하드웨어 브링업(f1tenth_stack의 drive_mode_manager, ackermann_mux, vesc_driver,
+    #       ackermann_to_vesc, LiDAR, joy_node)과 particle_filter, planning이 /scan, /joy,
+    #       /pf/pose/odom, /global_waypoints 를 발행 중이어야 함.
+    # 공통 파라미터(wheelbase, l1_gain 등)는 _control_common.py 참고 — 시뮬과 겹치는 부분은
+    # 거기 한 곳만 고치면 됨. 아래는 실차 전용 인자/노드만.
 
     # 파티클필터 odom 토픽 (로컬라이제이션 스택에 맞춰 변경 가능)
     odom_topic_arg = DeclareLaunchArgument(
@@ -94,23 +93,36 @@ def generate_launch_description():
         remappings=[('/imu/data', 'sensors/imu/raw')],
     )
 
-    joy_teleop_monitor = common.build_joy_teleop_monitor()
+    # 실차 수동/자율/E-stop Mux는 팀 공용 f1tenth_stack이 담당한다(drive_mode_manager +
+    # ackermann_mux). 따라서 우리 joy_teleop_monitor는 이 런치에서 제외한다(2026-07-17) —
+    # 띄우면 /drive를 이중 발행해 f1tenth_stack의 navigation 입력과 충돌한다.
+    #
+    # 대신 MAP/MPPI 알고리즘 선택만 담당하는 슬림 셀렉터(drive_source_selector)를 띄운다.
+    # f1tenth_stack 스택엔 MAP/MPPI 개념이 없고 자율 입력은 mux의 navigation 채널 'drive'
+    # 하나뿐이라, 이 노드가 RB로 /drive_autonomous(MAP)↔/drive_mppi(MPPI)를 골라 /drive로
+    # 포워딩한다. /drive는 f1tenth_stack ackermann_mux의 navigation 입력(우선순위10)과
+    # 토픽명이 일치해 자동으로 흘러들어간다. RB(5)는 drive_mode_manager가 안 쓰는 버튼이라
+    # 충돌 없음. E-stop은 drive_mode_manager가 estop_lock으로 mux 전체를 마스킹하므로 이
+    # 노드가 계속 /drive를 내보내도 제동 중엔 차단된다(셀렉터는 E-stop을 몰라도 됨).
+    drive_source_selector = Node(
+        package='f1tenth_control',
+        executable='drive_source_selector',
+        name='drive_source_selector',
+        output='screen',
+        parameters=[{
+            'algorithm_button': 5,   # RB
+        }]
+    )
 
-    # ackermann_to_vesc_node는 이 launch에 없다(2026-07-17 제거). f110(f1tenth_stack)이
-    # 이미 자체 ackermann_to_vesc_node를 띄우고, 그 노드의 입력('ackermann_drive')은
-    # 자체 ackermann_mux가 'teleop'(자체 조이스틱, 우선순위100)과 'drive'(navigation,
-    # 우선순위10 — 바로 우리 joy_teleop_monitor의 최종 /drive 출력)를 중재해서 만든다.
-    # 즉 우리 /drive는 이미 f1tenth_stack의 navigation 입력과 토픽명이 일치해 자동으로
-    # 흘러들어간다 — 우리가 별도로 ackermann_to_vesc_node를 또 띄우면 같은 VESC 명령
-    # 토픽(commands/motor/speed, commands/servo/position)에 중복 발행되어 두 소스가
-    # 경합(조향 덜컹거림)하는 문제가 있었음.
-    # ⚠️ 전제조건 2가지(f1tenth_stack 쪽 설정, 이 repo 밖 — WORKLOG 2026-07-17 참고):
-    #   1. joy_teleop.yaml의 default 섹션 제거 — 안 하면 'teleop'이 딥맨 없이도 항상
-    #      발행돼 navigation('drive')이 절대 못 이김(자율/RT 액셀 무반응 원인).
-    #   2. human_control의 deadman_buttons를 LB(4, 우리 AUTO/MANUAL 토글과 겹침) 밖의
-    #      버튼으로 재배정 — f1tenth_stack 자체 조이스틱 조작은 순수 비상 로우레벨
-    #      폴백으로만 남겨둠.
-    #   3. vesc.yaml의 steering_angle_to_servo_offset이 실측 캘리브레이션값(0.4633,
+    # ackermann_to_vesc_node도 이 launch에 없다(2026-07-17 제거). f110(f1tenth_stack)이 이미
+    # 자체 ackermann_to_vesc_node를 띄우고, 그 입력('ackermann_drive')은 자체 ackermann_mux가
+    # 'teleop'(drive_mode_manager 수동, 우선순위100)과 'drive'(navigation, 우선순위10 — 위
+    # 셀렉터 출력)를 중재해 만든다. 우리가 또 띄우면 같은 VESC 명령 토픽에 중복 발행되어
+    # 경합(조향 덜컹거림)한다.
+    # ⚠️ 전제조건(f1tenth_stack 쪽, 이 repo 밖):
+    #   1. drive_mode_manager가 AUTONOMOUS 모드에서 teleop을 침묵시켜 navigation('drive')이
+    #      mux에서 이길 수 있어야 함(구 joy_teleop.yaml default 섹션 상시발행 이슈는 해소됨).
+    #   2. vesc.yaml의 steering_angle_to_servo_offset이 실측 캘리브레이션값(0.4633,
     #      2026-07-17)과 동기화돼 있어야 함.
 
     return LaunchDescription([
@@ -122,5 +134,5 @@ def generate_launch_description():
         base_max_accel_arg,
         steering_control,
         mppi_control,
-        joy_teleop_monitor,
+        drive_source_selector,
     ])
