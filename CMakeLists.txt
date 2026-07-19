@@ -212,12 +212,27 @@ ament_target_dependencies(realcar_dashboard_node
 )
 
 # ==============================================================================
+# 7-C. Odom 거리 스케일 보정 노드 (실차 원격 — 우리 컴에서 실행)
+#    "명령 주고 자로 재기" 테스트 자동화. odom 한 토픽 안의 twist(VESC 휠 패스스루)와
+#    pose(MCL 스캔매칭)를 따로 적분해 명령/휠/맵 세 거리를 동시 측정 → 어느 게인이
+#    틀렸는지 분리해준다. /drive 미발행(순수 관찰자).
+# ==============================================================================
+add_executable(odom_calib_node control_code/odom_calib_node.cpp)
+ament_target_dependencies(odom_calib_node
+  rclcpp
+  std_msgs
+  nav_msgs
+  ackermann_msgs
+)
+
+# ==============================================================================
 # 8. 파일 설치 (Install) 규칙
 # ==============================================================================
 install(TARGETS
   joy_teleop_monitor
   drive_source_selector
   realcar_dashboard_node
+  odom_calib_node
   control_map_node
   control_mppi_node
   teleop_dashboard_node

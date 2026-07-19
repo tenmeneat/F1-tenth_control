@@ -28,14 +28,21 @@ def generate_launch_description():
     #   ※ 젯슨 bringup에 env를 넣는 건 팀 공용 스택 변경이라 차량 세팅 시 함께 진행.
     #   ※ 유선(피트)에선 멀티캐스트가 되므로 env 없이 mode:=real 만으로 붙는다.
     #
+    # mode:=calib — 오도메트리 거리 스케일 실측 보정(odom_calib_node). "명령 주고 자로 재기"
+    #   테스트 자동화. real 모드와 동일하게 우리 컴에서 젯슨 원시 토픽만 구독하고,
+    #   한 번의 직선 주행에서 명령(∫/drive.speed) / 휠(∫odom vx, VESC) / 맵(Σ|Δpos|, MCL)
+    #   세 거리를 동시 적분해 어느 게인이 틀렸는지 분리해준다. 자세한 절차/주의는 노드 헤더 참고.
+    #
     # 사용(우리 컴, 별도 터미널):
     #   ros2 launch f1tenth_control dashboard.launch.py                 # 시뮬
     #   ros2 launch f1tenth_control dashboard.launch.py mode:=real       # 실차 원격
     #   ros2 launch f1tenth_control dashboard.launch.py mode:=real odom_topic:=/pf/pose/odom
+    #   ros2 launch f1tenth_control dashboard.launch.py mode:=calib      # odom 거리 보정
 
     mode_arg = DeclareLaunchArgument(
         'mode', default_value='sim',
-        description="sim=완성문자열 뷰어(/teleop_dashboard), real=젯슨 원시토픽 원격 대시보드"
+        description="sim=완성문자열 뷰어(/teleop_dashboard), real=젯슨 원시토픽 원격 대시보드, "
+                    "calib=odom 거리 스케일 보정"
     )
     odom_topic_arg = DeclareLaunchArgument(
         'odom_topic', default_value='/pf/pose/odom',
@@ -61,9 +68,20 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals('mode', 'real'),
     )
 
+    # calib: odom 거리 스케일 실측 보정 (real과 동일한 원격 구조, /drive는 발행하지 않음)
+    calib_viewer = Node(
+        package='f1tenth_control',
+        executable='odom_calib_node',
+        name='odom_calib_node',
+        output='screen',
+        parameters=[{'odom_topic': LaunchConfiguration('odom_topic')}],
+        condition=LaunchConfigurationEquals('mode', 'calib'),
+    )
+
     return LaunchDescription([
         mode_arg,
         odom_topic_arg,
         sim_viewer,
         real_viewer,
+        calib_viewer,
     ])
