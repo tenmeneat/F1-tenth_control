@@ -12,7 +12,6 @@
 #include "std_msgs/msg/string.hpp"
 
 // 수학 상수 정의
-const double PI = 3.14159265358979323846;
 
 class JoyTeleopMonitor : public rclcpp::Node {
 public:
@@ -20,9 +19,7 @@ public:
     enum class ControlAlgorithm { MAP, MPPI };
 
     JoyTeleopMonitor() : Node("joy_teleop_monitor") {
-        // ==========================================
         // 1. 파라미터 정의 및 설정
-        // ==========================================
         // 버튼/축 매핑은 실차 젯슨 f1tenth_stack의 drive_mode_manager와 일치시킨다(2026-07-17) —
         // 시뮬(이 노드)과 실차의 조이스틱 조작감을 같게 해 근육기억이 그대로 전이되게 하기 위함.
         //   A(0)=자율, B(1)=비상정지, X(2)=수동, 좌스틱 세로(axis1)=속도, 우스틱 가로(axis3)=조향.
@@ -65,9 +62,7 @@ public:
             current_mode_ = ControlMode::AUTONOMOUS;
         }
 
-        // ==========================================
         // 2. 통신 및 타이머 바인딩
-        // ==========================================
         // 조이스틱 토픽 구독
         joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
             "/joy", 10,
@@ -206,9 +201,6 @@ private:
             input_throttle_pct_ = throttle_input * 100.0;
             input_brake_pct_ = 0.0;
         }
-
-        raw_axes_ = msg->axes;
-        raw_buttons_ = msg->buttons;
 
         // 5. 비상 정지(수동 B버튼)가 트리거된 경우 제동 명령 최우선 송출
         if (is_emergency_stop_) {
@@ -400,8 +392,6 @@ private:
     bool lt_pressed_once_ = false;
 
     // 조이스틱 상태 캐싱
-    std::vector<float> raw_axes_;
-    std::vector<int> raw_buttons_;
 
     // ROS 2 통신 개체
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;

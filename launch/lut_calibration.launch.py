@@ -43,9 +43,9 @@ def generate_launch_description():
     # 방식을 버리고 상수 공유로 바꿨다(2026-07-19). 값 변경은 _control_common.py에서.
     imu_scale_arg = DeclareLaunchArgument(
         'imu_angular_scale',
-        default_value=str(common.IMU_ANGULAR_SCALE),
-        description=f'IMU 각속도 단위 보정 계수 (하드웨어 상수, 기본 {common.IMU_ANGULAR_SCALE}). '
-                    '_control_common.py의 IMU_ANGULAR_SCALE에서 공유'
+        default_value=str(common.IMU_ANGULAR_SCALE_REAL),
+        description=f'IMU 각속도 단위 보정 계수 (실차 하드웨어 상수, 기본 {common.IMU_ANGULAR_SCALE_REAL}). '
+                    '_control_common.py의 IMU_ANGULAR_SCALE_REAL에서 공유'
     )
 
     lut_calibrator = Node(

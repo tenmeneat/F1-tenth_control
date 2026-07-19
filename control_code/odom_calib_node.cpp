@@ -137,7 +137,6 @@ private:
                 }
             }
         }
-        prev_cmd_speed_ = m->drive.speed;
         got_drive_ = true;
         last_drive_t_ = now_t;
     }
@@ -316,7 +315,7 @@ private:
     std::deque<Run> history_;
     static constexpr size_t kMaxHistory = 10;
 
-    double speed_ = 0.0, prev_cmd_speed_ = 0.0;
+    double speed_ = 0.0;
     double prev_px_ = 0.0, prev_py_ = 0.0, start_x_ = 0.0, start_y_ = 0.0;
 
     bool got_odom_ = false, got_drive_ = false;

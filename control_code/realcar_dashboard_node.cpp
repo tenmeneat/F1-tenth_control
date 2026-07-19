@@ -3,7 +3,6 @@
 #include <sstream>
 #include <memory>
 #include <cstdlib>
-#include <cmath>
 #include <chrono>
 
 #include "rclcpp/rclcpp.hpp"

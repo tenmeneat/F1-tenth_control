@@ -12,6 +12,13 @@ from launch.substitutions import LaunchConfiguration
 # ============================================================================
 # IMU 각속도 단위 보정 계수 — 하드웨어 상수 (여기가 유일한 정의 위치)
 # ============================================================================
+#   ⚠️⚠️ **이 값은 시뮬과 실차가 다르다 — 진입점 런치 파일에서 각각 넘긴다.**
+#      실차: VESC가 deg/s로 발행 → pi/180 (= IMU_ANGULAR_SCALE_REAL)
+#      시뮬: sim_imu_bridge_node가 odom angular.z(이미 rad/s)를 그대로 중계 → 1.0
+#      공용 상수 하나로 두면 시뮬에서 올바른 rad/s에 또 pi/180이 곱해져 실측 요레이트가
+#      1/57로 죽고, 카운터스티어가 `gain*(기대값 - 0)`이라는 엉뚱한 조향을 계속 더한다
+#      (2026-07-19 실제로 이 실수를 해서 시뮬 랩 완주가 깨졌었음).
+#
 #   ✅ 2026-07-19 실차 확인 완료 — **deg/s로 발행되는 것이 확정됐다.** 팀원이 젯슨에서 측정:
 #      차를 손으로 좌우 왕복 회전시켰을 때 |angular_velocity.z|가 60을 넘었다. rad/s였다면
 #      60 rad/s = 초당 9.5바퀴라 손으로 불가능한 값이다(60 deg/s ≈ 1.05 rad/s가 실제 회전).
@@ -39,7 +46,8 @@ from launch.substitutions import LaunchConfiguration
 #   이 상수는 control_map_node(요레이트 카운터스티어)와 lut_calibrator_node(실측 횡가속도
 #   a_lat = v*yaw_rate) 양쪽이 공유한다. lut_calibration.launch.py도 이 값을 import 해서
 #   쓰므로, 두 곳이 어긋날 일이 구조적으로 없다.
-IMU_ANGULAR_SCALE = 0.0174533   
+IMU_ANGULAR_SCALE_REAL = 0.0174533   # = pi/180. VESC가 deg/s로 발행(2026-07-19 확인)
+IMU_ANGULAR_SCALE_SIM  = 1.0         # sim_imu_bridge_node는 이미 rad/s로 중계 → 보정 불필요
 
 # ⚠️ 조이스틱 드라이버·sim_imu_bridge_node 포함 여부 등 안전 관련 구조 차이는
 # 일부러 여기로 옮기지 않고 각 진입점 파일에 그대로 둔다(환경을 잘못 골라 안전
@@ -161,7 +169,7 @@ def declare_common_args():
 
         # ── IMU 기반 보정 전체 on/off (요레이트 카운터스티어 + 롤 인지 ESC) ──
         # 실차에서 조향 채터링이 보이면 즉시 끌 수 있도록 런치 인자로 노출. 끄면 순수
-        # L1+LUT(시뮬 검증 상태)로 돌아간다. 단위 문제는 IMU_ANGULAR_SCALE로 해결됐으므로
+        # L1+LUT(시뮬 검증 상태)로 돌아간다. 단위 문제는 imu_angular_scale로 해결됐으므로
         # 평상시엔 true로 둘 것.
         DeclareLaunchArgument(
             'use_imu', default_value='true',
@@ -169,12 +177,7 @@ def declare_common_args():
                         '조향 채터링 시 false로 순수 L1+LUT 주행'
         ),
 
-        # ── IMU 각속도 단위 보정 계수 ──
-        DeclareLaunchArgument(
-            'imu_angular_scale', default_value=str(IMU_ANGULAR_SCALE),
-            description=f'IMU 각속도 단위 보정 계수 (하드웨어 상수, 기본 {IMU_ANGULAR_SCALE}). '
-                        '평상시 넘기지 말 것 — _control_common.py의 IMU_ANGULAR_SCALE을 고칠 것'
-        ),
+
 
         # ── MPPI 컨트롤러 튜너블 (control_mppi_node 전용) ──
         # 나머지 MPPI 파라미터(N/K/차량/타이어/비용가중)는 노드 코드 기본값 사용.
@@ -203,7 +206,7 @@ def declare_common_args():
 
 
 def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max_accel,
-                            lookup_table_file='', remappings=None):
+                            imu_angular_scale, lookup_table_file='', remappings=None):
     """control_map_node — 환경별로 다른 값만 인자로 받고 나머지는 공용 정의.
     remappings: 실차에서만 필요한 토픽 리매핑(예: vesc_driver의 sensors/imu/raw →
     코드에 하드코딩된 /imu/data). 시뮬은 sim_imu_bridge_node가 /imu/data로 바로 발행하므로 불필요."""
@@ -230,7 +233,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'wall_safety_margin': 0.6,
             'lookup_table_file': lookup_table_file,
             'use_imu': ParameterValue(LaunchConfiguration('use_imu'), value_type=bool),
-            'imu_angular_scale': LaunchConfiguration('imu_angular_scale'),
+            'imu_angular_scale': imu_angular_scale,
             'yaw_rate_gain': LaunchConfiguration('yaw_rate_gain'),
             'curvature_ff_blend': 0.0,
             'heading_damping_gain': 0.0,

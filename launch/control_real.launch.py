@@ -78,6 +78,8 @@ def generate_launch_description():
         max_lateral_accel=LaunchConfiguration('max_lateral_accel'),
         base_max_accel=LaunchConfiguration('base_max_accel'),
         lookup_table_file=LaunchConfiguration('lookup_table_file'),
+        # VESC 자이로가 deg/s로 발행(2026-07-19 확인) → rad/s 환산. 근거는 _control_common.py 주석.
+        imu_angular_scale=common.IMU_ANGULAR_SCALE_REAL,
         # vesc_driver_node는 IMU를 sensors/imu/raw로 발행하지만 control_map_node.cpp는
         # /imu/data를 구독하도록 하드코딩돼있어 리매핑 필요(안 하면 IMU 미수신 → 롤 ESC/
         # 요레이트 카운터스티어가 조용히 무효화됨).

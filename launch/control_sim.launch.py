@@ -42,6 +42,9 @@ def generate_launch_description():
         max_speed=12.0,
         max_lateral_accel=LaunchConfiguration('max_lateral_accel'),
         base_max_accel=LaunchConfiguration('base_max_accel'),
+        # 시뮬 IMU는 sim_imu_bridge_node가 odom angular.z(이미 rad/s)를 중계 → 보정 불필요.
+        # 실차 값(pi/180)을 여기 쓰면 요레이트가 1/57로 죽어 카운터스티어가 엉뚱해진다.
+        imu_angular_scale=common.IMU_ANGULAR_SCALE_SIM,
     )
 
     # MPPI 컨트롤러 노드 — control_map_node와 나란히 상시 구동(/drive_mppi 발행).

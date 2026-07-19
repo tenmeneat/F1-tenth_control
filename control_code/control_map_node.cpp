@@ -1,12 +1,10 @@
 #include <chrono>
 #include <cmath>
-#include <iostream>
 #include <memory>
 #include <vector>
 #include <algorithm>
 #include <limits>
 #include <string>
-#include <utility>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/imu.hpp"
@@ -27,9 +25,7 @@ using namespace f1tenth_control;
 class ControlMapNode : public rclcpp::Node {
 public:
     ControlMapNode() : Node("control_map_node") {
-        // ==========================================
         // 1. ROS 2 파라미터 선언 및 초기화
-        // ==========================================
         this->declare_parameter<double>("wheelbase", 0.33);
 
         // L1 Guidance Control 파라미터
@@ -82,7 +78,6 @@ public:
         // C는 차량 반폭+자세/추종 마진. 0이면 원본 라인 그대로(비활성).
         this->declare_parameter<double>("wall_safety_margin", 0.6);
 
-        // 파라미터 값 로드
         this->get_parameter("wheelbase", wheelbase_);
         this->get_parameter("l1_gain", l1_gain_);
         this->get_parameter("l1_distance", l1_distance_);
@@ -119,7 +114,6 @@ public:
         this->get_parameter("max_lateral_accel", max_lateral_accel_);
         this->get_parameter("curvature_ff_blend", curvature_ff_blend_);
 
-        // IMU 가속도 rolling buffer 초기화
         acc_now_ = std::vector<double>(10, 0.0);
 
         // 룩업 테이블 로딩 (다중 경로 Fallback 확보)
@@ -152,9 +146,7 @@ public:
             RCLCPP_INFO(this->get_logger(), "🟢 [ControlMapNode] 룩업 테이블(LUT) 로드 성공: %s", lut_file.c_str());
         }
 
-        // ==========================================
         // 2. 글로벌 경로(Waypoints) 구독 설정
-        // ==========================================
         auto qos_gl = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
         global_path_sub_ = this->create_subscription<f110_msgs::msg::WpntArray>(
             "/global_waypoints", qos_gl,
@@ -162,9 +154,7 @@ public:
 
         RCLCPP_INFO(this->get_logger(), "플래닝 팀의 글로벌 경로 토픽(/global_waypoints) 구독 설정 완료.");
 
-        // ==========================================
         // 2.5 로컬 경로(Local Waypoints) 구독 + 장애물 회피 폴백 파라미터
-        // ==========================================
         // wpnt_publisher가 발행하는 짧은 열린 전방 구간(~50점). 글로벌과 달리 non-latched(VOLATILE).
         // 신선한 로컬이 있으면 글로벌보다 우선 추종하고, 끊기면 글로벌로 폴백한다.
         local_fresh_timeout_ = this->declare_parameter<double>("local_fresh_timeout", 0.3);
@@ -181,11 +171,9 @@ public:
         local_last_recv_time_ = this->now(); // 노드 클럭 타입으로 초기화(비교 시 clock mismatch 방지)
         RCLCPP_INFO(this->get_logger(), "로컬 경로 토픽(/local_waypoints) 구독 설정 완료.");
 
-        // ==========================================
         // 3. 알고리즘 인스턴스 초기화 및 통신 채널 설정
-        // ==========================================
         gap_follower_ = std::make_unique<GapFollower>(180.0, 0.38, 3.0, 0.41);
-        stability_controller_ = std::make_unique<StabilityController>(0.15, 0.2, 0.2);
+        stability_controller_ = std::make_unique<StabilityController>(0.15, 0.2);  // alpha_roll, alpha_yaw_rate
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             odom_topic_, 10,
@@ -216,13 +204,11 @@ private:
         current_x_ = msg->pose.pose.position.x;
         current_y_ = msg->pose.pose.position.y;
 
-        // Quaternion -> Yaw 변환
         auto q = msg->pose.pose.orientation;
         double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
         double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
         current_yaw_ = std::atan2(siny_cosp, cosy_cosp);
 
-        // 선속도 추출
         current_speed_ = msg->twist.twist.linear.x;
     }
 
@@ -232,7 +218,6 @@ private:
             // 환산한다. 보정 안 하면 실측 요레이트가 57.3배 → 카운터스티어가 즉시 반대로 포화.
             // 값의 근거·재확인 절차는 launch/_control_common.py의 IMU_ANGULAR_SCALE 주석 참고.
             stability_controller_->update_imu(msg->orientation,
-                                              msg->angular_velocity.x * imu_angular_scale_,
                                               msg->angular_velocity.z * imu_angular_scale_);
         }
         // 가속도 rolling buffer 업데이트 (longitudinal acceleration)
@@ -265,7 +250,6 @@ private:
             interp_wp.y = wp.y_m;
             interp_wp.speed = wp.vx_mps;
             interp_wp.curvature = wp.kappa_radpm;
-            interp_wp.raw_speed_limit = wp.vx_mps;
             interp_wp.yaw = wp.psi_rad;
 
             // 안전라인 시프트: 벽에 너무 붙은 점을 트랙 중심 쪽으로 이동시켜 최소 클리어런스 C 확보.
@@ -383,7 +367,6 @@ private:
             w.speed = wp.vx_mps;
             w.curvature = wp.kappa_radpm;
             w.smoothed_curvature = wp.kappa_radpm; // 로컬(짧은 회피경로)은 창 평활 미적용, 원본 그대로
-            w.raw_speed_limit = wp.vx_mps;
             w.yaw = wp.psi_rad;
             local_waypoints_.push_back(w);
         }
@@ -460,9 +443,7 @@ private:
         if (dt <= 0.0) dt = 0.02;
         last_time_ = current_time;
 
-        // ==========================================
         // 0. 경로 소스 3-tier 중재: 로컬(신선) → 글로벌 → GapFollower(둘 다 없을 때만)
-        // ==========================================
         bool local_fresh = !local_waypoints_.empty() &&
                            (current_time - local_last_recv_time_).seconds() < local_fresh_timeout_;
         bool global_avail = !waypoints_.empty();
@@ -477,9 +458,7 @@ private:
         const std::vector<Waypoint>& wps = local_fresh ? local_waypoints_ : waypoints_;
         const bool closed = !local_fresh;
 
-        // ==========================================
         // 1. 차량 위치 기준 최단 거리 인덱스 (closest_idx) 스캔
-        // ==========================================
         size_t n = wps.size();
         double min_dist = std::numeric_limits<double>::max();
         size_t closest_idx = 0;
@@ -539,9 +518,7 @@ private:
         }
         double lateral_error = min_dist;
 
-        // ==========================================
         // 1.5 곡률 룩어헤드 사전 감속 (Curvature Lookahead Pre-deceleration)
-        // ==========================================
         // 속도비례 룩어헤드: 현재속도 제동거리(v^2/2a)만큼 전방 곡률을 미리 스캔.
         // 고정 2m는 고속 진입 시 감속 개시가 늦어 헤어핀 오버스피드 → 제동거리만큼 확장.
         double brake_dist = (current_speed_ * current_speed_) / (2.0 * std::max(0.1, base_max_decel_));
@@ -584,9 +561,7 @@ private:
         }
         curvature_speed_limit = std::max(min_speed_, curvature_speed_limit);
 
-        // ==========================================
         // 2. L1 Guidance Distance 계산 및 L1 Point 스캔
-        // ==========================================
         double L1_distance = l1_gain_ + current_speed_ * l1_distance_;
         double lower_bound = std::max(t_clip_min_, std::sqrt(2.0) * lateral_error);
         L1_distance = std::max(lower_bound, std::min(L1_distance, t_clip_max_));
@@ -612,9 +587,7 @@ private:
         double L1_x = wps[idx_a].x;
         double L1_y = wps[idx_a].y;
 
-        // ==========================================
         // 3. sin(eta) 직접 계산 (차량 헤딩과 L1 point 간의 횡방향 sin 오차)
-        // ==========================================
         // asin() 후 sin() 호출은 항등식: sin(asin(x)) == x — 중간 삼각함수 2회를 제거
         double L1_vector_x = L1_x - current_x_;
         double L1_vector_y = L1_y - current_y_;
@@ -625,9 +598,7 @@ private:
             sin_eta = std::max(-1.0, std::min(dot_prod / L1_norm, 1.0));
         }
 
-        // ==========================================
         // 3.5 장애물 차단 감지 → GapFollower 회피 폴백
-        // ==========================================
         // 로컬 회피경로(팀원 planner)가 아직 없을 때, 글로벌 라인이 장애물로 막히면 그대로 박으므로
         // L1 목표 방향이 근접 물체로 차단되면 GapFollower로 회피한다.
         // 로컬 추종 중(open=로컬 회피경로 존재)이면 상류 회피를 신뢰하고 이 폴백을 끈다.
@@ -644,9 +615,7 @@ private:
             avoid_hold_counter_ = 0; // 로컬 추종/비활성 시 홀드 리셋
         }
 
-        // ==========================================
         // 4. 조향 속도 룩어헤드 예측 위치 기준 속도 (speed_for_lu) 결정
-        // ==========================================
         double speed_la_for_lu = wps[find_lookahead_wp_idx(wps, closed, closest_idx, speed_lookahead_for_steering_)].speed;
 
         // 횡오차 정규화 및 가변 곡률 반영 속도
@@ -659,9 +628,7 @@ private:
 
         double speed_for_lu = speed_la_for_lu * (1.0 - lateral_error_coeff_ + lateral_error_coeff_ * std::exp(-lat_e_norm * 2.0 * curv_factor));
 
-        // ==========================================
         // 5. 목표 횡가속도 및 Steer 룩업 테이블(LUT) 조향각 조회
-        // ==========================================
         double lat_acc = 0.0;
         if (L1_distance > 0.0) {
             // speed_for_lu도 곡률 제한 적용
@@ -670,9 +637,7 @@ private:
         }
         double steering_angle = lookup_table_.lookup_steer_angle(lat_acc, speed_for_lu);
 
-        // ==========================================
         // 6. 조향각 물리 및 가변 스케일러 보정 (Dynamic Scalers)
-        // ==========================================
         // 1) 가감속 스케일링
         double acc_mean = 0.0;
         for (double a : acc_now_) acc_mean += a;
@@ -729,9 +694,7 @@ private:
         steering_angle = std::max(-0.41, std::min(steering_angle, 0.41));
         last_steering_angle_ = steering_angle;
 
-        // ==========================================
         // 7. 종방향 제어 명령 (Target Speed) 산출
-        // ==========================================
         // 속도용 룩어헤드 예측
         double global_speed = wps[find_lookahead_wp_idx(wps, closed, closest_idx, speed_lookahead_)].speed;
         // 곡률 룩어헤드 제한 적용
@@ -758,9 +721,7 @@ private:
             target_speed *= scaler;
         }
 
-        // ==========================================
         // 8. 롤링 가변 가감속 필터링 (ESC) 및 최종 구동 발행
-        // ==========================================
         double roll_ratio = 0.0;
         if (use_imu_) {
             roll_ratio = stability_controller_->calculate_roll_ratio(max_roll_limit_);
@@ -801,9 +762,7 @@ private:
         drive_pub_->publish(drive_msg);
     }
 
-    // ==========================================
     // 8.5 헬퍼: 룩어헤드 투영점 기준 최근접 웨이포인트 인덱스 반환
-    // ==========================================
     size_t find_lookahead_wp_idx(const std::vector<Waypoint>& wps, bool closed, size_t base_idx, double lookahead_time) const {
         size_t nn = wps.size();
         double la_x = current_x_ + std::cos(current_yaw_) * current_speed_ * lookahead_time;
@@ -830,9 +789,7 @@ private:
         return best_idx;
     }
 
-    // ==========================================
     // 9. 멤버 변수 선언
-    // ==========================================
     double wheelbase_;
 
     // L1 Guidance

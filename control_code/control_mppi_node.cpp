@@ -52,9 +52,7 @@ using SParams  = f1tenth_control::MppiParams;
 class ControlMppiNode : public rclcpp::Node {
  public:
     ControlMppiNode() : Node("control_mppi_node") {
-        // ==========================================
         // 1. 파라미터 선언·1회 읽기 (control_map_node 패턴: 콜백 없음, 재시작 시 반영)
-        // ==========================================
         // double로 선언·읽기 → float/double 솔버 파라미터에 대입(narrowing 허용).
         auto dparam = [&](const std::string& name, double def) {
             return this->declare_parameter<double>(name, def);
@@ -99,9 +97,7 @@ class ControlMppiNode : public rclcpp::Node {
         // RB로 활성화되면 다음 사이클부터 즉시 매 틱 풀 연산으로 복귀(전환 지연 없음).
         idle_solve_decimation_ = iparam("idle_solve_decimation", 5);
 
-        // ==========================================
         // 2. 구독 / 발행 / 타이머 (control_map_node와 동일 QoS)
-        // ==========================================
         auto qos_gl = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
         global_path_sub_ = this->create_subscription<f110_msgs::msg::WpntArray>(
             "/global_waypoints", qos_gl,
