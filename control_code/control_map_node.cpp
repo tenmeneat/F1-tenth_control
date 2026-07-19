@@ -64,6 +64,8 @@ public:
 
         // IMU 센서 안전 토글 및 횡슬립 방지
         this->declare_parameter<bool>("use_imu", true);
+        // IMU 각속도 단위 보정. 실제 값은 런치가 넘긴다(_control_common.py IMU_ANGULAR_SCALE).
+        this->declare_parameter<double>("imu_angular_scale", 1.0);
         this->declare_parameter<double>("yaw_rate_gain", 0.1);
         this->declare_parameter<double>("max_speed", 12.0);
         this->declare_parameter<double>("min_speed", 2.0);
@@ -104,6 +106,7 @@ public:
         this->get_parameter("base_max_accel", base_max_accel_);
         this->get_parameter("base_max_decel", base_max_decel_);
         this->get_parameter("use_imu", use_imu_);
+        this->get_parameter("imu_angular_scale", imu_angular_scale_);
         this->get_parameter("yaw_rate_gain", yaw_rate_gain_);
         this->get_parameter("max_speed", max_speed_);
         this->get_parameter("min_speed", min_speed_);
@@ -225,7 +228,12 @@ private:
 
     void imu_callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg) {
         if (use_imu_) {
-            stability_controller_->update_imu(msg->orientation, msg->angular_velocity.x, msg->angular_velocity.z);
+            // VESC 자이로가 deg/s로 발행하는 것이 실차에서 확인되어(2026-07-19) 여기서 rad/s로
+            // 환산한다. 보정 안 하면 실측 요레이트가 57.3배 → 카운터스티어가 즉시 반대로 포화.
+            // 값의 근거·재확인 절차는 launch/_control_common.py의 IMU_ANGULAR_SCALE 주석 참고.
+            stability_controller_->update_imu(msg->orientation,
+                                              msg->angular_velocity.x * imu_angular_scale_,
+                                              msg->angular_velocity.z * imu_angular_scale_);
         }
         // 가속도 rolling buffer 업데이트 (longitudinal acceleration)
         // VESC의 장착 방향 회전(90도)에 맞춰 -linear_acceleration.y 값을 적용
@@ -728,6 +736,11 @@ private:
         double global_speed = wps[find_lookahead_wp_idx(wps, closed, closest_idx, speed_lookahead_)].speed;
         // 곡률 룩어헤드 제한 적용
         global_speed = std::min(global_speed, curvature_speed_limit);
+        // 직선 최고속도 캡. 곡률 제한은 코너에서만 걸리므로(직선은 kappa~0 → 사실상 무제한)
+        // 이 줄이 없으면 속도가 플래너 프로파일의 vx를 그대로 따라가 컨트롤러 쪽 상한이 없다.
+        // 2026-07-19: 파라미터·런치 배선은 있는데 이 clamp만 빠져 있어 max_speed:=X가 무효였다
+        // (실차 셰이크다운에서 "일단 천천히"가 통하지 않는 상태였음).
+        global_speed = std::min(global_speed, max_speed_);
         double target_speed = global_speed * (1.0 - lateral_error_coeff_ + lateral_error_coeff_ * std::exp(-lat_e_norm * 2.0 * curv_factor));
 
         // 헤딩 에러 감속 보정 (speed_adjust_heading)
@@ -847,6 +860,7 @@ private:
     double base_max_accel_;
     double base_max_decel_;
     bool use_imu_;
+    double imu_angular_scale_;
     double yaw_rate_gain_;
     double max_speed_;
     double min_speed_;

@@ -38,9 +38,9 @@ public:
         this->declare_parameter<int>("algorithm_button", 5);         // RB 버튼 — MAP/MPPI 알고리즘 전환
         this->declare_parameter<bool>("is_simulation", false);       // 시뮬레이터 환경 모드 여부
         this->declare_parameter<bool>("force_autonomous", false);     // 조이스틱 연결 없이 자율주행 모드 즉시 기동 여부
-        // 속도[m/s]→VESC ERPM 환산 게인. ackermann_to_vesc_node(vesc_ackermann)의
-        // speed_to_erpm_gain과 반드시 동일해야 함(대시보드 표시 전용, 실제 변환은 그쪽이 수행) —
-        // _control_common.py의 공용 launch 인자로 양쪽에 동일하게 전달됨.
+        // 속도[m/s]→VESC ERPM 환산 게인. **표시 전용** — 실제 변환은 f1tenth_stack의
+        // ackermann_to_vesc_node가 젯슨 vesc.yaml 값으로 수행한다(이 저장소 밖).
+        // 대시보드 RPM이 실제와 맞으려면 그쪽 값과 같아야 한다.
         this->declare_parameter<double>("speed_to_erpm_gain", 4614.0);
 
         this->get_parameter("max_steering_angle", max_steering_angle_);

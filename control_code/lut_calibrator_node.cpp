@@ -54,6 +54,11 @@ public:
         this->declare_parameter<double>("min_speed_for_sample", 1.0);
         this->declare_parameter<double>("prior_weight", 3.0);
         this->declare_parameter<double>("yaw_rate_filter_alpha", 0.3);
+        // IMU 각속도 단위 보정(VESC가 deg/s로 발행 — 2026-07-19 확인). 보정 안 하면
+        // a_lat = v*yaw_rate가 57.3배가 되어 **LUT 보정 데이터가 조용히 전부 오염된다**
+        // — /drive를 발행하지 않는 관찰 노드라 주행 중엔 아무 증상이 없다.
+        // 실제 값은 런치가 넘긴다(_control_common.py IMU_ANGULAR_SCALE, control_map_node와 공유).
+        this->declare_parameter<double>("imu_angular_scale", 1.0);
         this->declare_parameter<double>("save_interval_sec", 15.0);
 
         this->get_parameter("odom_topic", odom_topic_);
@@ -62,6 +67,7 @@ public:
         this->get_parameter("min_speed_for_sample", min_speed_for_sample_);
         this->get_parameter("prior_weight", prior_weight_);
         this->get_parameter("yaw_rate_filter_alpha", yaw_rate_alpha_);
+        this->get_parameter("imu_angular_scale", imu_angular_scale_);
         this->get_parameter("save_interval_sec", save_interval_sec_);
 
         std::string output_dir;
@@ -146,7 +152,7 @@ public:
 
 private:
     void imu_callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg) {
-        double raw_yaw_rate = msg->angular_velocity.z;
+        double raw_yaw_rate = msg->angular_velocity.z * imu_angular_scale_;
         if (!yaw_rate_initialized_) {
             filtered_yaw_rate_ = raw_yaw_rate;
             yaw_rate_initialized_ = true;
@@ -320,6 +326,7 @@ private:
     double min_speed_for_sample_;
     double prior_weight_;
     double yaw_rate_alpha_;
+    double imu_angular_scale_;
     double save_interval_sec_;
 
     // LUT / 누적 grid

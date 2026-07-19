@@ -9,6 +9,38 @@ from launch.substitutions import LaunchConfiguration
 # 런치파일이 아니라 순수 헬퍼 모듈 — ros2 launch 진입점으로 직접 실행되지 않음.
 # 두 환경에서 100% 동일했던 파라미터/노드 정의를 여기 한 곳에만 두어, 파라미터
 # 추가/변경 시 두 파일에 수동으로 미러링해야 하는 드리프트 위험을 없앤다.
+# ============================================================================
+# IMU 각속도 단위 보정 계수 — 하드웨어 상수 (여기가 유일한 정의 위치)
+# ============================================================================
+#   ✅ 2026-07-19 실차 확인 완료 — **deg/s로 발행되는 것이 확정됐다.** 팀원이 젯슨에서 측정:
+#      차를 손으로 좌우 왕복 회전시켰을 때 |angular_velocity.z|가 60을 넘었다. rad/s였다면
+#      60 rad/s = 초당 9.5바퀴라 손으로 불가능한 값이다(60 deg/s ≈ 1.05 rad/s가 실제 회전).
+#      부호는 정상 — 반시계(좌회전)에서 양수로 REP-103과 일치하므로 부호 보정은 불필요.
+#      따라서 이 상수는 1.0이 아니라 pi/180이어야 한다.
+#
+#   ⚠️ 이 값은 "튜닝 노브"가 아니라 **하드웨어의 물리적 성질**이다. 주행마다 바꿀 값이
+#      아니므로 런치 인자로 매번 넘기지 말고 **여기 기본값을 고칠 것.** 인자로 넘기는
+#      방식은 빠뜨렸을 때 57배 틀린 값으로 조용히 주행하게 되는데, 특히
+#      lut_calibrator_node는 /drive를 발행하지 않아 **주행 중 아무 증상이 없어서**
+#      LUT가 통째로 오염된 걸 나중에야 알게 된다.
+#
+#   재확인 절차(드라이버/펌웨어를 건드린 뒤에는 반드시 다시 볼 것):
+#     ros2 topic hz /imu/data
+#     timeout 8 ros2 topic echo /imu/data --field angular_velocity.z \
+#       | awk '$1+0==$1 {v=($1<0?-$1:$1); if(v>m){m=v}} END{printf "최댓값 = %.3f\n", m}'
+#     → 차를 손으로 들고 좌우 왕복 회전(1초에 반 바퀴 정도). 최댓값이
+#       1~5 이면 rad/s(→ 1.0) / 60~300 이면 deg/s(→ 0.0174533)
+#
+#   ⚠️ 근본 해결은 젯슨 vesc_driver 수정이다(sensor_msgs/Imu의 rad/s 규약 위반을 우리 쪽에서
+#      상쇄하고 있는 상태). 거기서 고쳐지면 **반드시 1.0으로 되돌릴 것** — 양쪽에 걸면 이중
+#      보정되어 요레이트가 1/57로 죽는다. 팀에 넘길 때 "임시로 막아둔 것"임을 명시할 것.
+#   ⚠️ rosbag에는 보정 전 원시값(deg/s)이 기록된다. 오프라인 분석 시 직접 pi/180을 곱할 것.
+#
+#   이 상수는 control_map_node(요레이트 카운터스티어)와 lut_calibrator_node(실측 횡가속도
+#   a_lat = v*yaw_rate) 양쪽이 공유한다. lut_calibration.launch.py도 이 값을 import 해서
+#   쓰므로, 두 곳이 어긋날 일이 구조적으로 없다.
+IMU_ANGULAR_SCALE = 0.0174533   
+
 # ⚠️ 조이스틱 드라이버·sim_imu_bridge_node 포함 여부 등 안전 관련 구조 차이는
 # 일부러 여기로 옮기지 않고 각 진입점 파일에 그대로 둔다(환경을 잘못 골라 안전
 # 기능이 빠진 채 기동되는 실수를 구조적으로 차단하기 위함).
@@ -127,6 +159,23 @@ def declare_common_args():
             description='종방향 최대 감속도 한계 [m/s^2] (곡률 사전감속 제동거리 계산에 사용, 실측 전 추정값)'
         ),
 
+        # ── IMU 기반 보정 전체 on/off (요레이트 카운터스티어 + 롤 인지 ESC) ──
+        # 실차에서 조향 채터링이 보이면 즉시 끌 수 있도록 런치 인자로 노출. 끄면 순수
+        # L1+LUT(시뮬 검증 상태)로 돌아간다. 단위 문제는 IMU_ANGULAR_SCALE로 해결됐으므로
+        # 평상시엔 true로 둘 것.
+        DeclareLaunchArgument(
+            'use_imu', default_value='true',
+            description='IMU 보정 사용 여부(요레이트 카운터스티어+롤 ESC). '
+                        '조향 채터링 시 false로 순수 L1+LUT 주행'
+        ),
+
+        # ── IMU 각속도 단위 보정 계수 ──
+        DeclareLaunchArgument(
+            'imu_angular_scale', default_value=str(IMU_ANGULAR_SCALE),
+            description=f'IMU 각속도 단위 보정 계수 (하드웨어 상수, 기본 {IMU_ANGULAR_SCALE}). '
+                        '평상시 넘기지 말 것 — _control_common.py의 IMU_ANGULAR_SCALE을 고칠 것'
+        ),
+
         # ── MPPI 컨트롤러 튜너블 (control_mppi_node 전용) ──
         # 나머지 MPPI 파라미터(N/K/차량/타이어/비용가중)는 노드 코드 기본값 사용.
         DeclareLaunchArgument(
@@ -142,12 +191,13 @@ def declare_common_args():
             description='MPPI 종가속 탐색 노이즈 σ [m/s^2]'
         ),
 
-        # ── VESC 속도→ERPM 변환 게인 (대시보드 RPM 표시 + 실차 ackermann_to_vesc_node 공용) ──
-        # 두 곳이 서로 다른 값을 쓰면 대시보드에 찍히는 "명령 RPM"이 실제 VESC 변환과
-        # 어긋나므로 반드시 하나의 인자로 공유한다.
+        # ── VESC 속도→ERPM 변환 게인 (시뮬 대시보드 RPM 표시 전용) ──
+        # ⚠️ 이 저장소는 더 이상 ackermann_to_vesc_node를 띄우지 않는다(f1tenth_stack이 담당).
+        #   따라서 이 값은 표시용일 뿐이고, 실제 VESC 변환 게인은 젯슨 f1tenth_stack의
+        #   vesc.yaml에 있다. 표시가 실제와 맞으려면 그쪽 값과 같아야 한다.
         DeclareLaunchArgument(
             'speed_to_erpm_gain', default_value='4614.0',
-            description='속도[m/s]→VESC ERPM 변환 게인 (vesc_to_odom과 동일해야 함)'
+            description='속도[m/s]→VESC ERPM 변환 게인 (표시 전용 — 젯슨 vesc.yaml과 같은 값이어야 함)'
         ),
     ]
 
@@ -179,7 +229,8 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'base_max_decel': LaunchConfiguration('base_max_decel'),
             'wall_safety_margin': 0.6,
             'lookup_table_file': lookup_table_file,
-            'use_imu': True,
+            'use_imu': ParameterValue(LaunchConfiguration('use_imu'), value_type=bool),
+            'imu_angular_scale': LaunchConfiguration('imu_angular_scale'),
             'yaw_rate_gain': LaunchConfiguration('yaw_rate_gain'),
             'curvature_ff_blend': 0.0,
             'heading_damping_gain': 0.0,
