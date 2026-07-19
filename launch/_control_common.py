@@ -49,6 +49,28 @@ from launch.substitutions import LaunchConfiguration
 IMU_ANGULAR_SCALE_REAL = 0.0174533   # = pi/180. VESC가 deg/s로 발행(2026-07-19 확인)
 IMU_ANGULAR_SCALE_SIM  = 1.0         # sim_imu_bridge_node는 이미 rad/s로 중계 → 보정 불필요
 
+# ============================================================================
+# IMU 선형가속도 단위 보정 계수 — 하드웨어 상수 (여기가 유일한 정의 위치)
+# ============================================================================
+#   ✅ 2026-07-19 소스로 확정 — **VESC가 g로 발행한다.** 자이로의 deg/s와 같은 계열의
+#      비-SI 발행이다. 팀 저장소 커밋 148e9ea의 vesc_driver 소스에서 확인:
+#        vesc_packet.cpp : `double VescPacketImu::acc_x() const { return acc_x_; }  // g/s`
+#                          (`g/s`는 물리적으로 성립하지 않는 오타 — 단위는 g)
+#        vesc_driver.cpp : `std_imu_msg.linear_acceleration.y = imuData->acc_y();` ← 변환 없음
+#      즉 sensor_msgs/Imu가 요구하는 m/s²가 아니라 g가 그대로 /imu/data에 실린다.
+#
+#   ⚠️ 보정 전에는 control_map_node의 acc_mean이 실제의 1/9.8이라, 가감속 조향 스케일러의
+#      ±1.0 임계값(control_map_node.cpp의 acc_mean >= 1.0 / <= -1.0)에 사실상 도달하지
+#      못했다 — base_max_accel 9.0 m/s²(≈0.92g)로 최대 가속을 해도 1.0g에 못 미친다.
+#      즉 스케일러가 실차에서 계속 중립으로 놀고 있었다. 이 보정을 넣으면 비로소 동작한다.
+#
+#   각속도와 마찬가지로 sim/real을 나눈다. 현재 sim_imu_bridge_node는 linear_acceleration을
+#   채우지 않아(0 고정) 어떤 계수를 곱해도 0이라 무해하지만, 나중에 브릿지가 odom 미분으로
+#   종가속을 싣게 되면 그 값은 이미 m/s²라 실차 계수를 곱하면 9.8배로 틀어진다.
+#   (2026-07-19에 각속도를 공용 상수 하나로 뒀다가 똑같은 이유로 시뮬이 깨졌던 전례를 반복하지 않기 위함)
+IMU_LINEAR_SCALE_REAL = 9.80665      # g → m/s². VESC가 g로 발행(2026-07-19 소스 확인)
+IMU_LINEAR_SCALE_SIM  = 1.0          # sim_imu_bridge_node는 0 고정(향후 싣더라도 m/s²) → 보정 불필요
+
 # ⚠️ 조이스틱 드라이버·sim_imu_bridge_node 포함 여부 등 안전 관련 구조 차이는
 # 일부러 여기로 옮기지 않고 각 진입점 파일에 그대로 둔다(환경을 잘못 골라 안전
 # 기능이 빠진 채 기동되는 실수를 구조적으로 차단하기 위함).
@@ -206,7 +228,8 @@ def declare_common_args():
 
 
 def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max_accel,
-                            imu_angular_scale, lookup_table_file='', remappings=None):
+                            imu_angular_scale, imu_linear_scale,
+                            lookup_table_file='', remappings=None):
     """control_map_node — 환경별로 다른 값만 인자로 받고 나머지는 공용 정의.
     remappings: 실차에서만 필요한 토픽 리매핑(예: vesc_driver의 sensors/imu/raw →
     코드에 하드코딩된 /imu/data). 시뮬은 sim_imu_bridge_node가 /imu/data로 바로 발행하므로 불필요."""
@@ -234,6 +257,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'lookup_table_file': lookup_table_file,
             'use_imu': ParameterValue(LaunchConfiguration('use_imu'), value_type=bool),
             'imu_angular_scale': imu_angular_scale,
+            'imu_linear_scale': imu_linear_scale,
             'yaw_rate_gain': LaunchConfiguration('yaw_rate_gain'),
             'curvature_ff_blend': 0.0,
             'heading_damping_gain': 0.0,

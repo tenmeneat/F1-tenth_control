@@ -112,6 +112,8 @@ public:
         this->declare_parameter<bool>("use_imu", true);
         // IMU 각속도 단위 보정. 실제 값은 런치가 넘긴다(_control_common.py IMU_ANGULAR_SCALE).
         this->declare_parameter<double>("imu_angular_scale", 1.0);
+        // IMU 선형가속도 단위 보정. 실제 값은 런치가 넘긴다(_control_common.py IMU_LINEAR_SCALE).
+        this->declare_parameter<double>("imu_linear_scale", 1.0);
         this->declare_parameter<double>("yaw_rate_gain", 0.1);
         this->declare_parameter<double>("max_speed", 12.0);
         this->declare_parameter<double>("min_speed", 2.0);
@@ -152,6 +154,7 @@ public:
         this->get_parameter("base_max_decel", base_max_decel_);
         this->get_parameter("use_imu", use_imu_);
         this->get_parameter("imu_angular_scale", imu_angular_scale_);
+        this->get_parameter("imu_linear_scale", imu_linear_scale_);
         this->get_parameter("yaw_rate_gain", yaw_rate_gain_);
         this->get_parameter("max_speed", max_speed_);
         this->get_parameter("min_speed", min_speed_);
@@ -263,17 +266,32 @@ private:
     }
 
     void imu_callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg) {
-        if (use_imu_) {
-            // VESC 자이로가 deg/s로 발행하는 것이 실차에서 확인되어(2026-07-19) 여기서 rad/s로
-            // 환산한다. 보정 안 하면 실측 요레이트가 57.3배 → 카운터스티어가 즉시 반대로 포화.
-            // 값의 근거·재확인 절차는 launch/_control_common.py의 IMU_ANGULAR_SCALE 주석 참고.
-            stability_controller_->update_imu(msg->orientation,
-                                              msg->angular_velocity.z * imu_angular_scale_);
-        }
+        // use_imu=false는 "IMU를 신뢰하지 않는다"는 뜻이므로 IMU에서 파생되는 값은 전부
+        // 쓰지 않는다. 예전엔 아래 가속도 버퍼만 이 게이트 밖에 있어서, IMU가 이상해
+        // use_imu를 꺼도 종가속(조향 스케일러) 경로는 계속 그 IMU를 쓰는 모순이 있었다.
+        // use_imu_는 생성자에서 1회만 읽히므로, false면 acc_now_는 0으로 초기화된 상태를
+        // 그대로 유지 → acc_mean=0 → 스케일러 중립(1.0)으로 안전하게 떨어진다.
+        if (!use_imu_) return;
+
+        // VESC 자이로가 deg/s로 발행하는 것이 실차에서 확인되어(2026-07-19) 여기서 rad/s로
+        // 환산한다. 보정 안 하면 실측 요레이트가 57.3배 → 카운터스티어가 즉시 반대로 포화.
+        // 값의 근거·재확인 절차는 launch/_control_common.py의 IMU_ANGULAR_SCALE 주석 참고.
+        stability_controller_->update_imu(msg->orientation,
+                                          msg->angular_velocity.z * imu_angular_scale_);
+
+        // 롤 인지 ESC가 실제로 걸리는 구간이 있는지 계측(3(a)). 1/10 스케일 차량은 서스펜션이
+        // 단단해 max_roll_limit(0.15rad≈8.6도)까지 기울지 않을 가능성이 커, 그러면 ESC가
+        // 사실상 상시 비활성이다. 주행 후 아래 로그의 최댓값으로 임계치 타당성을 판단한다.
+        max_abs_roll_seen_ = std::max(max_abs_roll_seen_,
+                                      std::abs(stability_controller_->filtered_roll()));
+
         // 가속도 rolling buffer 업데이트 (longitudinal acceleration)
-        // VESC의 장착 방향 회전(90도)에 맞춰 -linear_acceleration.y 값을 적용
+        // VESC의 장착 방향 회전(90도)에 맞춰 -linear_acceleration.y 값을 적용.
+        // ⚠️ VESC 가속도계는 m/s²가 아니라 g로 발행한다(2026-07-19 소스 확인) — 자이로의
+        // deg/s와 같은 계열의 비-SI 발행이라 여기서 환산한다. 보정 전에는 acc_mean이 실제의
+        // 1/9.8이라 아래 ±1.0 임계값에 도달하지 못해 조향 스케일러가 계속 중립이었다.
         std::rotate(acc_now_.rbegin(), acc_now_.rbegin() + 1, acc_now_.rend());
-        acc_now_[0] = -msg->linear_acceleration.y;
+        acc_now_[0] = -msg->linear_acceleration.y * imu_linear_scale_;
     }
 
     void scan_callback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
@@ -751,9 +769,14 @@ private:
         drive_msg.drive.speed = final_speed;
         drive_msg.drive.acceleration = (final_speed - current_speed_) / dt;
 
+        // roll_max/limit%: 롤 ESC 실효성 계측(3(a)). 한 랩 돌고 이 %가 계속 낮게(예: 30% 미만)
+        // 머무르면 max_roll_limit이 1/10 차량에 비해 과대하다는 뜻 — 롤각 대신 횡가속도
+        // (a_lat = v*yaw_rate) 기반으로 ESC 신호를 바꾸는 것을 검토할 것.
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-            "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %zu -> %zu | Steer: %.4f | Speed: %.2f / %.2f | L1_dist: %.2f",
-            current_x_, current_y_, current_yaw_, L1_x, L1_y, closest_idx, idx_a, steering_angle, final_speed, current_speed_, L1_distance);
+            "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %zu -> %zu | Steer: %.4f | Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f | roll_max: %.2f deg (%.0f%% of limit)",
+            current_x_, current_y_, current_yaw_, L1_x, L1_y, closest_idx, idx_a, steering_angle, final_speed, current_speed_, L1_distance,
+            acc_mean, max_abs_roll_seen_ * 180.0 / PI,
+            max_roll_limit_ > 1e-6 ? (max_abs_roll_seen_ / max_roll_limit_ * 100.0) : 0.0);
 
         drive_pub_->publish(drive_msg);
     }
@@ -814,6 +837,8 @@ private:
     double base_max_decel_;
     bool use_imu_;
     double imu_angular_scale_;
+    double imu_linear_scale_ = 1.0;
+    double max_abs_roll_seen_ = 0.0;  // 롤 ESC 실효성 계측용(3(a)) — 주행 중 관측된 최대 |롤각|
     double yaw_rate_gain_;
     double max_speed_;
     double min_speed_;
