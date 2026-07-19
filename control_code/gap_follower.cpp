@@ -20,12 +20,13 @@ bool GapFollower::process_scan(const sensor_msgs::msg::LaserScan::ConstSharedPtr
         return false;
     }
 
-    double max_fov_rad = (max_fov_deg_ * PI) / 180.0;
+    const double half_fov_rad = (max_fov_deg_ * PI) / 360.0;  // (fov_deg/2)를 rad로
     bool obstacle_detected = false;
     min_obstacle_dist = msg->range_max;
 
-    std::vector<double> processed_ranges(msg->ranges.size());
-    
+    std::vector<double>& processed_ranges = processed_ranges_;
+    processed_ranges.resize(msg->ranges.size());
+
     // 1) NaN/Inf 예외 처리 및 스캔 필터링 + 최소 거리 계산
     for (size_t i = 0; i < msg->ranges.size(); ++i) {
         double r = msg->ranges[i];
@@ -35,7 +36,7 @@ bool GapFollower::process_scan(const sensor_msgs::msg::LaserScan::ConstSharedPtr
         } else {
             processed_ranges[i] = r;
             // FOV 내 최소 거리 추적
-            if (std::abs(angle) <= (max_fov_rad / 2.0) && r > msg->range_min) {
+            if (std::abs(angle) <= half_fov_rad && r > msg->range_min) {
                 min_obstacle_dist = std::min(min_obstacle_dist, r);
             }
         }
@@ -44,7 +45,7 @@ bool GapFollower::process_scan(const sensor_msgs::msg::LaserScan::ConstSharedPtr
     // 2) 장애물 주변 세이프티 버블(가려짐) 적용
     for (size_t i = 0; i < msg->ranges.size(); ++i) {
         double angle = msg->angle_min + i * msg->angle_increment;
-        if (std::abs(angle) > (max_fov_rad / 2.0)) {
+        if (std::abs(angle) > half_fov_rad) {
             processed_ranges[i] = 0.0; // 관심 영역 밖은 갈 수 없음 처리
             continue;
         }
@@ -76,7 +77,7 @@ bool GapFollower::process_scan(const sensor_msgs::msg::LaserScan::ConstSharedPtr
 
     for (size_t i = 0; i < processed_ranges.size(); ++i) {
         double angle = msg->angle_min + i * msg->angle_increment;
-        if (std::abs(angle) > (max_fov_rad / 2.0)) continue;
+        if (std::abs(angle) > half_fov_rad) continue;
 
         if (processed_ranges[i] > 0.5) { // 갈 수 있는 공간
             if (current_gap_len == 0) {
@@ -132,7 +133,7 @@ bool GapFollower::process_scan(const sensor_msgs::msg::LaserScan::ConstSharedPtr
         double max_fallback_val = 0.0;
         for (size_t idx = 0; idx < msg->ranges.size(); ++idx) {
             double angle = msg->angle_min + idx * msg->angle_increment;
-            if (std::abs(angle) > (max_fov_rad / 2.0)) continue;
+            if (std::abs(angle) > half_fov_rad) continue;
             
             double r = msg->ranges[idx];
             if (!std::isnan(r) && !std::isinf(r) && r > max_fallback_val) {

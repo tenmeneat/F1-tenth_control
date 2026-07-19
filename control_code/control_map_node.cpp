@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <limits>
 #include <string>
+#include <tuple>
+#include <utility>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/imu.hpp"
@@ -21,6 +23,54 @@
 #include "ament_index_cpp/get_package_share_directory.hpp"
 
 using namespace f1tenth_control;
+
+namespace {
+
+// 전 구간 최근접 웨이포인트 스캔. 반환 {최단거리, 인덱스}.
+// (경로 최초 수신 초기화 / 윈도우 이탈 fail-safe 재탐색 / 로컬 짧은 경로 — 3곳 공용)
+std::pair<double, size_t> scan_closest(const std::vector<Waypoint>& wps, double x, double y) {
+    double min_dist = std::numeric_limits<double>::max();
+    size_t closest_idx = 0;
+    for (size_t i = 0; i < wps.size(); ++i) {
+        double dist = std::hypot(wps[i].x - x, wps[i].y - y);
+        if (dist < min_dist) {
+            min_dist = dist;
+            closest_idx = i;
+        }
+    }
+    return {min_dist, closest_idx};
+}
+
+// start_idx에서 경로를 따라 호 길이 max_dist만큼 전진하며 각 웨이포인트를 방문한다.
+// visit(idx, accum_dist)가 false를 반환하면 중단. 닫힌 경로는 한 바퀴에서, 열린 경로는
+// 끝점에서 멈춘다. 반환값은 마지막으로 도달한 인덱스.
+// (곡률 룩어헤드 사전감속 / L1 목표점 탐색 — 동일한 wrap·종료 가드를 공용화)
+template <typename Visitor>
+size_t walk_forward(const std::vector<Waypoint>& wps, size_t start_idx,
+                    double max_dist, bool closed, Visitor&& visit) {
+    const size_t n = wps.size();
+    if (n == 0) return start_idx;
+
+    size_t idx = start_idx;
+    double accum = 0.0;
+    while (accum < max_dist) {
+        if (!visit(idx, accum)) break;
+
+        size_t next_idx;
+        if (closed) {
+            next_idx = (idx + 1) % n;
+        } else {
+            if (idx + 1 >= n) break;  // 열린 경로: 끝점에서 종료(뒤로 감기 방지)
+            next_idx = idx + 1;
+        }
+        accum += std::hypot(wps[next_idx].x - wps[idx].x, wps[next_idx].y - wps[idx].y);
+        idx = next_idx;
+        if (closed && idx == start_idx) break;  // 한바퀴 방지
+    }
+    return idx;
+}
+
+}  // namespace
 
 class ControlMapNode : public rclcpp::Node {
 public:
@@ -286,18 +336,7 @@ private:
         // control_loop이 매 사이클 윈도우 탐색으로 인덱스를 계속 추적하므로 재초기화가
         // 필요 없다.
         if (first_reception || last_target_idx_ >= waypoints_.size()) {
-            double min_dist = std::numeric_limits<double>::max();
-            size_t closest_idx = 0;
-            for (size_t i = 0; i < waypoints_.size(); ++i) {
-                double dx = waypoints_[i].x - current_x_;
-                double dy = waypoints_[i].y - current_y_;
-                double dist = std::hypot(dx, dy);
-                if (dist < min_dist) {
-                    min_dist = dist;
-                    closest_idx = i;
-                }
-            }
-            last_target_idx_ = closest_idx;
+            last_target_idx_ = scan_closest(waypoints_, current_x_, current_y_).second;
             waypoints_initialized_ = true;
         }
 
@@ -492,29 +531,12 @@ private:
             }
             // Fail-safe recovery: 경로와 2.5m 초과하여 멀어지면 전체 탐색 (U턴 옆차선 점프 방지)
             if (min_dist > 2.5) {
-                min_dist = std::numeric_limits<double>::max();
-                for (size_t i = 0; i < n; ++i) {
-                    double dx = wps[i].x - current_x_;
-                    double dy = wps[i].y - current_y_;
-                    double dist = std::hypot(dx, dy);
-                    if (dist < min_dist) {
-                        min_dist = dist;
-                        closest_idx = i;
-                    }
-                }
+                std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
             }
             last_target_idx_ = closest_idx;
         } else {
             // 로컬(짧은 열린 구간): 전체 최근접 스캔(~50점이라 저렴, wrap 인덱스 미사용)
-            for (size_t i = 0; i < n; ++i) {
-                double dx = wps[i].x - current_x_;
-                double dy = wps[i].y - current_y_;
-                double dist = std::hypot(dx, dy);
-                if (dist < min_dist) {
-                    min_dist = dist;
-                    closest_idx = i;
-                }
-            }
+            std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
         }
         double lateral_error = min_dist;
 
@@ -534,31 +556,19 @@ private:
         // 정확히 그립속도로 선제동된다. (구 방식인 "창 내 최대 κ로 √(a_lat/κ) 블랭킷 재캡"은
         // 프로파일보다 낮은 속도로 전 구간을 과잉감속시켜 폐기 — 상세 비교는 CLAUDE.md 참고.)
         double curvature_speed_limit = std::numeric_limits<double>::max();
-        double accum_curv_dist = 0.0;
-        size_t curv_scan_idx = closest_idx;
-        while (accum_curv_dist < curv_lookahead_dist) {
-            double v_cap_i = wps[curv_scan_idx].speed;
-            double k_i = std::abs(wps[curv_scan_idx].smoothed_curvature);
+        walk_forward(wps, closest_idx, curv_lookahead_dist, closed,
+                     [&](size_t i, double accum) {
+            double v_cap_i = wps[i].speed;
+            double k_i = std::abs(wps[i].smoothed_curvature);
             if (k_i > 0.01) {
                 v_cap_i = std::min(v_cap_i, std::sqrt(max_lateral_accel_ / k_i));
             }
-            double v_reach = std::sqrt(v_cap_i * v_cap_i + 2.0 * base_max_decel_ * accum_curv_dist);
+            double v_reach = std::sqrt(v_cap_i * v_cap_i + 2.0 * base_max_decel_ * accum);
             if (v_reach < curvature_speed_limit) {
                 curvature_speed_limit = v_reach;
             }
-            size_t next_idx;
-            if (closed) {
-                next_idx = (curv_scan_idx + 1) % n;
-            } else {
-                if (curv_scan_idx + 1 >= n) break; // 열린 경로: 끝에 도달하면 종료
-                next_idx = curv_scan_idx + 1;
-            }
-            double dx = wps[next_idx].x - wps[curv_scan_idx].x;
-            double dy = wps[next_idx].y - wps[curv_scan_idx].y;
-            accum_curv_dist += std::hypot(dx, dy);
-            curv_scan_idx = next_idx;
-            if (closed && curv_scan_idx == closest_idx) break; // 한바퀴 방지
-        }
+            return true;
+        });
         curvature_speed_limit = std::max(min_speed_, curvature_speed_limit);
 
         // 2. L1 Guidance Distance 계산 및 L1 Point 스캔
@@ -567,22 +577,8 @@ private:
         L1_distance = std::max(lower_bound, std::min(L1_distance, t_clip_max_));
 
         // closest_idx로부터 물리적으로 L1_distance만큼 전방에 위치한 목표 인덱스 스캔
-        size_t idx_a = closest_idx;
-        double accum_dist = 0.0;
-        while (accum_dist < L1_distance) {
-            size_t next_idx;
-            if (closed) {
-                next_idx = (idx_a + 1) % n;
-            } else {
-                if (idx_a + 1 >= n) break; // 열린 경로: 끝점을 L1 타깃으로 사용(뒤로 감기 방지)
-                next_idx = idx_a + 1;
-            }
-            double dx = wps[next_idx].x - wps[idx_a].x;
-            double dy = wps[next_idx].y - wps[idx_a].y;
-            accum_dist += std::hypot(dx, dy);
-            idx_a = next_idx;
-            if (closed && idx_a == closest_idx) break; // 한바퀴 도는 것 방지
-        }
+        size_t idx_a = walk_forward(wps, closest_idx, L1_distance, closed,
+                                    [](size_t, double) { return true; });
 
         double L1_x = wps[idx_a].x;
         double L1_y = wps[idx_a].y;

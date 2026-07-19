@@ -1,6 +1,5 @@
 #include <chrono>
 #include <memory>
-#include <vector>
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
@@ -10,8 +9,6 @@
 #include "ackermann_msgs/msg/ackermann_drive_stamped.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
-
-// 수학 상수 정의
 
 class JoyTeleopMonitor : public rclcpp::Node {
 public:
@@ -390,8 +387,6 @@ private:
     bool is_emergency_stop_ = false;
     bool rt_pressed_once_ = false;
     bool lt_pressed_once_ = false;
-
-    // 조이스틱 상태 캐싱
 
     // ROS 2 통신 개체
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;

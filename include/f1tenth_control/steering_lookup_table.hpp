@@ -55,13 +55,15 @@ public:
             lu_steers_.push_back(lu_[i][0]);
         }
 
+        // 속도 열별 "그립 내 단조 구간" 사전 계산. 조회 때마다 열을 추출하고 피크를
+        // 찾던 것을 로드 시 1회로 옮긴 것 — 50Hz 조향 경로에서 힙 할당이 사라진다.
+        build_columns();
+
         is_loaded_ = true;
         std::cout << "[SteeringLookupTable] Loaded LUT with size: "
                   << lu_.size() << "x" << lu_[0].size() << " from " << file_path << std::endl;
         return true;
     }
-
-    bool is_loaded() const { return is_loaded_; }
 
     // lut_calibrator_node가 실측 보정 LUT를 만들 때 쓰는 그리드 접근/저장 API.
     const std::vector<double>& steer_axis() const { return lu_steers_; }
@@ -99,48 +101,20 @@ public:
     }
 
     double lookup_steer_angle(double accel, double vel) {
-        if (!is_loaded_) return 0.0;
+        if (!is_loaded_ || lu_vs_.empty()) return 0.0;
 
         double sign_accel = (accel > 0.0) ? 1.0 : -1.0;
         accel = std::abs(accel);
 
         // find closest velocity column index c_v_idx
         auto [c_v, c_v_idx] = find_nearest(lu_vs_, vel);
-        size_t target_col = c_v_idx + 1; // +1 to offset steering column
+        (void)c_v;
 
-        // Extract acceleration column corresponding to c_v_idx
-        std::vector<double> col_accel;
-        col_accel.reserve(lu_.size() - 1);
-        for (size_t i = 1; i < lu_.size(); ++i) {
-            if (target_col < lu_[i].size()) {
-                col_accel.push_back(lu_[i][target_col]);
-            } else {
-                col_accel.push_back(std::numeric_limits<double>::quiet_NaN());
-            }
-        }
-
-        // 각 속도 열은 조향각(row)이 커질수록 lat_acc가 단조 증가하다가 타이어가 슬립각
-        // 한계(Pacejka 피크)를 넘으면 다시 감소하는 "봉우리형" 곡선이다(전 속도축 실측 확인,
-        // 단일 피크). find_closest_neighbors는 target에 가장 가까운 값과 그 이웃으로
-        // 선형보간하는데, 피크를 넘는 목표 lat_acc가 들어오면 피크 양쪽(저조향/고조향)의
-        // 서로 다른 두 조향각이 "같은 정도로 가까운 값"이 되어 매 사이클 어느 쪽이 선택되는지
-        // 진동해 조향 채터링/포화가 반복된다. 피크 이후 구간을 NaN 처리해 검색을 "피크
-        // 이전(그립 내)" 단조 구간으로 제한하면, 피크를 넘는 요청은 그 속도의 최대 그립
-        // 조향각으로 자연히 saturate되어 항상 하나의 안정적인 해로 수렴한다
-        // (find_closest_neighbors는 첫 NaN에서 순회를 멈추므로 피크 이후를 NaN으로 채우기만
-        // 하면 됨).
-        {
-            size_t peak_idx = 0;
-            double peak_val = -std::numeric_limits<double>::infinity();
-            for (size_t i = 0; i < col_accel.size(); ++i) {
-                if (!std::isnan(col_accel[i]) && col_accel[i] > peak_val) {
-                    peak_val = col_accel[i];
-                    peak_idx = i;
-                }
-            }
-            for (size_t i = peak_idx + 1; i < col_accel.size(); ++i) {
-                col_accel[i] = std::numeric_limits<double>::quiet_NaN();
-            }
+        // 해당 속도 열의 "그립 내 단조 구간"(load() 사전계산). 비어 있으면 유효한
+        // 조향 해가 없는 열이므로 조향축 첫 값으로 떨어진다(기존 동작 유지).
+        const std::vector<double>& col_accel = cols_[c_v_idx];
+        if (col_accel.empty()) {
+            return lu_steers_.empty() ? 0.0 : lu_steers_[0] * sign_accel;
         }
 
         // Find two closest accelerations to target accel
@@ -170,7 +144,7 @@ private:
         double s_a; size_t s_a_idx;
     };
 
-    std::pair<double, size_t> find_nearest(const std::vector<double>& arr, double val) {
+    std::pair<double, size_t> find_nearest(const std::vector<double>& arr, double val) const {
         double min_diff = std::numeric_limits<double>::max();
         size_t best_idx = 0;
         for (size_t i = 0; i < arr.size(); ++i) {
@@ -184,42 +158,71 @@ private:
         return {arr[best_idx], best_idx};
     }
 
-    NeighborResult find_closest_neighbors(const std::vector<double>& arr, double val) {
-        std::vector<double> clean_arr;
-        std::vector<size_t> orig_indices;
-        for (size_t i = 0; i < arr.size(); ++i) {
-            if (std::isnan(arr[i])) break; // nan array termination matching numpy's nan slice behavior
-            clean_arr.push_back(arr[i]);
-            orig_indices.push_back(i);
-        }
+    // arr는 build_columns()가 NaN을 걷어낸 배열이라 인덱스가 곧 조향축 인덱스다.
+    NeighborResult find_closest_neighbors(const std::vector<double>& arr, double val) const {
+        if (arr.empty()) return {0.0, 0, 0.0, 0};
 
-        if (clean_arr.empty()) return {0.0, 0, 0.0, 0};
-
-        auto [closest, closest_idx] = find_nearest(clean_arr, val);
-        size_t orig_closest_idx = orig_indices[closest_idx];
+        auto [closest, closest_idx] = find_nearest(arr, val);
 
         if (closest_idx == 0) {
-            return {clean_arr[0], orig_indices[0], clean_arr[0], orig_indices[0]};
+            return {arr[0], 0, arr[0], 0};
         }
-        if (closest_idx == clean_arr.size() - 1) {
-            size_t last = clean_arr.size() - 1;
-            return {clean_arr[last], orig_indices[last], clean_arr[last], orig_indices[last]};
+        if (closest_idx == arr.size() - 1) {
+            size_t last = arr.size() - 1;
+            return {arr[last], last, arr[last], last};
         }
 
         size_t prev_idx = closest_idx - 1;
         size_t next_idx = closest_idx + 1;
-        double prev_val = clean_arr[prev_idx];
-        double next_val = clean_arr[next_idx];
+        size_t second_idx = (std::abs(arr[prev_idx] - val) < std::abs(arr[next_idx] - val))
+                                ? prev_idx : next_idx;
 
-        size_t second_idx = (std::abs(prev_val - val) < std::abs(next_val - val)) ? prev_idx : next_idx;
-        size_t orig_second_idx = orig_indices[second_idx];
+        return {closest, closest_idx, arr[second_idx], second_idx};
+    }
 
-        return {closest, orig_closest_idx, clean_arr[second_idx], orig_second_idx};
+    // 속도 열마다 조향축 방향 "피크 이전(그립 내) 단조 구간"만 잘라 캐시한다.
+    //
+    // 각 속도 열은 조향각(row)이 커질수록 lat_acc가 단조 증가하다가 타이어가 슬립각
+    // 한계(Pacejka 피크)를 넘으면 다시 감소하는 "봉우리형" 곡선이다(전 속도축 실측 확인,
+    // 단일 피크). find_closest_neighbors는 target에 가장 가까운 값과 그 이웃으로
+    // 선형보간하는데, 피크를 넘는 목표 lat_acc가 들어오면 피크 양쪽(저조향/고조향)의
+    // 서로 다른 두 조향각이 "같은 정도로 가까운 값"이 되어 매 사이클 어느 쪽이 선택되는지
+    // 진동해 조향 채터링/포화가 반복된다. 피크 이후를 잘라 검색을 단조 구간으로 제한하면,
+    // 피크를 넘는 요청은 그 속도의 최대 그립 조향각으로 자연히 saturate되어 항상 하나의
+    // 안정적인 해로 수렴한다.
+    void build_columns() {
+        cols_.assign(lu_vs_.size(), {});
+
+        for (size_t j = 0; j < lu_vs_.size(); ++j) {
+            const size_t target_col = j + 1;  // +1 to offset steering column
+
+            // 피크 인덱스 탐색(결측 셀은 건너뜀)
+            size_t peak_idx = 0;
+            double peak_val = -std::numeric_limits<double>::infinity();
+            for (size_t i = 1; i < lu_.size(); ++i) {
+                if (target_col >= lu_[i].size()) continue;
+                const double v = lu_[i][target_col];
+                if (!std::isnan(v) && v > peak_val) {
+                    peak_val = v;
+                    peak_idx = i - 1;
+                }
+            }
+
+            // 선두부터 피크까지, 단 결측/NaN을 만나면 거기서 중단(numpy의 nan-slice 동작)
+            std::vector<double>& col = cols_[j];
+            col.reserve(peak_idx + 1);
+            for (size_t i = 0; i <= peak_idx && i + 1 < lu_.size(); ++i) {
+                const std::vector<double>& row = lu_[i + 1];
+                if (target_col >= row.size() || std::isnan(row[target_col])) break;
+                col.push_back(row[target_col]);
+            }
+        }
     }
 
     std::vector<std::vector<double>> lu_;
     std::vector<double> lu_vs_;     // cached velocity axis (row 0, cols 1..)
     std::vector<double> lu_steers_; // cached steer angle axis (col 0, rows 1..)
+    std::vector<std::vector<double>> cols_; // 속도 열별 피크 이전 단조 구간 (조회 시 무할당)
     bool is_loaded_;
 };
 

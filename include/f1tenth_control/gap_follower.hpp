@@ -23,6 +23,11 @@ private:
     double safety_bubble_dist_;
     double trigger_dist_;
     double steering_limit_;
+
+    // 스캔 처리 버퍼. 매 스캔 새로 할당하면 1080빔 기준 8.6KB/콜(50Hz에서 ~430KB/s)이
+    // 실시간 루프 안에서 churn되므로 멤버로 두고 재사용한다(1번 루프가 전 인덱스를
+    // 무조건 덮어쓰므로 stale 값 위험 없음).
+    std::vector<double> processed_ranges_;
 };
 
 } // namespace f1tenth_control

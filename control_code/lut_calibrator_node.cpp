@@ -293,10 +293,10 @@ private:
                 if (count <= 0 || std::isnan(base_val)) {
                     blended[i][j] = base_val; // 샘플 없으면 원본값 그대로 보존
                 } else {
-                    double measured_avg = sum_grid_[i][j] / static_cast<double>(count);
+                    // 베이지안 블렌딩: 원본값에 prior_weight만큼의 가상 샘플 가중을 주고
+                    // 실측 합을 더해 평균 — 샘플이 적은 셀일수록 원본에 가깝게 남는다.
                     blended[i][j] = (base_val * prior_weight_ + sum_grid_[i][j])
                                      / (prior_weight_ + static_cast<double>(count));
-                    (void)measured_avg; // (참고용) 순수 실측 평균은 measured_avg
                 }
             }
         }
