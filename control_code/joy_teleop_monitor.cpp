@@ -35,7 +35,7 @@ public:
         // 속도[m/s]→VESC ERPM 환산 게인. **표시 전용** — 실제 변환은 f1tenth_stack의
         // ackermann_to_vesc_node가 젯슨 vesc.yaml 값으로 수행한다(이 저장소 밖).
         // 대시보드 RPM이 실제와 맞으려면 그쪽 값과 같아야 한다.
-        this->declare_parameter<double>("speed_to_erpm_gain", 4614.0);
+        this->declare_parameter<double>("speed_to_erpm_gain", 4232.0);
 
         this->get_parameter("max_steering_angle", max_steering_angle_);
         this->get_parameter("max_speed", max_speed_);

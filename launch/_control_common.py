@@ -220,8 +220,11 @@ def declare_common_args():
         # ⚠️ 이 저장소는 더 이상 ackermann_to_vesc_node를 띄우지 않는다(f1tenth_stack이 담당).
         #   따라서 이 값은 표시용일 뿐이고, 실제 VESC 변환 게인은 젯슨 f1tenth_stack의
         #   vesc.yaml에 있다. 표시가 실제와 맞으려면 그쪽 값과 같아야 한다.
+        # 2026-07-20 실측 보정: 4614.0 → 4232.0. 복도 직선 5회(전진4·후진1) 줄자 대조로
+        #   휠 오도메트리가 8.3% 과소보고하는 것이 확인됨(잔차 ±4cm, 정/역 대칭).
+        #   즉 그동안 차가 명령보다 9% 빠르게 달리고 있었다.
         DeclareLaunchArgument(
-            'speed_to_erpm_gain', default_value='4614.0',
+            'speed_to_erpm_gain', default_value='4232.0',
             description='속도[m/s]→VESC ERPM 변환 게인 (표시 전용 — 젯슨 vesc.yaml과 같은 값이어야 함)'
         ),
     ]

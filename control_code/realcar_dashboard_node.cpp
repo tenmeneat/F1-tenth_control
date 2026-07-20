@@ -43,7 +43,7 @@ public:
     RealcarDashboard() : Node("realcar_dashboard_node") {
         this->declare_parameter<std::string>("odom_topic", "/pf/pose/odom");
         // 속도[m/s]→VESC ERPM 환산 게인 (ackermann_to_vesc_node의 speed_to_erpm_gain과 동일값).
-        this->declare_parameter<double>("speed_to_erpm_gain", 4614.0);
+        this->declare_parameter<double>("speed_to_erpm_gain", 4232.0);
         odom_topic_ = this->get_parameter("odom_topic").as_string();
         speed_to_erpm_gain_ = this->get_parameter("speed_to_erpm_gain").as_double();
 
@@ -174,7 +174,7 @@ private:
 
     // 파라미터
     std::string odom_topic_;
-    double speed_to_erpm_gain_ = 4614.0;
+    double speed_to_erpm_gain_ = 4232.0;
 
     // 수신/파생 데이터
     std::string drive_mode_;
