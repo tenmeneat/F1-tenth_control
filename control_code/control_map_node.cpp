@@ -70,6 +70,54 @@ size_t walk_forward(const std::vector<Waypoint>& wps, size_t start_idx,
     return idx;
 }
 
+// 곡률 사전감속(1.5절)용 물리거리 창 평활 곡률 계산.
+//
+// wp.curvature(kappa_radpm)는 인접점 헤딩차분으로 산출되어, 웨이포인트가 촘촘할수록
+// 짧은 구간의 헤딩 노이즈가 증폭돼 개별 포인트 kappa가 실제 지속 곡률보다 훨씬 크게
+// 튈 수 있다. 사전감속이 "윈도우 내 최대 단일점 kappa"를 그대로 쓰면 노이즈 스파이크
+// 하나로 오프라인 최적화된 프로파일 속도보다 훨씬 낮게 순간 과잉감속된다. 물리거리
+// ±window_half_m 창으로 |kappa| 평균을 내면 순간 노이즈는 눌리되 실제 지속 곡률(헤어핀
+// 등)은 거의 그대로 반영된다. 원본 wp.curvature 필드는 FF 조향(curvature_ff_blend_,
+// 기본 비활성) 등 다른 용도를 위해 그대로 둔다.
+//
+// ⚠️ 글로벌·로컬 **양쪽 모두**에 적용해야 한다(2026-07-21). 예전엔 글로벌에만 걸고
+// 로컬은 "짧은 회피경로라 평활 불필요"라며 원본 kappa를 그대로 썼는데, 팀 플래너의
+// /local_waypoints가 실제로는 191점 풀랩이라 그 가정이 깨졌다 — 2026-07-13에 고쳤던
+// 단일점 kappa 과잉감속 버그가 로컬 추종 경로로 고스란히 재유입되고 있었다.
+void smooth_curvature(std::vector<Waypoint>& wps, bool closed, double window_half_m = 0.3) {
+    const int n = static_cast<int>(wps.size());
+    if (n < 2) return;
+
+    double total_len = 0.0;
+    for (int i = 1; i < n; ++i) {
+        total_len += std::hypot(wps[i].x - wps[i - 1].x, wps[i].y - wps[i - 1].y);
+    }
+    const double avg_spacing = total_len / static_cast<double>(n - 1);
+    if (avg_spacing <= 1e-6) return;
+
+    const int half_n = std::max(1, static_cast<int>(std::round(window_half_m / avg_spacing)));
+    std::vector<double> smoothed(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        double sum = 0.0;
+        int cnt = 0;
+        for (int off = -half_n; off <= half_n; ++off) {
+            int idx = i + off;
+            if (closed) {
+                idx = ((idx % n) + n) % n;
+            } else {
+                if (idx < 0 || idx >= n) continue;  // 열린 경로: 창을 배열 안으로 자른다
+            }
+            sum += std::abs(wps[static_cast<size_t>(idx)].curvature);
+            ++cnt;
+        }
+        smoothed[static_cast<size_t>(i)] =
+            (cnt > 0) ? (sum / cnt) : std::abs(wps[static_cast<size_t>(i)].curvature);
+    }
+    for (int i = 0; i < n; ++i) {
+        wps[static_cast<size_t>(i)].smoothed_curvature = smoothed[static_cast<size_t>(i)];
+    }
+}
+
 }  // namespace
 
 class ControlMapNode : public rclcpp::Node {
@@ -130,6 +178,13 @@ public:
         // C는 차량 반폭+자세/추종 마진. 0이면 원본 라인 그대로(비활성).
         this->declare_parameter<double>("wall_safety_margin", 0.6);
 
+        // 경로 이탈 복구 가드 (2026-07-21). 횡오차가 이 값을 넘으면 L1 목표점을 차량 기준
+        // 직선거리로 재선정하고 속도를 recovery_speed로 낮춰 라인 복귀를 우선한다.
+        // 0으로 두면 비활성(기존 거동). 기본 1.0m는 트랙 반폭(0.55~0.8m)보다 살짝 크게 잡아
+        // 정상 추종 중에는 절대 안 걸리도록 한 값.
+        this->declare_parameter<double>("recovery_lat_error", 1.0);
+        this->declare_parameter<double>("recovery_speed", 2.0);
+
         this->get_parameter("wheelbase", wheelbase_);
         this->get_parameter("l1_gain", l1_gain_);
         this->get_parameter("l1_distance", l1_distance_);
@@ -160,6 +215,8 @@ public:
         this->get_parameter("min_speed", min_speed_);
         this->get_parameter("odom_topic", odom_topic_);
         this->get_parameter("wall_safety_margin", wall_safety_margin_);
+        this->get_parameter("recovery_lat_error", recovery_lat_error_);
+        this->get_parameter("recovery_speed", recovery_speed_);
 
         int cl_count;
         this->get_parameter("curvature_lookahead_count", cl_count);
@@ -380,41 +437,25 @@ private:
         avg_waypoint_spacing_ = waypoints_.empty() ? 0.36
                                                     : std::max(0.01, total_path_length / waypoints_.size());
 
-        // 곡률 사전감속(1.5절)용 물리거리 창 평활 곡률 계산.
-        //
-        // wp.curvature(kappa_radpm)는 인접점 헤딩차분으로 산출되어, 웨이포인트가 촘촘할수록
-        // 짧은 구간의 헤딩 노이즈가 증폭돼 개별 포인트 kappa가 실제 지속 곡률보다 훨씬 크게
-        // 튈 수 있다. 사전감속이 "윈도우 내 최대 단일점 kappa"를 그대로 쓰면 노이즈 스파이크
-        // 하나로 오프라인 최적화된 프로파일 속도보다 훨씬 낮게 순간 과잉감속된다. 물리거리
-        // ±0.3m(총 0.6m) 창으로 |kappa| 평균을 내면 순간 노이즈는 눌리되 실제 지속 곡률(헤어핀
-        // 등)은 거의 그대로 반영된다. 원본 wp.curvature 필드는 FF 조향(curvature_ff_blend_,
-        // 기본 비활성) 등 다른 용도를 위해 그대로 둔다.
-        {
-            const double window_half_m = 0.3;
-            const int half_n = std::max(1, static_cast<int>(std::round(window_half_m / avg_waypoint_spacing_)));
-            const int n = static_cast<int>(waypoints_.size());
-            for (int i = 0; i < n; ++i) {
-                double sum = 0.0;
-                int cnt = 0;
-                for (int off = -half_n; off <= half_n; ++off) {
-                    int idx = ((i + off) % n + n) % n;
-                    sum += std::abs(waypoints_[idx].curvature);
-                    ++cnt;
-                }
-                waypoints_[i].smoothed_curvature = (cnt > 0) ? (sum / cnt) : std::abs(waypoints_[i].curvature);
-            }
-        }
+        // 곡률 창 평활 (근거·주의사항은 smooth_curvature 정의부 주석 참고). 글로벌은 닫힌 루프.
+        smooth_curvature(waypoints_, /*closed=*/true);
 
         RCLCPP_INFO(this->get_logger(), "🔄 플래닝 팀의 글로벌 경로 수신 완료! 웨이포인트 개수: %zu, 초기 인덱스: %zu", waypoints_.size(), last_target_idx_);
     }
 
-    // 로컬 경로 콜백: 짧은 열린 전방 구간을 그대로 저장(닫힌 루프 아님).
+    // 로컬 경로 콜백: 상류 플래너의 전방 구간을 그대로 저장.
     // wall_safety_margin 시프트는 적용하지 않는다(회피/추월 경로의 원본 기하 유지, 참조 컨트롤러와 동일).
+    //
+    // ⚠️ 로컬 경로가 "짧은 열린 구간"이라고 가정하지 않는다(2026-07-21). 팀 플래너 구성에 따라
+    // 글로벌과 같은 풀랩(닫힌 루프)이 그대로 실려 올 수 있고, 그걸 열린 경로로 취급하면
+    // 배열 끝에서 룩어헤드가 끊긴다. 소스가 아니라 **기하로 판정**한다.
     void local_path_callback(const f110_msgs::msg::WpntArray::ConstSharedPtr msg) {
         if (msg->wpnts.empty()) {
             local_waypoints_.clear(); // 빈 로컬 → 다음 사이클에 글로벌로 폴백
+            local_is_closed_ = false;
             return;
         }
+        const size_t prev_size = local_waypoints_.size();
         local_waypoints_.clear();
         local_waypoints_.reserve(msg->wpnts.size());
         for (const auto& wp : msg->wpnts) {
@@ -423,10 +464,41 @@ private:
             w.y = wp.y_m;
             w.speed = wp.vx_mps;
             w.curvature = wp.kappa_radpm;
-            w.smoothed_curvature = wp.kappa_radpm; // 로컬(짧은 회피경로)은 창 평활 미적용, 원본 그대로
+            w.smoothed_curvature = wp.kappa_radpm; // 아래 smooth_curvature가 덮어씀(임시값)
             w.yaw = wp.psi_rad;
             local_waypoints_.push_back(w);
         }
+
+        // 닫힘 판정: 끝점→시작점 간격이 평균 웨이포인트 간격의 2배 이내면 닫힌 루프로 본다.
+        // (한 바퀴를 다 담은 경로는 끝점이 시작점 바로 뒤에 오고, 짧은 회피 세그먼트는
+        //  양 끝이 경로 길이만큼 떨어져 있어 확실히 구분된다)
+        const size_t n = local_waypoints_.size();
+        local_is_closed_ = false;
+        if (n >= 8) {
+            double total_len = 0.0;
+            for (size_t i = 1; i < n; ++i) {
+                total_len += std::hypot(local_waypoints_[i].x - local_waypoints_[i - 1].x,
+                                        local_waypoints_[i].y - local_waypoints_[i - 1].y);
+            }
+            const double avg_spacing = total_len / static_cast<double>(n - 1);
+            const double closing_gap = std::hypot(local_waypoints_[n - 1].x - local_waypoints_[0].x,
+                                                  local_waypoints_[n - 1].y - local_waypoints_[0].y);
+            local_is_closed_ = (avg_spacing > 1e-6) && (closing_gap <= 2.0 * avg_spacing);
+        }
+
+        // 곡률 창 평활 — 글로벌과 동일하게 적용한다(2026-07-21).
+        // 여기를 빼두면 단일점 kappa 노이즈로 v_cap=sqrt(a_lat/kappa)가 튀어 순간 과잉감속한다.
+        smooth_curvature(local_waypoints_, local_is_closed_);
+
+        // 배열이 교체되면 로컬 인덱스 추적기를 초기화(다음 사이클에서 전역 재탐색으로 복구)
+        if (n != prev_size) last_local_idx_ = 0;
+
+        if (local_is_closed_ != last_logged_local_closed_) {
+            RCLCPP_INFO(this->get_logger(), "로컬 경로 기하: %s (웨이포인트 %zu개)",
+                        local_is_closed_ ? "닫힌 루프(wrap 적용)" : "열린 구간", n);
+            last_logged_local_closed_ = local_is_closed_;
+        }
+
         local_last_recv_time_ = this->now();
     }
 
@@ -511,17 +583,34 @@ private:
             return;
         }
 
-        // 활성 경로 선택: 신선한 로컬 우선(열린 구간), 없으면 글로벌(닫힌 루프)
+        // 활성 경로 선택: 신선한 로컬 우선, 없으면 글로벌(닫힌 루프)
         const std::vector<Waypoint>& wps = local_fresh ? local_waypoints_ : waypoints_;
-        const bool closed = !local_fresh;
+
+        // ⚠️ "경로 소스"와 "경로 기하"를 분리한다(2026-07-21).
+        //   following_local : 로컬 경로를 추종 중인가 (상류 회피 신뢰 여부 — 장애물 폴백 게이트용)
+        //   path_closed     : 그 경로가 실제로 닫힌 루프인가 (wrap 여부 — walk_forward/윈도우 탐색용)
+        // 예전엔 이 둘을 `closed = !local_fresh` 하나로 겸했는데, 팀 플래너의 /local_waypoints가
+        // 짧은 회피 세그먼트가 아니라 **글로벌과 같은 191점 풀랩**이라 매 랩 배열 끝에서
+        // walk_forward가 끊겼다(룩어헤드 truncation). 시뮬 로그로 확인된 증상:
+        //   로컬 추종 시 `Idx: 185→190, 187→190, 188→190`(끝점 고정)
+        //   글로벌 추종 시 `Idx: 185→2, 189→5`(정상 wrap)
+        // 스타트/피니시 직후가 마진 0인 오프닝 헤어핀이라 곡률 사전감속 창이 거기서 붕괴했다.
+        // → 소스가 아니라 기하로 판정한다(local_path_callback의 local_is_closed_ 참고).
+        const bool following_local = local_fresh;
+        const bool path_closed = local_fresh ? local_is_closed_ : true;
 
         // 1. 차량 위치 기준 최단 거리 인덱스 (closest_idx) 스캔
         size_t n = wps.size();
         double min_dist = std::numeric_limits<double>::max();
         size_t closest_idx = 0;
 
-        if (closed) {
-            // 글로벌(닫힌 루프): 직전 인덱스 주변 윈도우 스캔 + 이탈 시 전역 재탐색
+        // 인덱스 추적기는 경로 소스별로 따로 둔다 — 로컬/글로벌은 배열 길이·인덱싱이 다를 수
+        // 있어 하나를 공유하면 소스가 바뀔 때 엉뚱한 인덱스에서 탐색을 시작한다.
+        size_t& idx_tracker = following_local ? last_local_idx_ : last_target_idx_;
+        if (idx_tracker >= n) idx_tracker = 0;   // 배열이 교체되어 범위를 벗어난 경우
+
+        if (path_closed) {
+            // 닫힌 루프: 직전 인덱스 주변 윈도우 스캔 + 이탈 시 전역 재탐색
             //
             // 윈도우 크기는 고정 인덱스 개수가 아니라 물리 거리(후방 1m·전방 3m) 기준으로
             // 웨이포인트 밀도에 맞춰 동적 산출한다. 고정 개수였다면 웨이포인트 간격이 촘촘한
@@ -536,9 +625,9 @@ private:
             back_count = std::min(back_count, half_n);
             fwd_count = std::min(fwd_count, half_n);
 
-            closest_idx = last_target_idx_;
+            closest_idx = idx_tracker;
             for (int i = -back_count; i <= fwd_count; ++i) {
-                size_t idx = (last_target_idx_ + i + n) % n;
+                size_t idx = (idx_tracker + i + n) % n;
                 double dx = wps[idx].x - current_x_;
                 double dy = wps[idx].y - current_y_;
                 double dist = std::hypot(dx, dy);
@@ -551,11 +640,17 @@ private:
             if (min_dist > 2.5) {
                 std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
             }
-            last_target_idx_ = closest_idx;
         } else {
-            // 로컬(짧은 열린 구간): 전체 최근접 스캔(~50점이라 저렴, wrap 인덱스 미사용)
+            // 열린 구간(짧은 회피경로): 전체 최근접 스캔(~50점이라 저렴, wrap 인덱스 미사용)
             std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
         }
+        // ⚠️ 추적기 갱신은 두 분기 공통이어야 한다(2026-07-21). 예전엔 닫힌 분기에서만
+        // 되썼기 때문에, 로컬 추종 중에는 last_target_idx_가 0에 고정된 채 얼어붙었다
+        // (로그의 "초기 인덱스: 0"이 매 재발행마다 0으로 찍히던 정체). 그 상태로 로컬→글로벌
+        // 폴백이 일어나면 stale 인덱스 주변에서 윈도우 탐색을 시작해 2.5m failsafe에만
+        // 의존해 복구했다 — 시작/피니시처럼 트랙이 스스로에게 가까운 구간에선 failsafe가
+        // 안 걸려 엉뚱한 인덱스에 잠길 수 있다.
+        idx_tracker = closest_idx;
         double lateral_error = min_dist;
 
         // 1.5 곡률 룩어헤드 사전 감속 (Curvature Lookahead Pre-deceleration)
@@ -574,7 +669,7 @@ private:
         // 정확히 그립속도로 선제동된다. (구 방식인 "창 내 최대 κ로 √(a_lat/κ) 블랭킷 재캡"은
         // 프로파일보다 낮은 속도로 전 구간을 과잉감속시켜 폐기 — 상세 비교는 CLAUDE.md 참고.)
         double curvature_speed_limit = std::numeric_limits<double>::max();
-        walk_forward(wps, closest_idx, curv_lookahead_dist, closed,
+        walk_forward(wps, closest_idx, curv_lookahead_dist, path_closed,
                      [&](size_t i, double accum) {
             double v_cap_i = wps[i].speed;
             double k_i = std::abs(wps[i].smoothed_curvature);
@@ -595,8 +690,35 @@ private:
         L1_distance = std::max(lower_bound, std::min(L1_distance, t_clip_max_));
 
         // closest_idx로부터 물리적으로 L1_distance만큼 전방에 위치한 목표 인덱스 스캔
-        size_t idx_a = walk_forward(wps, closest_idx, L1_distance, closed,
+        size_t idx_a = walk_forward(wps, closest_idx, L1_distance, path_closed,
                                     [](size_t, double) { return true; });
+
+        // 2.5 경로 이탈 복구 가드 (2026-07-21 추가)
+        // walk_forward는 closest_idx로부터의 **호 길이**로 목표점을 고르므로, 차량이 경로에서
+        // 크게 벗어나 있으면 그 목표점의 **차량 기준 직선거리**가 L1_distance보다 훨씬 짧아진다.
+        // 그러면 pure-pursuit 특성상 요구 회전반경이 차량 최소 선회반경보다 작아져 목표점을
+        // 따라잡지 못하고 그 주위를 계속 도는 limit cycle에 빠진다(시뮬에서 헤딩이 360° 연속
+        // 회전하며 복귀 실패하는 것으로 재현됨 — 접촉/위치추정 점프/회피 기동 직후 실차에서도
+        // 동일 조건이 만들어진다).
+        // → 목표점을 "차량으로부터 직선거리 L1_distance 이상"이 될 때까지 전진시켜 기하를
+        //   복원하고, 동시에 속도를 낮춰 선회반경을 줄인다. 임계값 미만(정상 추종)에서는
+        //   아무것도 하지 않으므로 검증된 기존 거동은 그대로 유지된다.
+        bool recovery_active = false;
+        if (recovery_lat_error_ > 0.0 && lateral_error > recovery_lat_error_) {
+            recovery_active = true;
+            size_t idx = idx_a;
+            for (size_t k = 0; k < n; ++k) {
+                if (std::hypot(wps[idx].x - current_x_, wps[idx].y - current_y_) >= L1_distance) break;
+                size_t next = idx + 1;
+                if (next >= n) {
+                    if (!path_closed) break;   // 열린 경로: 끝점에서 종료
+                    next = 0;
+                }
+                if (next == closest_idx) break; // 닫힌 경로 한바퀴 방지
+                idx = next;
+            }
+            idx_a = idx;
+        }
 
         double L1_x = wps[idx_a].x;
         double L1_y = wps[idx_a].y;
@@ -615,8 +737,10 @@ private:
         // 3.5 장애물 차단 감지 → GapFollower 회피 폴백
         // 로컬 회피경로(팀원 planner)가 아직 없을 때, 글로벌 라인이 장애물로 막히면 그대로 박으므로
         // L1 목표 방향이 근접 물체로 차단되면 GapFollower로 회피한다.
-        // 로컬 추종 중(open=로컬 회피경로 존재)이면 상류 회피를 신뢰하고 이 폴백을 끈다.
-        if (obstacle_avoid_enable_ && closed) {
+        // 로컬 추종 중이면 상류 회피를 신뢰하고 이 폴백을 끈다.
+        // ⚠️ 여기는 경로 "기하"(path_closed)가 아니라 "소스"(following_local)로 판정해야 한다 —
+        // 로컬 경로가 닫힌 루프여도 상류 회피를 신뢰하는 건 동일하다(2026-07-21 분리).
+        if (obstacle_avoid_enable_ && !following_local) {
             if (is_path_blocked(L1_vector_x, L1_vector_y, L1_norm)) {
                 avoid_hold_counter_ = obstacle_avoid_hold_cycles_; // 차단 감지 → 홀드 재충전(채터링 방지)
             }
@@ -630,7 +754,7 @@ private:
         }
 
         // 4. 조향 속도 룩어헤드 예측 위치 기준 속도 (speed_for_lu) 결정
-        double speed_la_for_lu = wps[find_lookahead_wp_idx(wps, closed, closest_idx, speed_lookahead_for_steering_)].speed;
+        double speed_la_for_lu = wps[find_lookahead_wp_idx(wps, path_closed, closest_idx, speed_lookahead_for_steering_)].speed;
 
         // 횡오차 정규화 및 가변 곡률 반영 속도
         double max_lat_e = 0.5;
@@ -710,7 +834,7 @@ private:
 
         // 7. 종방향 제어 명령 (Target Speed) 산출
         // 속도용 룩어헤드 예측
-        double global_speed = wps[find_lookahead_wp_idx(wps, closed, closest_idx, speed_lookahead_)].speed;
+        double global_speed = wps[find_lookahead_wp_idx(wps, path_closed, closest_idx, speed_lookahead_)].speed;
         // 곡률 룩어헤드 제한 적용
         global_speed = std::min(global_speed, curvature_speed_limit);
         // 직선 최고속도 캡. 곡률 제한은 코너에서만 걸리므로(직선은 kappa~0 → 사실상 무제한)
@@ -733,6 +857,15 @@ private:
                 scaler = 1.0 - 0.5 * (heading_error / (PI / 2.0));
             }
             target_speed *= scaler;
+        }
+
+        // 경로 이탈 복구 중에는 속도를 낮춰 선회반경을 줄인다(위 2.5 가드와 한 쌍).
+        // 최소 선회반경은 R = L/tan(δ_max) = 0.33/tan(0.41) ≈ 0.75m로 속도와 무관하지만,
+        // 실제로는 속도가 높을수록 타이어 그립·요레이트 응답 한계로 그 반경에 못 미친다.
+        // min_speed_ 하한은 두지 않는다 — 이탈 상태에서 최저순항속도를 지키는 것보다
+        // 라인 복귀가 우선이고, 정지가 필요하면 상류 비상제동이 별도로 판단한다.
+        if (recovery_active) {
+            target_speed = std::min(target_speed, recovery_speed_);
         }
 
         // 8. 롤링 가변 가감속 필터링 (ESC) 및 최종 구동 발행
@@ -866,7 +999,12 @@ private:
     double last_steering_angle_ = 0.0;
     rclcpp::Time last_time_;
 
-    size_t last_target_idx_ = 0;
+    size_t last_target_idx_ = 0;   // 글로벌 경로 인덱스 추적기
+    size_t last_local_idx_ = 0;    // 로컬 경로 인덱스 추적기 (배열/인덱싱이 달라 분리)
+    bool local_is_closed_ = false;         // 로컬 경로가 닫힌 루프인지(기하 판정)
+    bool last_logged_local_closed_ = false; // 기하 판정 변화 시에만 로그
+    double recovery_lat_error_ = 1.0;
+    double recovery_speed_ = 2.0;
     bool waypoints_initialized_ = false; // 최초 global_waypoints 수신 여부(재발행 시 인덱스 오초기화 방지)
     double avg_waypoint_spacing_ = 0.36; // global_path_callback에서 실측 갱신, 수신 전 보수적 기본값
 

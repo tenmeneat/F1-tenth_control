@@ -126,8 +126,15 @@ def generate_launch_description():
     # ⚠️ 전제조건(f1tenth_stack 쪽, 이 repo 밖):
     #   1. drive_mode_manager가 AUTONOMOUS 모드에서 teleop을 침묵시켜 navigation('drive')이
     #      mux에서 이길 수 있어야 함(구 joy_teleop.yaml default 섹션 상시발행 이슈는 해소됨).
-    #   2. vesc.yaml의 steering_angle_to_servo_offset이 실측 캘리브레이션값(0.4633,
-    #      2026-07-17)과 동기화돼 있어야 함.
+    #   2. vesc.yaml의 조향 캘리브레이션이 2026-07-21 확정값과 동기화돼 있어야 함:
+    #        steering_angle_to_servo_offset: 0.4672   # 조향 중립(07-20 직진편향 실측 확정)
+    #        steering_angle_to_servo_gain:   -0.4463  # 실측 민감도 0.00779 서보/도 기반
+    #        servo_min / servo_max: 0.2703 / 0.6363   # 명령범위를 ±0.41 rad에 1:1로 맞춤
+    #      ⚠️ offset은 0.4633(07-17)도 0.4533(07-21 일시적용)도 아니다. 0.4533은 "서보 0.5가
+    #      조향 중립"이라는 오해로 6°를 한 번 더 뺀 값이라 좌측 편향이 생겨 원복했다 —
+    #      서보의 기계 중앙(0.5)과 조향 중립(0.4672)은 원래 다르다. 경위는 WORKLOG 07-21 참고.
+    #      ⚠️ gain·servo_min/max는 서보가 스토퍼를 상시 밀던 결함을 고친 것이라 offset과 달리
+    #      07-21 값이 유효하다. 이 게인은 `/**:` 공유 파라미터라 vesc_to_odom에도 함께 걸린다.
 
     return LaunchDescription([
         *common.declare_common_args(),
