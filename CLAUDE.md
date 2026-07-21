@@ -351,7 +351,8 @@ $$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\p
 ⚠️ 실차는 급가속 휠스핀/앞들림 검증 필요). 바꾸려면 해당 launch 파일을 직접 수정.
 
 ### VESC 게인 파라미터 (표시 전용)
-`speed_to_erpm_gain`(기본 4614.0) — 속도[m/s]→VESC ERPM 변환 게인.
+`speed_to_erpm_gain`(기본 4232.0 — 2026-07-20 줄자 실측 보정, 이전 이론값 4614.0) —
+속도[m/s]→VESC ERPM 변환 게인.
 ⚠️ **이 저장소는 더 이상 `ackermann_to_vesc_node`를 띄우지 않는다**(2026-07-17부터 f1tenth_stack이
 담당). 따라서 이 인자는 **시뮬 대시보드의 "Commanded RPM" 표시에만** 쓰이고, 실제 VESC 변환
 게인은 젯슨 `f1tenth_stack`의 `vesc.yaml`에 있다. 표시가 실제와 맞으려면 그쪽 값과 같아야 한다.
