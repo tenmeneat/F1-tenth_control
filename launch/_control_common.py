@@ -87,6 +87,22 @@ def declare_common_args():
             description='롤 비율에 따른 가감속 한계 축소 비율'
         ),
 
+        # ── 경로 이탈 복구 가드 (2026-07-21) ──
+        # 횡오차가 recovery_lat_error를 넘으면 L1 목표점을 차량 기준 직선거리로 재선정하고
+        # 속도를 recovery_speed로 낮춰 라인 복귀를 우선한다. 0이면 비활성(기존 거동).
+        # ⚠️ 기본 1.0m는 ifac_track 반폭(0.55~0.8m) 기준으로 "정상 추종 중엔 절대 안 걸리게"
+        #    잡은 값이다. **트랙 폭이 다른 맵에서는 반드시 재검토할 것** — 넓은 트랙에서
+        #    회피/추월 라인이 글로벌 대비 1m 넘게 벌어지면 정상 주행 중에 가드가 걸려
+        #    불필요하게 recovery_speed로 감속한다. 대략 트랙 반폭보다 조금 크게 잡으면 된다.
+        DeclareLaunchArgument(
+            'recovery_lat_error', default_value='0.0',
+            description='경로 이탈 복구 가드 발동 횡오차 [m] (0=비활성). 트랙 반폭보다 크게 잡을 것'
+        ),
+        DeclareLaunchArgument(
+            'recovery_speed', default_value='2.0',
+            description='이탈 복구 중 속도 상한 [m/s] (선회반경을 줄여 라인 복귀를 돕는다)'
+        ),
+
         # ── 경로소스 신선도 / 장애물 회피 폴백(GapFollower) ──
         DeclareLaunchArgument(
             'local_fresh_timeout', default_value='0.3',
@@ -212,6 +228,8 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'base_max_accel': base_max_accel,
             'base_max_decel': LaunchConfiguration('base_max_decel'),
             'wall_safety_margin': 0.6,
+            'recovery_lat_error': LaunchConfiguration('recovery_lat_error'),
+            'recovery_speed': LaunchConfiguration('recovery_speed'),
             'lookup_table_file': lookup_table_file,
             'use_imu': ParameterValue(LaunchConfiguration('use_imu'), value_type=bool),
             'imu_angular_scale': imu_angular_scale,
