@@ -262,6 +262,15 @@ graph TD
    요레이트(`v·tanδ/L`) 오차만큼 조향 보정, `use_imu` 게이트. rate limit·클리핑 이전에 적용
 7. **rate limit(0.4) + 물리 한계 ±0.41 클리핑**
 8. **롤 인지형 가변 가감속(ESC)** — IMU 롤 비율로 가속/감속 한계를 동적 축소, 전복/스핀 방지
+9. **기동 실패(탈조) 안티와인드업 가드** (2026-07-22 실차 증상 대응) — 속도 램프의 증분은
+   실측과 무관하게 매 사이클 쌓이므로, VESC 센서리스 탈조로 차가 안 움직이는 동안 명령만
+   프로파일 속도까지 감겨 올라가 모터가 물리는 순간 급발진한다. 실측 < `stall_speed_threshold`
+   상태가 `stall_hold_delay` 이상 지속되면 명령을 `stall_hold_speed`로 묶고 램프를 되감는다.
+   ⚠️ **"명령이 실측보다 앞서지 못하게" 일반 clamp를 거는 방식은 쓰면 안 된다** — VESC 속도
+   PID가 ERPM 오차에 비례해 전류를 만들어(`s_pid_kp`=0.003) 60A를 뽑으려면 20000 ERPM
+   ≈ 4.7 m/s의 명령 선행이 물리적으로 필요하다. 선행을 좁히면 가속이 그대로 죽는다.
+   근본 원인은 VESC mcconf(오픈루프 800 vs 옵저버 인수 2500 ERPM 갭)이며 이 가드는 급발진만
+   막는 안전망. 시뮬 검증: ifac_track 9랩 × 2회(on/off) 플라잉랩 10.78~10.83s 동일, 발동 0회
 
 ### 제어 이론 상세
 
@@ -325,6 +334,10 @@ $$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\p
 | `obstacle_avoid_enable` | true | GapFollower 장애물 회피 폴백 활성화 |
 | `obstacle_cone_halfangle` / `obstacle_trigger_dist` / `obstacle_margin` | 0.14 / 1.5 / 0.3 | 장애물 차단 판정 콘 각도[rad]/거리[m]/여유[m] |
 | `obstacle_avoid_hold_cycles` | 15 | 회피 폴백 유지 사이클(50Hz, int) |
+| `stall_guard_enable` | true | 기동 실패(VESC 센서리스 탈조) 시 속도 명령 와인드업 차단 |
+| `stall_speed_threshold` | 0.7 | 이 속도[m/s] 미만이면 "안 움직인다" 판정. 센서리스 데드존 상단(0.59)보다 위 |
+| `stall_hold_speed` | 1.5 | 탈조 판정 시 명령을 묶어둘 값 [m/s] |
+| `stall_hold_delay` | 1.0 | 이 시간[s] 이상 안 움직이면 발동 |
 
 (2026-07-11: 과거 "③ 어디에도 노출 안 됨" 그룹이었던 15개 전부 `_control_common.py`의
 `declare_common_args()`에 추가해 여기로 이동 — 이제 `control_map_node.cpp`를 안 건드리고도 전부

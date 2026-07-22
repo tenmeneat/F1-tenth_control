@@ -156,6 +156,16 @@ public:
         this->declare_parameter<double>("base_max_accel", 4.0);
         this->declare_parameter<double>("base_max_decel", 8.0);
 
+        // 기동 실패(VESC 센서리스 탈조) 가드 — 아래 control_loop 8-b 참고.
+        // ⚠️ "명령이 실측보다 앞서지 못하게" 일반 clamp를 거는 방식은 쓰면 안 된다. VESC 속도
+        //    PID가 ERPM 오차에 비례해 전류를 만들어(kp=0.003) 60A를 뽑으려면 20000 ERPM
+        //    ≈ 4.7 m/s의 명령 선행이 물리적으로 필요하다 — 선행을 좁히면 가속이 그대로 죽는다.
+        //    그래서 "차가 실제로 안 움직이는 동안"에만 발동하는 표적형 가드로 둔다.
+        this->declare_parameter<bool>("stall_guard_enable", true);
+        this->declare_parameter<double>("stall_speed_threshold", 0.7);
+        this->declare_parameter<double>("stall_hold_speed", 1.5);
+        this->declare_parameter<double>("stall_hold_delay", 1.0);
+
         // IMU 센서 안전 토글 및 횡슬립 방지
         this->declare_parameter<bool>("use_imu", true);
         // IMU 각속도 단위 보정. 실제 값은 런치가 넘긴다(_control_common.py IMU_ANGULAR_SCALE).
@@ -206,6 +216,10 @@ public:
         this->get_parameter("max_roll_limit", max_roll_limit_);
         this->get_parameter("decel_attenuation", decel_attenuation_);
         this->get_parameter("base_max_accel", base_max_accel_);
+        this->get_parameter("stall_guard_enable", stall_guard_enable_);
+        this->get_parameter("stall_speed_threshold", stall_speed_threshold_);
+        this->get_parameter("stall_hold_speed", stall_hold_speed_);
+        this->get_parameter("stall_hold_delay", stall_hold_delay_);
         this->get_parameter("base_max_decel", base_max_decel_);
         this->get_parameter("use_imu", use_imu_);
         this->get_parameter("imu_angular_scale", imu_angular_scale_);
@@ -515,6 +529,7 @@ private:
     void publish_safe_stop() {
         last_steering_angle_ = 0.0;
         last_target_speed_ = 0.0;
+        stall_time_ = 0.0;  // 정지 명령 중엔 탈조 판정을 누적하지 않는다(명령이 0이라 애초에 무의미)
         auto drive_msg = ackermann_msgs::msg::AckermannDriveStamped();
         drive_msg.header.stamp = this->now();
         drive_msg.header.frame_id = "base_link";
@@ -922,6 +937,27 @@ private:
         }
         last_target_speed_ = final_speed;
 
+        // 8-b. 기동 실패(VESC 센서리스 탈조) 안티와인드업 가드 (2026-07-22 실차 증상)
+        //   위 램프의 증분은 실측 속도와 무관하게 매 사이클 max_accel*dt씩 쌓인다. 실차 VESC는
+        //   센서리스 FOC라 정지→출발 시 오픈루프 구간(~0.59 m/s)을 못 넘기고 수 초간 탈조할 수
+        //   있는데, 그동안 명령만 프로파일 속도까지 감겨 올라가 모터가 물리는 순간 풀 명령이
+        //   걸린 채 차가 튀어나간다. 
+        if (stall_guard_enable_) {
+            if (std::abs(current_speed_) < stall_speed_threshold_ && final_speed > stall_hold_speed_) {
+                stall_time_ += dt;
+            } else {
+                stall_time_ = 0.0;
+            }
+            if (stall_time_ > stall_hold_delay_) {
+                final_speed = stall_hold_speed_;
+                last_target_speed_ = final_speed;
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "기동 실패 의심(%.1fs): 실측 %.2f m/s인데 명령이 감겨 올라감 → %.2f m/s로 제한. "
+                    "VESC 센서리스 오픈루프 확인 필요",
+                    stall_time_, current_speed_, stall_hold_speed_);
+            }
+        }
+
         auto drive_msg = ackermann_msgs::msg::AckermannDriveStamped();
         drive_msg.header.stamp = this->now();
         drive_msg.header.frame_id = "base_link";
@@ -995,6 +1031,11 @@ private:
     double max_roll_limit_;
     double decel_attenuation_;
     double base_max_accel_;
+    bool stall_guard_enable_ = true;
+    double stall_speed_threshold_ = 0.7;
+    double stall_hold_speed_ = 1.5;
+    double stall_hold_delay_ = 1.0;
+    double stall_time_ = 0.0;   // 실측이 멈춰 있는데 명령만 커진 상태의 누적 시간 [s]
     double base_max_decel_;
     bool use_imu_;
     double imu_angular_scale_;

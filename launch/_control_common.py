@@ -167,6 +167,29 @@ def declare_common_args():
             description='종방향 최대 감속도 한계 [m/s^2] (곡률 사전감속 제동거리 계산에 사용, 실측 전 추정값)'
         ),
 
+        # ── 기동 실패(VESC 센서리스 탈조) 가드 ──
+        # 2026-07-22 실차: 출발 시 4초간 덜그럭거리다 출발하는 증상. 그동안 컨트롤러의 속도
+        # 램프는 실측과 무관하게 프로파일 속도까지 감겨 올라가, 모터가 물리는 순간 풀 명령이
+        # 걸린 채 튀어나간다. 근본 원인은 VESC mcconf(오픈루프 800 vs 옵저버 인수 2500 ERPM
+        # 갭)라 그쪽에서 고쳐야 하지만, 이 가드는 그와 무관하게 급발진만 막는 안전망이다.
+        # 시뮬에선 차가 명령을 즉시 따라가므로 발동하지 않는다(무회귀).
+        DeclareLaunchArgument(
+            'stall_guard_enable', default_value='true',
+            description='기동 실패(탈조) 시 속도 명령 와인드업 차단 가드 on/off'
+        ),
+        DeclareLaunchArgument(
+            'stall_speed_threshold', default_value='0.7',
+            description='이 속도[m/s] 미만이면 "안 움직인다"로 판정. 센서리스 데드존 상단(0.59)보다 위에 둘 것'
+        ),
+        DeclareLaunchArgument(
+            'stall_hold_speed', default_value='1.5',
+            description='탈조 판정 시 속도 명령을 묶어둘 값 [m/s] (데드존 위 + 완만한 출발)'
+        ),
+        DeclareLaunchArgument(
+            'stall_hold_delay', default_value='1.0',
+            description='이 시간[s] 이상 안 움직이면 가드 발동. 4초 탈조는 잡고 정상 기동 지연(~0.3s)은 안 잡히게'
+        ),
+
         # ── IMU 기반 보정 전체 on/off (요레이트 카운터스티어 + 롤 인지 ESC) ──
         # 실차에서 조향 채터링이 보이면 즉시 끌 수 있도록 런치 인자로 노출. 끄면 순수
         # L1+LUT(시뮬 검증 상태)로 돌아간다. 단위 문제는 imu_angular_scale로 해결됐으므로
@@ -315,6 +338,10 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'curvature_lookahead_count': 20,
             'base_max_accel': base_max_accel,
             'base_max_decel': LaunchConfiguration('base_max_decel'),
+            'stall_guard_enable': LaunchConfiguration('stall_guard_enable'),
+            'stall_speed_threshold': LaunchConfiguration('stall_speed_threshold'),
+            'stall_hold_speed': LaunchConfiguration('stall_hold_speed'),
+            'stall_hold_delay': LaunchConfiguration('stall_hold_delay'),
             'wall_safety_margin': 0.6,
             'recovery_lat_error': LaunchConfiguration('recovery_lat_error'),
             'recovery_speed': LaunchConfiguration('recovery_speed'),
