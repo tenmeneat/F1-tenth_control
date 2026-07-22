@@ -333,7 +333,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             't_clip_max': LaunchConfiguration('t_clip_max'),
             'lateral_error_coeff': 1.0,
             'max_speed': max_speed,
-            'min_speed': 2.0,
+            'min_speed': 2.5,
             'max_lateral_accel': max_lateral_accel,
             'curvature_lookahead_count': 20,
             'base_max_accel': base_max_accel,
