@@ -270,6 +270,13 @@ public:
         local_fresh_timeout_ = this->declare_parameter<double>("local_fresh_timeout", 0.3);
         // 로컬 회피경로가 없을 때, 글로벌 추종 중 앞이 막히면 GapFollower로 회피 폴백하는 파라미터
         obstacle_avoid_enable_ = this->declare_parameter<bool>("obstacle_avoid_enable", false);
+        // 경로 소실 failsafe: 글로벌·로컬 웨이포인트가 **둘 다 없을 때** GapFollower로 자율주행할지.
+        // 기본 false = 안전 정지 명령 발행(control_mppi_node와 동일 거동).
+        // ⚠️ true면 플래닝 스택이 안 떠 있거나 죽었을 때 컨트롤러가 라이다 갭만 보고 **차를 스스로
+        //    몰기 시작한다**(1.2~3.5 m/s). 2026-07-22 실차에서 플래닝 없이 자율 버튼을 누르자
+        //    바퀴가 즉시 우측 풀조향된 것이 이 경로였다. 비상정지 판단은 planning 파트 소관이므로
+        //    제어 파트가 경로를 모르는 채 독자 주행할 이유가 없다. 시뮬 갭팔로워 시험용으로만 켤 것.
+        gap_follower_failsafe_ = this->declare_parameter<bool>("gap_follower_failsafe", false);
         obstacle_cone_halfangle_ = this->declare_parameter<double>("obstacle_cone_halfangle", 0.14);
         obstacle_trigger_dist_ = this->declare_parameter<double>("obstacle_trigger_dist", 1.5);
         obstacle_margin_ = this->declare_parameter<double>("obstacle_margin", 0.3);
@@ -502,6 +509,21 @@ private:
         local_last_recv_time_ = this->now();
     }
 
+    // 경로를 모를 때의 안전 정지 명령. 발행을 아예 멈추지 않고 명시적 0을 보내는 이유는,
+    // 침묵하면 하류(ackermann_mux→VESC)가 **직전 명령을 그대로 유지**해 타력주행이 되기 때문이다.
+    // (control_mppi_node의 publish_stop과 동일 규약)
+    void publish_safe_stop() {
+        last_steering_angle_ = 0.0;
+        last_target_speed_ = 0.0;
+        auto drive_msg = ackermann_msgs::msg::AckermannDriveStamped();
+        drive_msg.header.stamp = this->now();
+        drive_msg.header.frame_id = "base_link";
+        drive_msg.drive.steering_angle = 0.0;
+        drive_msg.drive.speed = 0.0;
+        drive_msg.drive.acceleration = 0.0;
+        drive_pub_->publish(drive_msg);
+    }
+
     // GapFollower 기반 순수 LiDAR 회피 주행 계산·발행 (failsafe + 장애물 차단 폴백 공용).
     void publish_gap_follower(double dt) {
         double avoid_steering_angle = 0.0;
@@ -578,8 +600,14 @@ private:
         bool global_avail = !waypoints_.empty();
 
         if (!local_fresh && !global_avail) {
-            // 글로벌·로컬 둘 다 없을 시(초기/전체 소실) 순수 Lidar 기반 Gap Follower 동작 (failsafe)
-            publish_gap_follower(dt);
+            // 글로벌·로컬 둘 다 없음(초기/플래닝 미기동/전체 소실).
+            // 기본은 **안전 정지** — 경로를 모르는 상태에서 제어 파트가 독자 주행하지 않는다.
+            // gap_follower_failsafe:=true일 때만 순수 Lidar Gap Follower 주행(위 선언부 경고 참고).
+            if (gap_follower_failsafe_) {
+                publish_gap_follower(dt);
+            } else {
+                publish_safe_stop();
+            }
             return;
         }
 
@@ -1018,6 +1046,7 @@ private:
 
     // 장애물 차단 시 GapFollower 회피 폴백 (글로벌 추종 중, 로컬 회피경로 없을 때)
     bool obstacle_avoid_enable_ = false;
+    bool gap_follower_failsafe_ = false;
     double obstacle_cone_halfangle_ = 0.14;    // L1 방향 콘 반각 [rad] (~8도)
     double obstacle_trigger_dist_ = 1.5;       // 이 거리[m] 이내 근접 시 차단 판정
     double obstacle_margin_ = 0.3;             // 목표점 거리 대비 최소 여유[m]

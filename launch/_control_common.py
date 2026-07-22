@@ -109,6 +109,13 @@ def declare_common_args():
             description='이 시간(s) 넘게 /local_waypoints 미수신 시 글로벌 경로로 폴백'
         ),
         DeclareLaunchArgument(
+            'gap_follower_failsafe', default_value='false',
+            description='글로벌·로컬 웨이포인트가 둘 다 없을 때 GapFollower로 자율주행할지. '
+                        '기본 false=안전 정지 발행(control_mppi_node와 동일). '
+                        '⚠️ true면 플래닝이 안 떠 있거나 죽었을 때 컨트롤러가 라이다 갭만 보고 '
+                        '차를 스스로 몰기 시작한다(1.2~3.5 m/s) — 실차에서는 켜지 말 것'
+        ),
+        DeclareLaunchArgument(
             'obstacle_avoid_enable', default_value='false',
             description='글로벌 추종 중 장애물 차단 감지 시 GapFollower 회피 폴백 활성화. '
                         '기본 false — overtake 방해 방지(앞차를 장애물로 오인해 회피 전환하는 것 차단). '
@@ -328,6 +335,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'max_roll_limit': LaunchConfiguration('max_roll_limit'),
             'decel_attenuation': LaunchConfiguration('decel_attenuation'),
             'local_fresh_timeout': LaunchConfiguration('local_fresh_timeout'),
+            'gap_follower_failsafe': LaunchConfiguration('gap_follower_failsafe'),
             'obstacle_avoid_enable': LaunchConfiguration('obstacle_avoid_enable'),
             'obstacle_cone_halfangle': LaunchConfiguration('obstacle_cone_halfangle'),
             'obstacle_trigger_dist': LaunchConfiguration('obstacle_trigger_dist'),
