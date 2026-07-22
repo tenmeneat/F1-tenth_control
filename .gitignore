@@ -34,3 +34,6 @@ __pycache__/
 # User documentation (exclude from git)
 docs/
 
+
+# IntelliSense용 생성물 (2026_IFAC 빌드에서 경로 재작성, .vscode 태스크로 갱신)
+compile_commands.json

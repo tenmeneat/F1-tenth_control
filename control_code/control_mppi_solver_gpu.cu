@@ -42,6 +42,7 @@
 #include <thrust/functional.h>
 #include <thrust/reduce.h>
 #include <thrust/transform.h>
+#include <thrust/transform_reduce.h>
 
 namespace f1tenth_control {
 namespace {
@@ -115,24 +116,35 @@ __device__ inline MppiStateF step_dynamics_f(const MppiStateF& s0, const MppiCon
     return s;
 }
 
-// 스테이지 비용: 위치·헤딩·속도 추종 + 트랙 경계 소프트 페널티.
+// 비대칭 트랙 경계 소프트 페널티. e_lat>0 = 경로 기준 좌측(법선 n=(-sin ψ, cos ψ)).
+__device__ inline float boundary_cost_f(float e_lat, const MppiRefF& r, const MppiParamsF& p) {
+    const float lim_l = fmaxf(0.f, r.d_left  - p.margin);
+    const float lim_r = fmaxf(0.f, r.d_right - p.margin);
+    const float over = (e_lat > lim_l) ? (e_lat - lim_l)
+                     : ((-e_lat > lim_r) ? (-e_lat - lim_r) : 0.f);
+    return (over > 0.f) ? p.w_boundary * over * over : 0.f;
+}
+
+// 스테이지 비용: 컨투어링(횡/종 분해) 추종 + 헤딩 + 속도 + 비대칭 경계.
+// (CPU 레퍼런스 control_mppi_solver_cpu.cpp의 stage_cost와 동일 수식)
 __device__ inline float stage_cost_f(const MppiStateF& s, const MppiRefF& r, bool terminal,
                                      const MppiParamsF& p) {
     const float tw = terminal ? p.w_terminal : 1.f;
     const float dx = s.x - r.x;
     const float dy = s.y - r.y;
 
+    const float sy = sinf(r.yaw), cy = cosf(r.yaw);
+    const float e_lat = -sy * dx + cy * dy;   // 횡(컨투어링) 오차
+    const float e_lon =  cy * dx + sy * dy;   // 진행방향(lag) 오차
+
     float c = 0.f;
-    c += tw * p.w_pos * (dx * dx + dy * dy);
+    c += tw * p.w_lat * (e_lat * e_lat);
+    c += tw * p.w_lon * (e_lon * e_lon);
     const float eyaw = wrap_pi_f(s.yaw - r.yaw);
     c += tw * p.w_yaw * (eyaw * eyaw);
     const float ev = s.vx - r.v;
     c += p.w_v * (ev * ev);
-
-    const float e_lat = -sinf(r.yaw) * dx + cosf(r.yaw) * dy;
-    const float limit = fmaxf(0.f, r.half_width - p.margin);
-    const float over  = fabsf(e_lat) - limit;
-    if (over > 0.f) c += p.w_boundary * (over * over);
+    c += boundary_cost_f(e_lat, r, p);
 
     return c;
 }
@@ -155,6 +167,7 @@ __global__ void rollout_kernel(MppiStateF cur,
                                MppiControlF* __restrict__ eps,        // [N*K], [t*K+k]
                                float* __restrict__ costs,             // [K]
                                curandStatePhilox4_32_10_t* rng,       // [K] 영속
+                               MppiControlF last_out,                 // Δu 비용의 t=0 기준
                                MppiParamsF p) {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= p.K) return;
@@ -163,17 +176,32 @@ __global__ void rollout_kernel(MppiStateF cur,
     MppiStateF s = cur;
     float Jk = 0.f;
 
+    // AR(1) 시간상관 잡음: z_t = β·z_{t-1} + √(1−β²)·n_t (정상 N(0,1) 유지).
+    // 백색잡음이면 고주파로 진동하는 제어열이 샘플 풀을 채우고, 그게 뽑히면 채터링이 된다.
+    const float nb = clampf(p.noise_beta, 0.f, 0.99f);
+    const float na = sqrtf(fmaxf(0.f, 1.f - nb * nb));
+    float zs = 0.f, za = 0.f;
+    MppiControlF prev = last_out;   // Δu 기준: t=0은 직전에 실제로 출력한 제어
+
     for (int t = 0; t < p.N; ++t) {
-        // 잡음 있는 제어 v = u_t + ε, 한계 클램프
+        // 시간상관 잡음 → 제어 v = u_t + ε, 한계 클램프
         const float2 n = curand_normal2(&st);  // (steer, accel) 정규난수 한 쌍
+        zs = nb * zs + na * n.x;
+        za = nb * za + na * n.y;
         MppiControlF v;
-        v.steer = clampf(U[t].steer + n.x * p.sigma_steer, -p.steer_max, p.steer_max);
-        v.accel = clampf(U[t].accel + n.y * p.sigma_accel,  p.accel_min, p.accel_max);
+        v.steer = clampf(U[t].steer + zs * p.sigma_steer, -p.steer_max, p.steer_max);
+        v.accel = clampf(U[t].accel + za * p.sigma_accel,  p.accel_min, p.accel_max);
         // 클램프로 실제 적용된 제어와 명목의 차이를 잡음으로 재정의(경계에서 일관성)
         MppiControlF e;
         e.steer = v.steer - U[t].steer;
         e.accel = v.accel - U[t].accel;
         eps[t * p.K + k] = e;
+
+        // 제어 변화율 비용(채터링 억제)
+        const float dsteer = v.steer - prev.steer;
+        const float daccel = v.accel - prev.accel;
+        Jk += p.w_dsteer * dsteer * dsteer + p.w_daccel * daccel * daccel;
+        prev = v;
 
         s = step_dynamics_f(s, v, p);
         Jk += stage_cost_f(s, ref[t + 1], false, p);
@@ -185,6 +213,54 @@ __global__ void rollout_kernel(MppiStateF cur,
     rng[k] = st;  // 전진된 상태를 다음 cycle 위해 되돌려 저장
 }
 
+// 진단 전용: 갱신된 U를 잡음 없이 1회 롤아웃해 항목별 비용/최대 횡오차를 뽑는다(스레드 1개).
+// out[0..5]=lat,lon,yaw,v,bnd,du, out[6]=max|e_lat|
+__global__ void diag_kernel(MppiStateF cur,
+                            const MppiRefF* __restrict__ ref,
+                            const MppiControlF* __restrict__ U,
+                            MppiControlF last_out,
+                            MppiParamsF p,
+                            float* __restrict__ out) {
+    float lat = 0.f, lon = 0.f, yw = 0.f, cv = 0.f, bnd = 0.f, du = 0.f, maxlat = 0.f;
+    MppiStateF s = cur;
+    MppiControlF prev = last_out;
+    for (int t = 0; t <= p.N; ++t) {
+        if (t < p.N) {
+            const float ds_ = U[t].steer - prev.steer;
+            const float da_ = U[t].accel - prev.accel;
+            du += p.w_dsteer * ds_ * ds_ + p.w_daccel * da_ * da_;
+            prev = U[t];
+            s = step_dynamics_f(s, U[t], p);
+        }
+        const MppiRefF r = ref[t < p.N ? t + 1 : p.N];
+        const float tw = (t == p.N) ? p.w_terminal : 1.f;
+        const float dx = s.x - r.x, dy = s.y - r.y;
+        const float sy = sinf(r.yaw), cy = cosf(r.yaw);
+        const float e_lat = -sy * dx + cy * dy;
+        const float e_lon =  cy * dx + sy * dy;
+        lat += tw * p.w_lat * e_lat * e_lat;
+        lon += tw * p.w_lon * e_lon * e_lon;
+        const float eyaw = wrap_pi_f(s.yaw - r.yaw);
+        yw  += tw * p.w_yaw * eyaw * eyaw;
+        const float ev = s.vx - r.v;
+        cv  += p.w_v * ev * ev;
+        bnd += boundary_cost_f(e_lat, r, p);
+        maxlat = fmaxf(maxlat, fabsf(e_lat));
+    }
+    out[0] = lat; out[1] = lon; out[2] = yw; out[3] = cv; out[4] = bnd; out[5] = du; out[6] = maxlat;
+}
+
+// 유한 비용만 골라 합/개수를 내기 위한 펑터 (FLT_MAX 사멸 샘플 제외).
+struct FiniteCost {
+    __host__ __device__ float operator()(float c) const { return (c < 0.5f * FLT_MAX) ? c : 0.f; }
+};
+struct FiniteFlag {
+    __host__ __device__ float operator()(float c) const { return (c < 0.5f * FLT_MAX) ? 1.f : 0.f; }
+};
+struct SquareF {
+    __host__ __device__ float operator()(float w) const { return w * w; }
+};
+
 // β 감산 후 정규화 전 가중치 w_k = exp(-(J_k-β)/λ) 로 변환하는 thrust 펑터.
 struct ExpWeight {
     float beta, inv_lambda;
@@ -194,7 +270,10 @@ struct ExpWeight {
 };
 
 // (2) 타임스텝당 블록 1개: U_t += Σ_k w_k·ε_{k,t}. 블록 내 공유메모리 트리 리덕션.
-//     blockDim.x = nextpow2(K) (호출부가 보장), k>=K 스레드는 0으로 패딩.
+//     blockDim.x = min(nextpow2(K), 1024). ⚠️ CUDA 블록당 스레드 상한이 1024라 K가 그보다
+//     크면 스레드당 여러 k를 그리드-스트라이드로 먼저 누산한 뒤 트리 리덕션한다.
+//     (2026-07-22: 이 상한을 안 지켜 K=2048에서 커널 런치가 조용히 실패했고, U_가 갱신되지
+//      않은 채 쓰레기 제어가 나가 출발 직후 벽으로 갔다. 런치 에러 체크도 그때 함께 추가.)
 __global__ void weighted_update_kernel(MppiControlF* __restrict__ U,        // [N] in/out
                                        const MppiControlF* __restrict__ eps, // [N*K], [t*K+k]
                                        const float* __restrict__ weights,    // [K] 정규화 전 w_k
@@ -208,11 +287,11 @@ __global__ void weighted_update_kernel(MppiControlF* __restrict__ U,        // [
     const int k = threadIdx.x;   // 0..blockDim.x-1
 
     float ds = 0.f, da = 0.f;
-    if (k < p.K) {
-        const float w = weights[k] * inv_eta;
-        const MppiControlF e = eps[t * p.K + k];
-        ds = w * e.steer;
-        da = w * e.accel;
+    for (int kk = k; kk < p.K; kk += blockDim.x) {   // K > blockDim.x면 스레드당 여러 개
+        const float w = weights[kk] * inv_eta;
+        const MppiControlF e = eps[t * p.K + kk];
+        ds += w * e.steer;
+        da += w * e.accel;
     }
     sh_ds[k] = ds;
     sh_da[k] = da;
@@ -251,7 +330,9 @@ struct MPPIControllerGPU::Impl {
     thrust::device_vector<MppiRefF>     d_ref;      // [N+1] 기준궤적
     thrust::device_vector<curandStatePhilox4_32_10_t> d_rng;  // [K] 영속 RNG 상태
     thrust::device_vector<MppiStateF>   d_prop;     // [1] propagate 출력
+    thrust::device_vector<float>        d_diag;     // [7] 진단 커널 출력
     MppiControlF last_out{};
+    MppiDiagF diag;
     double last_solve_ms = 0.0;
     int block_upd = 1;  // weighted_update_kernel의 blockDim = nextpow2(K)
 };
@@ -266,9 +347,10 @@ MPPIControllerGPU::MPPIControllerGPU(const MppiParamsF& p) : impl_(new Impl) {
     im.d_ref.assign(static_cast<size_t>(p.N) + 1, MppiRefF{});
     im.d_rng.resize(static_cast<size_t>(p.K));
     im.d_prop.resize(1);
+    im.d_diag.assign(7, 0.f);
 
     int b = 1;
-    while (b < p.K) b <<= 1;
+    while (b < p.K && b < 1024) b <<= 1;   // CUDA 블록당 스레드 상한 1024
     im.block_upd = b;
 
     const int bs = 128, gs = (p.K + bs - 1) / bs;
@@ -285,6 +367,7 @@ void MPPIControllerGPU::reset() {
 
 double MPPIControllerGPU::last_solve_ms() const { return impl_->last_solve_ms; }
 const MppiParamsF& MPPIControllerGPU::params() const { return impl_->p; }
+const MppiDiagF& MPPIControllerGPU::last_diag() const { return impl_->diag; }
 
 MppiStateF MPPIControllerGPU::propagate(const MppiStateF& s, const MppiControlF& u) const {
     Impl& im = *impl_;
@@ -303,6 +386,9 @@ bool MPPIControllerGPU::solve(const MppiStateF& cur, const std::vector<MppiRefF>
 
     const auto t0 = std::chrono::steady_clock::now();
     auto finalize = [&]() {
+        // 런치 실패(블록 크기 초과·공유메모리 초과 등)는 동기화 전에는 안 보인다.
+        // 잡지 않으면 U_가 갱신되지 않은 채 제어가 계속 나가므로 반드시 확인한다.
+        cuda_check(cudaGetLastError(), "kernel launch");
         cuda_check(cudaDeviceSynchronize(), "solve sync");
         const auto t1 = std::chrono::steady_clock::now();
         im.last_solve_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -316,7 +402,7 @@ bool MPPIControllerGPU::solve(const MppiStateF& cur, const std::vector<MppiRefF>
     // (1) 롤아웃 + 비용
     const int bs = 128, gs = (im.p.K + bs - 1) / bs;
     rollout_kernel<<<gs, bs>>>(cur, raw(im.d_ref), raw(im.d_U), raw(im.d_eps),
-                               raw(im.d_costs), raw(im.d_rng), im.p);
+                               raw(im.d_costs), raw(im.d_rng), im.last_out, im.p);
 
     // (2) β = min(costs)
     const float beta = thrust::reduce(im.d_costs.begin(), im.d_costs.end(),
@@ -327,9 +413,27 @@ bool MPPIControllerGPU::solve(const MppiStateF& cur, const std::vector<MppiRefF>
         return false;
     }
 
-    // (3) 가중치 w_k = exp(-(J_k-β)/λ) (in-place), η = Σ w_k
+    // (2-b) 유한 비용의 합/개수 → 평균. 적응 λ가 이걸 쓰므로 diag_enable과 무관하게 계산.
+    const float sum_fin = thrust::transform_reduce(im.d_costs.begin(), im.d_costs.end(),
+                                                   FiniteCost{}, 0.f, thrust::plus<float>());
+    const float n_fin   = thrust::transform_reduce(im.d_costs.begin(), im.d_costs.end(),
+                                                   FiniteFlag{}, 0.f, thrust::plus<float>());
+    const float j_mean = (n_fin > 0.f) ? (sum_fin / n_fin) : beta;
+    im.diag.j_min = beta;
+    im.diag.j_mean = j_mean;
+    im.diag.n_finite = static_cast<int>(n_fin);
+
+    // 적응 역온도 λ_eff = lambda_rel·(J_mean − β). λ를 비용 스케일에 불변으로 만든다
+    // (고정 λ는 w_*를 하나만 바꿔도 ESS가 1까지 무너지거나 K까지 뭉개진다).
+    const float spread = fmaxf(0.f, j_mean - beta);
+    const float lambda_eff = (im.p.lambda_rel > 0.f)
+                                 ? fmaxf(1e-6f, im.p.lambda_rel * spread)
+                                 : fmaxf(1e-6f, im.p.lambda);
+    im.diag.lambda_eff = lambda_eff;
+
+    // (3) 가중치 w_k = exp(-(J_k-β)/λ_eff) (in-place), η = Σ w_k
     thrust::transform(im.d_costs.begin(), im.d_costs.end(), im.d_costs.begin(),
-                      ExpWeight{beta, 1.f / im.p.lambda});
+                      ExpWeight{beta, 1.f / lambda_eff});
     const float eta = thrust::reduce(im.d_costs.begin(), im.d_costs.end(), 0.f,
                                      thrust::plus<float>());
     if (eta < 1e-12f) {
@@ -343,6 +447,20 @@ bool MPPIControllerGPU::solve(const MppiStateF& cur, const std::vector<MppiRefF>
     const size_t shbytes = 2 * static_cast<size_t>(im.block_upd) * sizeof(float);
     weighted_update_kernel<<<im.p.N, im.block_upd, shbytes>>>(
         raw(im.d_U), raw(im.d_eps), raw(im.d_costs), inv_eta, im.p);
+
+    // (4-b) 진단: ESS(유효 샘플수)와 명목 계획의 비용 구성. ESS가 K의 1~2%면 가중치 퇴화
+    //       (랜덤서치=채터링), 80%↑면 뭉개짐(제어 권한 상실). 10~40%가 건강한 범위.
+    if (im.p.diag_enable) {
+        const float sum_w2 = thrust::transform_reduce(im.d_costs.begin(), im.d_costs.end(),
+                                                      SquareF{}, 0.f, thrust::plus<float>());
+        im.diag.ess = (sum_w2 > 0.f) ? static_cast<double>(eta) * eta / sum_w2 : 0.0;
+        diag_kernel<<<1, 1>>>(cur, raw(im.d_ref), raw(im.d_U), im.last_out, im.p, raw(im.d_diag));
+        float h[7] = {0};
+        cuda_check(cudaMemcpy(h, raw(im.d_diag), sizeof(h), cudaMemcpyDeviceToHost), "diag copy");
+        im.diag.c_lat = h[0]; im.diag.c_lon = h[1]; im.diag.c_yaw = h[2];
+        im.diag.c_v = h[3]; im.diag.c_bnd = h[4]; im.diag.c_du = h[5];
+        im.diag.nominal_max_lat = h[6];
+    }
 
     // (5) 출력 = 첫 제어(비평활 U_0), 호스트에서 저역통과 블렌드 (CPU와 동일: U_는 불변)
     MppiControlF u0;
@@ -386,19 +504,24 @@ int main() {
     const float v_ref = 3.0f;
     const float track_halfwidth = 1.2f;
 
-    auto build_ref = [&](float theta0) {
+    // ⚠️ 수평 간격은 control_mppi_node의 build_reference와 **동일 규약**으로 만든다
+    //    (현재 속도에서 시작해 도달가능 가속으로 프로파일 속도까지 램프). CPU 스모크
+    //    테스트와도 같은 하네스라 두 솔버 결과를 직접 비교할 수 있다.
+    auto build_ref = [&](float theta0, float vx0) {
         std::vector<MppiRefF> ref;
         ref.reserve(p.N + 1);
-        const float dtheta = (v_ref * p.dt) / R;
+        float vh = std::max(1.0f, vx0), th = theta0;
         for (int t = 0; t <= p.N; ++t) {
-            const float th = theta0 + dtheta * t;
             MppiRefF r;
             r.x = R * std::cos(th);
             r.y = R * std::sin(th);
             r.yaw = wrap_pi_f(th + static_cast<float>(M_PI) / 2.0f);
             r.v = v_ref;
-            r.half_width = track_halfwidth;
+            r.d_left = track_halfwidth;
+            r.d_right = track_halfwidth;
             ref.push_back(r);
+            vh = std::min(v_ref, vh + p.accel_max * p.dt);
+            th += (vh * p.dt) / R;
         }
         return ref;
     };
@@ -416,7 +539,7 @@ int main() {
     bool control_ok = true, finite_ok = true;
 
     for (int i = 0; i < STEPS; ++i) {
-        auto ref = build_ref(theta_of(s));
+        auto ref = build_ref(theta_of(s), s.vx);
         MppiControlF u;
         bool ok = mppi.solve(s, ref, u);
         (void)ok;
@@ -440,6 +563,12 @@ int main() {
     std::printf("worst solve  : %.2f ms  [RTX 4060 기준 — Jetson 성능 예측 아님]\n", worst_ms);
     std::printf("controls in-limit: %s | finite: %s\n",
                 control_ok ? "OK" : "FAIL", finite_ok ? "OK" : "FAIL");
+    {   // CPU 스모크 테스트와 같은 형식의 진단 — 두 솔버 정합성 비교용
+        const MppiDiagF& d = mppi.last_diag();
+        std::printf("diag: ESS=%.1f/%d fin=%d lam_eff=%.2f | C[lat=%.1f lon=%.1f yaw=%.1f v=%.1f bnd=%.1f du=%.1f] max_lat=%.2f\n",
+                    d.ess, p.K, d.n_finite, d.lambda_eff,
+                    d.c_lat, d.c_lon, d.c_yaw, d.c_v, d.c_bnd, d.c_du, d.nominal_max_lat);
+    }
 
     const bool converged = (lat_last < lat_first) && (lat_last < 0.5f);
     std::printf("converged: %s\n", converged ? "OK" : "FAIL");

@@ -35,7 +35,8 @@ struct MppiStateF {
 struct MppiRefF {
     float x = 0.f, y = 0.f, yaw = 0.f;  // 기준 위치·헤딩
     float v = 0.f;                      // 목표 속도
-    float half_width = 1.f;             // 트랙 반폭 ≈ min(d_left,d_right)
+    // 좌/우 벽까지 거리 — 비대칭(2026-07-22). CPU MppiRef와 동일 규약.
+    float d_left = 1.f, d_right = 1.f;
 };
 
 // 제어 입력 — MppiControl의 float 버전
@@ -50,9 +51,11 @@ struct MppiParamsF {
     int   N  = 25;
     int   K  = 512;
     float dt = 0.05f;
-    float lambda = 1.0f;
+    float lambda = 1.0f;      // 고정 역온도(lambda_rel<=0일 때만)
+    float lambda_rel = 0.02f; // 적응 역온도: λ_eff = lambda_rel·(J_mean − J_min)
     float sigma_steer = 0.15f;
     float sigma_accel = 1.5f;
+    float noise_beta = 0.7f;  // 잡음 시간상관 AR(1) 계수 [0,1)
     unsigned int seed = 0xC0FFEEu;
 
     // --- 차량/타이어 ---
@@ -63,11 +66,16 @@ struct MppiParamsF {
     float v_switch = 2.0f;
     int   substeps = 2;
 
-    // --- 비용 가중 ---
-    float w_pos = 8.0f, w_yaw = 2.0f, w_v = 1.0f;
+    // --- 비용 가중 (컨투어링 재정식화 — CPU 레퍼런스와 동일) ---
+    float w_lat = 150.0f;      // 경로 횡오차 — 주력. w_v와의 **비율**이 안정성을 정한다(07-22 실측: w_v/w_lat이
+    // 0.004 이하면 안정, 0.0067이면 헤어핀에서 마찰포화로 크래시)
+    float w_lon = 1.0f;       // 경로 진행방향(lag) 오차 — 작게
+    float w_yaw = 5.0f, w_v = 0.5f;
     float w_boundary = 500.0f;
     float margin = 0.15f;
     float w_terminal = 20.0f;
+    float w_dsteer = 100.0f;  // 제어 변화율 비용(조향) — 채터링 억제
+    float w_daccel = 0.5f;
 
     // --- 한계 ---
     float steer_max = 0.41f, accel_max = 4.0f, accel_min = -8.0f;
@@ -75,6 +83,19 @@ struct MppiParamsF {
 
     // --- 출력 평활화 ---
     float u_smooth = 0.3f;
+
+    // 진단 계측 on/off (리덕션·커널 몇 개 추가). 제어 결과에는 영향 없음.
+    bool diag_enable = true;
+};
+
+// 솔버 진단값 — CPU MppiDiag의 float 버전(필드명 동일 → 노드가 같은 코드로 출력).
+struct MppiDiagF {
+    double ess = 0.0;
+    double lambda_eff = 0.0;
+    double j_min = 0.0, j_mean = 0.0, j_max = 0.0;
+    double c_lat = 0.0, c_lon = 0.0, c_yaw = 0.0, c_v = 0.0, c_bnd = 0.0, c_du = 0.0;
+    double nominal_max_lat = 0.0;
+    int    n_finite = 0;
 };
 
 // ---------------------------------------------------------------------------

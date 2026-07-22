@@ -65,22 +65,38 @@ class ControlMppiNode : public rclcpp::Node {
 
         // --- MPPI 코어 ---
         p_.N           = iparam("N", p_.N);
-        p_.K           = iparam("K", p_.K);
+        // K(롤아웃 수)는 0이면 **솔버별 자동**. 샘플링 노이즈(직선 미세 사행)의 분산이
+        // 대략 1/ESS라 K를 키우면 그대로 줄어드는데(07-22 실측: 512→2048에서 지터 0.034→0.020),
+        // GPU는 K=2048도 0.4ms라 공짜인 반면 CPU 순차 솔버는 20ms 예산을 넘긴다.
+        {
+            const int k_arg = iparam("K", 0);
+#ifdef USE_MPPI_GPU
+            const int k_auto = 2048;
+#else
+            const int k_auto = 512;
+#endif
+            p_.K = (k_arg > 0) ? k_arg : k_auto;
+        }
         p_.dt          = dparam("dt", p_.dt);
         p_.lambda      = dparam("lambda", p_.lambda);
+        p_.lambda_rel  = dparam("lambda_rel", p_.lambda_rel);
         p_.sigma_steer = dparam("sigma_steer", p_.sigma_steer);
         p_.sigma_accel = dparam("sigma_accel", p_.sigma_accel);
+        p_.noise_beta  = dparam("noise_beta", p_.noise_beta);
         p_.substeps    = iparam("substeps", p_.substeps);
         // --- 차량/타이어 (Pacejka는 gym 기본값 유지 — 실차 보정 전까지 노출 최소화) ---
         p_.wheelbase   = dparam("wheelbase", p_.wheelbase);
         p_.v_switch    = dparam("v_switch", p_.v_switch);
         // --- 비용 가중 ---
-        p_.w_pos       = dparam("w_pos", p_.w_pos);
+        p_.w_lat       = dparam("w_lat", p_.w_lat);
+        p_.w_lon       = dparam("w_lon", p_.w_lon);
         p_.w_yaw       = dparam("w_yaw", p_.w_yaw);
         p_.w_v         = dparam("w_v", p_.w_v);
         p_.w_boundary  = dparam("w_boundary", p_.w_boundary);
         p_.margin      = dparam("margin", p_.margin);
         p_.w_terminal  = dparam("w_terminal", p_.w_terminal);
+        p_.w_dsteer    = dparam("w_dsteer", p_.w_dsteer);
+        p_.w_daccel    = dparam("w_daccel", p_.w_daccel);
         // --- 한계 (v_max = 직선 최고속도 캡, control_map_node의 max_speed에 대응) ---
         p_.steer_max   = dparam("steer_max", p_.steer_max);
         p_.accel_max   = dparam("accel_max", p_.accel_max);
@@ -89,6 +105,17 @@ class ControlMppiNode : public rclcpp::Node {
         p_.v_max       = dparam("v_max", p_.v_max);
         // --- 출력 평활화 ---
         p_.u_smooth    = dparam("u_smooth", p_.u_smooth);
+        // 진단 계측(ESS·비용구성) on/off. 젯슨 실시간 예산이 빡빡하면 false — 제어는 동일.
+        p_.diag_enable = this->declare_parameter<bool>("diag_enable", true);
+
+        // 기준속도 곡률 클램프 [m/s²]. 0이면 비활성(플래너 프로파일 그대로).
+        // 플래너 프로파일은 **이상적 레이싱라인** 기준으로 생성된다. MPPI가 그 라인에서
+        // 0.2m만 벗어나도 유효 선회반경이 줄어 같은 속도에서 마찰한계를 넘고, 그대로
+        // 언더스티어로 벽에 간다(07-22 시뮬: 진입 3.4m/s·요레이트 3.05 ⇒ a_lat=10.4 ≈ μg=10.3).
+        // 기준속도 자체를 v ≤ √(a_lat_max/κ)로 눌러 두면 수평 안의 앞쪽 스테이지가 미리 낮은
+        // 목표속도를 주므로, 사전감속이 자연스럽게 나온다(control_map_node의 곡률 캡과 같은 원리).
+        // ⚠️ 모델 마찰한계(μ·g ≈ 10.3)보다 낮게 잡을 것 — 여유가 곧 안정성이다.
+        ref_max_lateral_accel_ = dparam("ref_max_lateral_accel", 8.0);
 
         // --- 비활성(Mux가 MAP 라우팅 중) 시 아이들 워밍업 주기 ---
         // Mux가 RB 상태를 /mppi_active로 알려주기 전까지는 비활성으로 가정(기본 MAP과 동일).
@@ -96,6 +123,10 @@ class ControlMppiNode : public rclcpp::Node {
         // warm-start(U_)만 유지하고 나머지는 완전히 스킵 — Jetson CPU/GPU 사이클 절약이 목적.
         // RB로 활성화되면 다음 사이클부터 즉시 매 틱 풀 연산으로 복귀(전환 지연 없음).
         idle_solve_decimation_ = iparam("idle_solve_decimation", 5);
+        // (조향, 종가속) → 속도명령 변환 지평 [s]. 위 control_loop 주석 참고.
+        speed_cmd_horizon_ = dparam("speed_cmd_horizon", static_cast<double>(p_.dt));
+        // 텔레메트리 주기(사이클). 기본 50 = 1초. 튜닝 중에는 5(0.1초)로 낮춰 채터링을 본다.
+        telemetry_decimation_ = std::max(1, static_cast<int>(iparam("telemetry_decimation", 50)));
 
         // 2. 구독 / 발행 / 타이머 (control_map_node와 동일 QoS)
         auto qos_gl = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
@@ -178,8 +209,12 @@ class ControlMppiNode : public rclcpp::Node {
             w.y = wp.y_m;
             w.yaw = wp.psi_rad;
             w.v = wp.vx_mps;
-            // 경계비용용 트랙 반폭 ≈ min(좌,우 벽까지 거리). 최소 0.2m 하한(0/음수 방어).
-            w.half_width = std::max(0.2, std::min(wp.d_left, wp.d_right));
+            // 경계비용용 좌/우 벽 거리를 **따로** 넘긴다(2026-07-22). min()으로 뭉치면
+            // 최적라인이 한쪽 벽에 붙는 구간에서 넓은 쪽 여유까지 같이 깎여, MPPI가
+            // ±(좁은쪽−margin) 튜브에 갇힌다. 최소 0.2m 하한(0/음수 방어).
+            w.d_left  = std::max(0.2, static_cast<double>(wp.d_left));
+            w.d_right = std::max(0.2, static_cast<double>(wp.d_right));
+            w.kappa   = std::abs(static_cast<double>(wp.kappa_radpm));
             waypoints_.push_back(w);
         }
         // 새 경로 수신 시 최근접 인덱스 전역 재초기화
@@ -233,10 +268,16 @@ class ControlMppiNode : public rclcpp::Node {
         last_cmd_ = u;
         have_last_cmd_ = true;
 
-        // MPPI는 (조향, 종가속) 출력 → VESC/시뮬용 speed는 다음스텝 속도로 적분
+        // MPPI는 (조향, 종가속)을 출력하는데 하위 인터페이스(gym/VESC)는 **속도** 명령을 받는다.
+        // 이전에는 `vx + a·dt`(dt=0.05)로 변환했는데, 이러면 a=9를 계획해도 명령이 실측속도
+        // +0.45 m/s에 불과하다. 하위 속도루프가 P제어(gym: accel = kp·(목표−현재), kp≈4.75)라
+        // 실제 전달되는 가속은 요청의 1/4로 깎이고, 차가 가속을 못 해 코너 전에 무너진다.
+        // → 변환 지평 speed_cmd_horizon을 파라미터로 뺀다. 하위 루프 게인의 역수(sim ≈ 1/4.75
+        //   ≈ 0.21s)로 두면 계획한 가속이 그대로 전달된다. 실차 VESC는 속도루프가 빨라 값이
+        //   다를 수 있으므로 환경별 튜닝 대상(기본값은 기존 동작 보존용 dt).
         const double accel = static_cast<double>(u.accel);
         const double steer = static_cast<double>(u.steer);
-        double speed_cmd = current_vx_ + accel * static_cast<double>(p_.dt);
+        double speed_cmd = current_vx_ + accel * speed_cmd_horizon_;
         speed_cmd = std::max(static_cast<double>(p_.v_min),
                              std::min(speed_cmd, static_cast<double>(p_.v_max)));
 
@@ -248,11 +289,16 @@ class ControlMppiNode : public rclcpp::Node {
         drive_msg.drive.acceleration = accel;
         drive_pub_->publish(drive_msg);
 
-        // 텔레메트리(1초에 한 번 정도) — solve 시간/상태
-        if ((++loop_count_ % 50) == 0) {
+        // 텔레메트리 — solve 시간/상태. CPU 솔버 빌드에서는 튜닝 진단값(ESS·비용 구성)까지
+        // 함께 찍는다(GPU 솔버에는 아직 진단 계측이 없어 조건부 컴파일).
+        if ((++loop_count_ % telemetry_decimation_) == 0) {
+            const auto& d = solver_->last_diag();
             RCLCPP_INFO(this->get_logger(),
-                        "MPPI solve=%.2fms | steer=%.3f speed=%.2f (vx=%.2f)",
-                        solver_->last_solve_ms(), steer, speed_cmd, current_vx_);
+                        "MPPI %.2fms | steer=%.3f v=%.2f(vx=%.2f) | ESS=%.1f/%d fin=%d lam=%.1f "
+                        "C[lat=%.1f lon=%.1f yaw=%.1f v=%.1f bnd=%.1f du=%.1f] maxlat=%.2f",
+                        solver_->last_solve_ms(), steer, speed_cmd, current_vx_,
+                        d.ess, p_.K, d.n_finite, d.lambda_eff,
+                        d.c_lat, d.c_lon, d.c_yaw, d.c_v, d.c_bnd, d.c_du, d.nominal_max_lat);
         }
     }
 
@@ -283,13 +329,32 @@ class ControlMppiNode : public rclcpp::Node {
         const double dt = static_cast<double>(p_.dt);
         const double v_floor = 1.0;  // 정지 시 수평 붕괴 방지용 속도 하한
 
+        // 수평 간격 = **현재 속도에서 시작해 도달가능 가속으로 프로파일 속도까지 램프**
+        // (2026-07-22 수정). 두 극단이 모두 실패하기 때문에 나온 중간값이다:
+        //   ① 프로파일 속도로 고정(구버전) → 차가 못 따라가면 기준점이 달아나고, 추종 비용이
+        //      "저 앞 점으로 최단거리로 가라" = 코너 가로지르기가 된다(헤어핀 탈출 벽충돌).
+        //   ② 현재 속도로 고정 → **가속 자체에 벌점**이 걸린다. 곡선에서 기준점보다 Δs 앞서면
+        //      그 lag가 횡오차로 둔갑하기 때문(원호에서 약 Δs²/2R). 실측으로 속도가 0.5m/s까지
+        //      붕괴했다.
+        // 램프는 "이 계획대로 가속하면 실제로 지나갈 자리"를 기준으로 삼아 둘 다 피한다.
+        const double a_ref = std::max(0.5, static_cast<double>(p_.accel_max));
+
         auto fill = [&](size_t stage, size_t widx) {
             SRef r;
             r.x = waypoints_[widx].x;
             r.y = waypoints_[widx].y;
             r.yaw = waypoints_[widx].yaw;
+            // 곡률 기반 기준속도 클램프 (위 ref_max_lateral_accel_ 주석 참고)
             r.v = waypoints_[widx].v;
-            r.half_width = waypoints_[widx].half_width;
+            if (ref_max_lateral_accel_ > 1e-3) {
+                const double k = waypoints_[widx].kappa;
+                if (k > 1e-4) {
+                    r.v = std::min(static_cast<double>(r.v),
+                                   std::sqrt(ref_max_lateral_accel_ / k));
+                }
+            }
+            r.d_left  = waypoints_[widx].d_left;
+            r.d_right = waypoints_[widx].d_right;
             ref[stage] = r;
         };
         fill(0, closest);
@@ -297,9 +362,16 @@ class ControlMppiNode : public rclcpp::Node {
         size_t cursor = closest;
         double accum = 0.0;     // 커서까지 누적 호 길이
         double target_s = 0.0;  // 다음 스테이지 목표 호 길이
+        double v_h = std::max(v_floor, current_vx_);   // 수평 속도(스테이지마다 램프)
         for (int t = 1; t <= p_.N; ++t) {
-            const double v_target = std::max(v_floor, static_cast<double>(waypoints_[cursor].v));
-            target_s += v_target * dt;
+            // 프로파일 속도를 상한으로, 도달가능 가속만큼만 올린다
+            double v_prof = static_cast<double>(waypoints_[cursor].v);
+            if (ref_max_lateral_accel_ > 1e-3 && waypoints_[cursor].kappa > 1e-4) {
+                v_prof = std::min(v_prof, std::sqrt(ref_max_lateral_accel_ / waypoints_[cursor].kappa));
+            }
+            v_prof = std::max(v_floor, v_prof);
+            v_h = std::min(v_prof, v_h + a_ref * dt);
+            target_s += v_h * dt;
             // 커서를 target_s 도달할 때까지 전진(폐루프 wrap, 한바퀴 방지)
             size_t steps = 0;
             while (accum < target_s && steps < n) {
@@ -326,7 +398,7 @@ class ControlMppiNode : public rclcpp::Node {
     // ------------------------------------------------------------------
     // 내부 자료구조 / 멤버
     // ------------------------------------------------------------------
-    struct MppiWaypoint { double x, y, yaw, v, half_width; };
+    struct MppiWaypoint { double x, y, yaw, v, d_left, d_right, kappa; };
 
     SParams p_;
     std::unique_ptr<Solver> solver_;
@@ -342,6 +414,9 @@ class ControlMppiNode : public rclcpp::Node {
     std::string odom_topic_;
     bool mppi_active_ = false;           // Mux(RB)가 알려주는 현재 활성 알고리즘 여부
     int idle_solve_decimation_ = 5;      // 비활성 시 이 사이클마다 한 번만 solve
+    int telemetry_decimation_ = 50;      // 텔레메트리 출력 주기(사이클)
+    double speed_cmd_horizon_ = 0.05;    // 가속→속도명령 변환 지평 [s]
+    double ref_max_lateral_accel_ = 8.0; // 기준속도 곡률 클램프 a_lat [m/s²] (0=비활성)
     unsigned long idle_skip_counter_ = 0;
 
     // 상태

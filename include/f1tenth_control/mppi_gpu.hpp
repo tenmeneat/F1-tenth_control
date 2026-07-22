@@ -31,6 +31,8 @@ class MPPIControllerGPU {
 
     double last_solve_ms() const;
     const MppiParamsF& params() const;
+    // 튜닝 진단값(ESS·비용 구성 등). params().diag_enable=false면 갱신되지 않는다.
+    const MppiDiagF& last_diag() const;
 
     // 전방 동역학 1스텝 노출 (폐루프 시뮬/단위검증에서 동일 모델 되먹임에 사용)
     MppiStateF propagate(const MppiStateF& s, const MppiControlF& u) const;

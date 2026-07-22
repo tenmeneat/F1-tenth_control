@@ -37,9 +37,17 @@ def generate_launch_description():
         description='코너 그립 클램프 a_lat [m/s^2] (⚠️ sim 낙관치, 실차 검증 전 CLAUDE.md 참고)'
     )
 
+    # 직선 최고속도 캡 [m/s]. 2026-07-22까지 이 파일에 12.0으로 하드코딩돼 있어
+    # `max_speed:=X`가 시뮬에서 조용히 무시됐다(real에는 인자로 있었음). MPPI 스윕에서
+    # 속도를 낮춰 원인분리를 하려다 발견 — 두 컨트롤러 모두에 같은 값이 가야 비교가 성립한다.
+    max_speed_arg = DeclareLaunchArgument(
+        'max_speed', default_value='12.0',
+        description='직선 최고속도 캡 [m/s] (control_map_node의 max_speed = control_mppi_node의 v_max)'
+    )
+
     steering_control = common.build_control_map_node(
         odom_topic='/ego_racecar/odom',
-        max_speed=12.0,
+        max_speed=LaunchConfiguration('max_speed'),
         max_lateral_accel=LaunchConfiguration('max_lateral_accel'),
         base_max_accel=LaunchConfiguration('base_max_accel'),
         # 시뮬 IMU는 sim_imu_bridge_node가 odom angular.z(이미 rad/s)를 중계 → 보정 불필요.
@@ -53,7 +61,7 @@ def generate_launch_description():
     # 실차 전 시뮬 검증용. 조이스틱 RB로 MAP↔MPPI 즉시 전환.
     mppi_control = common.build_control_mppi_node(
         odom_topic='/ego_racecar/odom',
-        max_speed=12.0,
+        max_speed=LaunchConfiguration('max_speed'),
     )
 
     # 시뮬 전용: odom 요레이트 → /imu/data 중계 (gym_bridge는 IMU를 발행하지 않음)
@@ -88,6 +96,7 @@ def generate_launch_description():
         device_id_arg,
         base_max_accel_arg,
         max_lateral_accel_arg,
+        max_speed_arg,
         sim_imu_bridge,
         steering_control,
         mppi_control,

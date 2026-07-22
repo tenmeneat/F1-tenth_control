@@ -44,7 +44,10 @@ struct MppiState {
 struct MppiRef {
     double x = 0.0, y = 0.0, yaw = 0.0;  // 기준 위치·헤딩
     double v = 0.0;                      // 목표 속도 (플래너 vx_mps)
-    double half_width = 1.0;             // 트랙 반폭 ≈ min(d_left,d_right) (경계비용용)
+    // 경계비용용 좌/우 벽까지 거리 — **비대칭**으로 따로 받는다(2026-07-22).
+    // 이전에는 half_width = min(d_left,d_right) 하나로 대칭 튜브를 만들었는데, 최적
+    // 레이싱라인은 정의상 한쪽 벽에 붙으므로 좁은 쪽 값이 넓은 쪽 여유까지 깎아버렸다.
+    double d_left = 1.0, d_right = 1.0;
 };
 
 // 제어 입력
@@ -59,9 +62,19 @@ struct MppiParams {
     int    N  = 25;      // 예측 수평(스텝)
     int    K  = 512;     // 롤아웃(샘플) 수
     double dt = 0.05;    // 스텝 [s] (50Hz)
-    double lambda = 1.0; // 역온도(temperature): 작을수록 저비용 롤아웃에 집중
+    double lambda = 1.0; // 고정 역온도(lambda_rel<=0일 때만 사용)
+    // 적응 역온도(2026-07-22): λ_eff = lambda_rel·(J_mean − J_min). >0이면 이쪽이 우선.
+    //   λ를 비용 스케일에 **불변**으로 만든다. 고정 λ는 w_*를 하나만 바꿔도 유효샘플수(ESS)가
+    //   1까지 무너지거나 K까지 뭉개져, 07-22 시뮬에서 λ 1↔60↔200이 전부 다른 실패를 냈다.
+    //   0.02면 대체로 ESS가 K의 10% 부근에 앉는다(07-22 원호 스윕: 0.5→ESS 338로 뭉개져
+    //   가속 자체가 안 나왔고, 0.02→ESS 52에서 속도·횡오차가 동시에 최선이었다).
+    double lambda_rel = 0.02;
     double sigma_steer = 0.15;  // 조향 노이즈 σ [rad]
     double sigma_accel = 1.5;   // 가속 노이즈 σ [m/s²]
+    // 잡음 시간상관 AR(1) 계수 [0,1): z_t = β·z_{t-1} + √(1−β²)·n_t (정상분포 N(0,1) 유지).
+    // 0이면 기존 백색잡음 — 스텝마다 독립이라 **고주파로 진동하는 제어열**이 샘플 풀을 채우고,
+    // 그런 해가 한 번 뽑히면 그대로 출력돼 조향 채터링이 된다. 0.6~0.8이 매끈한 기동을 만든다.
+    double noise_beta = 0.7;
     unsigned int seed = 0xC0FFEEu;
 
     // --- 차량/타이어 ---
@@ -73,11 +86,22 @@ struct MppiParams {
     double v_switch = 2.0;   // 이 속도[m/s] 미만은 기구학 블렌드(발산 방지)
     int    substeps = 2;     // 동역학 오일러 적분 서브스텝(수치 안정)
 
-    // --- 비용 가중 ---
-    double w_pos = 8.0, w_yaw = 2.0, w_v = 1.0;
+    // --- 비용 가중 (2026-07-22 컨투어링 재정식화) ---
+    // 이전엔 w_pos·|pos−ref|²(점추종)이었다. 이러면 차가 기준점보다 뒤처졌을 때 "앞의 점으로
+    // 최단거리로 가라" = 코너를 가로지르라는 명령이 되어 헤어핀 탈출에서 벽으로 몰았다.
+    // 오차를 경로 접선 기준으로 분해해, **횡(컨투어링)오차는 강하게** 잡고 **진행방향(lag)
+    // 오차는 약하게**만 잡는다(시간정합용). 진행 속도는 w_v가 따로 담당.
+    double w_lat = 150.0;        // 경로 횡오차 가중 — 주력. w_v와의 **비율**이 안정성을 정한다(07-22 실측: w_v/w_lat이
+    // 0.004 이하면 안정, 0.0067이면 헤어핀에서 마찰포화로 크래시)
+    double w_lon = 1.0;         // 경로 진행방향 오차 가중 — 작게
+    double w_yaw = 5.0, w_v = 0.5;
     double w_boundary = 500.0;  // 트랙 경계 이탈 소프트 페널티
     double margin = 0.15;       // 경계 여유[m] (차 반폭+마진)
     double w_terminal = 20.0;   // 종단(마지막 스텝) 위치·헤딩 가중 배수
+    // 제어 변화율(Δu) 비용 — 채터링 억제의 본체. t=0의 기준은 **직전에 실제로 출력한 제어**라,
+    // 사이클 간 불연속(부호 반전)에도 벌점이 걸린다. 잡음 시간상관(noise_beta)과 한 쌍.
+    double w_dsteer = 100.0;
+    double w_daccel = 0.5;
 
     // --- 한계 ---
     double steer_max = 0.41, accel_max = 4.0, accel_min = -8.0;
@@ -85,6 +109,23 @@ struct MppiParams {
 
     // --- 출력 평활화(LP-MPPI 근사): 0=off, 0<α<1이면 이전 출력과 저역통과 블렌드 ---
     double u_smooth = 0.3;
+
+    // 진단 계측 on/off. 켜면 롤아웃 1회+리덕션 몇 개가 추가된다(CPU는 K=512 대비 0.2%,
+    // GPU는 커널 런치 몇 개). 젯슨 실시간 예산이 빡빡하면 끌 것 — 제어 결과는 동일하다.
+    bool diag_enable = true;
+};
+
+// 솔버 진단값 (2026-07-22 추가) — 튜닝을 숫자로 하기 위한 계측. 제어 로직에는 쓰이지 않는다.
+struct MppiDiag {
+    double ess = 0.0;       // 유효 샘플수 (Σw)²/Σw². K의 10~40%가 건강한 범위
+    double lambda_eff = 0.0;// 이번 사이클에 실제 쓴 λ (적응 λ면 매 사이클 달라짐)
+    double j_min = 0.0;     // 최저 롤아웃 비용(=β)
+    double j_mean = 0.0;    // 평균 롤아웃 비용
+    double j_max = 0.0;     // 최고 롤아웃 비용
+    // 갱신된 U_(잡음 없는 명목 계획) 기준 항목별 비용 — 어느 항이 지배하는지 보는 용도
+    double c_lat = 0.0, c_lon = 0.0, c_yaw = 0.0, c_v = 0.0, c_bnd = 0.0, c_du = 0.0;
+    double nominal_max_lat = 0.0;  // 명목 계획의 최대 **횡**오차 [m] (점거리가 아니라 횡오차)
+    int    n_finite = 0;    // 비용이 유한한(=발산하지 않은) 롤아웃 수. K보다 훨씬 작으면 모델 적분이 터진 것
 };
 
 // ---------------------------------------------------------------------------
@@ -128,6 +169,7 @@ class MPPIController {
 
     double last_solve_ms() const { return last_solve_ms_; }
     const MppiParams& params() const { return p_; }
+    const MppiDiag& last_diag() const { return diag_; }
 
     // 전방 동역학 1스텝 노출(폐루프 시뮬/테스트에서 동일 모델 되먹임에 사용).
     MppiState propagate(const MppiState& s, const MppiControl& u) const {
@@ -142,16 +184,23 @@ class MPPIController {
         }
         const auto t0 = std::chrono::steady_clock::now();
 
-        std::normal_distribution<double> nd_steer(0.0, p_.sigma_steer);
-        std::normal_distribution<double> nd_accel(0.0, p_.sigma_accel);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        // AR(1) 시간상관 잡음 계수: z_t = beta·z_{t-1} + alpha·n_t, alpha=√(1−β²)면
+        // z는 정상 N(0,1)을 유지한다(σ가 β에 따라 변하지 않음 → σ 튜닝과 β 튜닝이 독립).
+        const double nb = clampd(p_.noise_beta, 0.0, 0.99);
+        const double na = std::sqrt(std::max(0.0, 1.0 - nb * nb));
 
         // (1) 잡음 샘플 + (2) 롤아웃·비용
         for (int k = 0; k < p_.K; ++k) {
             MppiState s = cur;
             double Jk = 0.0;
+            double zs = 0.0, za = 0.0;          // AR(1) 잡음 상태(조향/가속)
+            MppiControl prev = last_out_;        // Δu 기준: t=0은 직전에 실제로 출력한 제어
             for (int t = 0; t < p_.N; ++t) {
-                // 잡음 있는 제어 v = u_t + ε, 한계 클램프
-                MppiControl eps{nd_steer(rng_), nd_accel(rng_)};
+                // 시간상관 잡음 → 제어 v = u_t + ε, 한계 클램프
+                zs = nb * zs + na * nd(rng_);
+                za = nb * za + na * nd(rng_);
+                MppiControl eps{zs * p_.sigma_steer, za * p_.sigma_accel};
                 MppiControl v{
                     clampd(U_[t].steer + eps.steer, -p_.steer_max, p_.steer_max),
                     clampd(U_[t].accel + eps.accel,  p_.accel_min, p_.accel_max)};
@@ -159,6 +208,12 @@ class MPPIController {
                 eps.steer = v.steer - U_[t].steer;
                 eps.accel = v.accel - U_[t].accel;
                 eps_[k][t] = eps;
+
+                // 제어 변화율 비용(채터링 억제)
+                const double dsteer = v.steer - prev.steer;
+                const double daccel = v.accel - prev.accel;
+                Jk += p_.w_dsteer * dsteer * dsteer + p_.w_daccel * daccel * daccel;
+                prev = v;
 
                 s = step_dynamics(s, v);
                 Jk += stage_cost(s, ref[t + 1], /*terminal=*/false);
@@ -171,16 +226,32 @@ class MPPIController {
 
         // (3) 가중: β 감산 후 exp, 정규화
         double beta = std::numeric_limits<double>::infinity();
-        for (int k = 0; k < p_.K; ++k) beta = std::min(beta, costs_[k]);
+        double j_max = 0.0, j_sum = 0.0;
+        int j_finite = 0;
+        for (int k = 0; k < p_.K; ++k) {
+            beta = std::min(beta, costs_[k]);
+            if (std::isfinite(costs_[k])) { j_max = std::max(j_max, costs_[k]); j_sum += costs_[k]; ++j_finite; }
+        }
+        diag_.j_max = j_max;
+        diag_.j_mean = (j_finite > 0) ? j_sum / j_finite : 0.0;
+        diag_.n_finite = j_finite;  // 발산(inf)해서 버려진 롤아웃이 몇 개인지 — ESS 해석에 필수
         if (!std::isfinite(beta)) {
             // 전 샘플 발산 → 갱신 없이 안전 홀드(이전 출력 유지)
             finalize_time(t0);
             out = last_out_;
             return false;
         }
+        // 적응 역온도: 비용 스프레드에 비례시켜 λ를 비용 스케일에 불변으로 만든다.
+        // (lambda_rel<=0이면 고정 λ 사용 — 예전 거동 재현용)
+        const double spread = std::max(0.0, diag_.j_mean - beta);
+        const double lambda_eff = (p_.lambda_rel > 0.0)
+                                      ? std::max(1e-6, p_.lambda_rel * spread)
+                                      : std::max(1e-6, p_.lambda);
+        diag_.lambda_eff = lambda_eff;
+
         double eta = 0.0;
         for (int k = 0; k < p_.K; ++k) {
-            double w = std::exp(-(costs_[k] - beta) / p_.lambda);
+            double w = std::exp(-(costs_[k] - beta) / lambda_eff);
             costs_[k] = w;  // 이제 costs_는 정규화 전 가중치
             eta += w;
         }
@@ -190,6 +261,17 @@ class MPPIController {
             return false;
         }
         const double inv_eta = 1.0 / eta;
+
+        // (3-b) 진단 계측 (2026-07-22 추가) — 튜닝을 눈대중이 아니라 숫자로 하기 위한 것.
+        // ESS(유효 샘플수) = (Σw)²/Σw². λ가 비용 스프레드에 비해 너무 작으면 ESS→1이 되어
+        // "가장 운 좋은 난수 시퀀스 복사" = 랜덤서치가 되고, 조향이 매 사이클 튄다(채터링).
+        // 너무 크면 ESS→K로 전 샘플 평균 = 명령이 뭉개진다. 경험적 목표는 K의 5~20%.
+        {
+            double sum_w2 = 0.0;
+            for (int k = 0; k < p_.K; ++k) sum_w2 += costs_[k] * costs_[k];
+            diag_.ess = (sum_w2 > 0.0) ? (eta * eta / sum_w2) : 0.0;
+            diag_.j_min = beta;
+        }
 
         // (4) 갱신: u_t += Σ_k w_k ε_{t,k}
         for (int t = 0; t < p_.N; ++t) {
@@ -201,6 +283,31 @@ class MPPIController {
             }
             U_[t].steer = clampd(U_[t].steer + ds, -p_.steer_max, p_.steer_max);
             U_[t].accel = clampd(U_[t].accel + da,  p_.accel_min, p_.accel_max);
+        }
+
+        // (4-b) 진단: 갱신된 U_를 잡음 없이 굴려 비용 항목별 구성비를 본다(롤아웃 1회 추가,
+        //       K=512 대비 0.2%라 실시간 예산에 영향 없음). 어느 항이 비용을 지배하는지
+        //       모르면 w_* 튜닝이 추측이 된다.
+        if (p_.diag_enable) {
+            MppiState s = cur;
+            CostTerms ct;
+            double max_lat = 0.0;
+            MppiControl prev = last_out_;
+            for (int t = 0; t < p_.N; ++t) {
+                const double dsteer = U_[t].steer - prev.steer;
+                const double daccel = U_[t].accel - prev.accel;
+                ct.du += p_.w_dsteer * dsteer * dsteer + p_.w_daccel * daccel * daccel;
+                prev = U_[t];
+                s = step_dynamics(s, U_[t]);
+                accumulate_cost_terms(s, ref[t + 1], false, ct);
+                const double dx = s.x - ref[t + 1].x, dy = s.y - ref[t + 1].y;
+                max_lat = std::max(max_lat,
+                                   std::abs(-std::sin(ref[t + 1].yaw) * dx + std::cos(ref[t + 1].yaw) * dy));
+            }
+            accumulate_cost_terms(s, ref[p_.N], true, ct);
+            diag_.c_lat = ct.lat; diag_.c_lon = ct.lon; diag_.c_yaw = ct.yaw;
+            diag_.c_v = ct.v; diag_.c_bnd = ct.bnd; diag_.c_du = ct.du;
+            diag_.nominal_max_lat = max_lat;
         }
 
         // (5) 출력 = 첫 제어, 저역통과 평활화
@@ -291,25 +398,53 @@ class MPPIController {
         return s;
     }
 
-    // 스테이지 비용: 위치·헤딩·속도 추종 + 트랙 경계 소프트 페널티.
+    // 진단용 항목별 비용 누산기 (stage_cost와 **같은 수식**을 항목별로 쪼갠 것).
+    struct CostTerms { double lat = 0.0, lon = 0.0, yaw = 0.0, v = 0.0, bnd = 0.0, du = 0.0; };
+
+    void accumulate_cost_terms(const MppiState& s, const MppiRef& r, bool terminal,
+                               CostTerms& ct) const {
+        const double tw = terminal ? p_.w_terminal : 1.0;
+        const double dx = s.x - r.x, dy = s.y - r.y;
+        const double sy = std::sin(r.yaw), cy = std::cos(r.yaw);
+        const double e_lat = -sy * dx + cy * dy;
+        const double e_lon =  cy * dx + sy * dy;
+        ct.lat += tw * p_.w_lat * (e_lat * e_lat);
+        ct.lon += tw * p_.w_lon * (e_lon * e_lon);
+        const double eyaw = wrap_pi(s.yaw - r.yaw);
+        ct.yaw += tw * p_.w_yaw * (eyaw * eyaw);
+        const double ev = s.vx - r.v;
+        ct.v += p_.w_v * (ev * ev);
+        ct.bnd += boundary_cost(e_lat, r);
+    }
+
+    // 비대칭 트랙 경계 소프트 페널티. e_lat>0 = 경로 기준 **좌측**(법선 n=(-sin ψ, cos ψ)).
+    double boundary_cost(double e_lat, const MppiRef& r) const {
+        const double lim_l = std::max(0.0, r.d_left  - p_.margin);
+        const double lim_r = std::max(0.0, r.d_right - p_.margin);
+        const double over = (e_lat > lim_l) ? (e_lat - lim_l)
+                          : ((-e_lat > lim_r) ? (-e_lat - lim_r) : 0.0);
+        return (over > 0.0) ? p_.w_boundary * over * over : 0.0;
+    }
+
+    // 스테이지 비용: 컨투어링(횡/종 분해) 추종 + 헤딩 + 속도 + 비대칭 경계 페널티.
     double stage_cost(const MppiState& s, const MppiRef& r, bool terminal) const {
         const double tw = terminal ? p_.w_terminal : 1.0;
         const double dx = s.x - r.x;
         const double dy = s.y - r.y;
 
+        // 경로 접선 기준 분해: 법선 n=(-sin ψ, cos ψ), 접선 t=(cos ψ, sin ψ)
+        const double sy = std::sin(r.yaw), cy = std::cos(r.yaw);
+        const double e_lat = -sy * dx + cy * dy;   // 횡(컨투어링) 오차
+        const double e_lon =  cy * dx + sy * dy;   // 진행방향(lag) 오차
+
         double c = 0.0;
-        c += tw * p_.w_pos * (dx * dx + dy * dy);              // 위치
+        c += tw * p_.w_lat * (e_lat * e_lat);                  // 횡오차 — 주력
+        c += tw * p_.w_lon * (e_lon * e_lon);                  // 진행방향 — 약하게
         const double eyaw = wrap_pi(s.yaw - r.yaw);
         c += tw * p_.w_yaw * (eyaw * eyaw);                    // 헤딩
         const double ev = s.vx - r.v;
         c += p_.w_v * (ev * ev);                               // 속도 추종
-
-        // 경계(충돌) 소프트 페널티: 기준점 법선방향 횡편차가 (반폭−마진)을 넘으면 강한 벌점.
-        // 법선 n=(-sin ryaw, cos ryaw), e_lat = n·(pos−ref)
-        const double e_lat = -std::sin(r.yaw) * dx + std::cos(r.yaw) * dy;
-        const double limit = std::max(0.0, r.half_width - p_.margin);
-        const double over  = std::abs(e_lat) - limit;
-        if (over > 0.0) c += p_.w_boundary * (over * over);
+        c += boundary_cost(e_lat, r);                          // 트랙 경계
 
         return c;
     }
@@ -321,6 +456,7 @@ class MPPIController {
     MppiControl last_out_{};
     std::mt19937 rng_;
     double last_solve_ms_ = 0.0;
+    MppiDiag diag_;
 };
 
 }  // namespace f1tenth_control
@@ -333,11 +469,34 @@ class MPPIController {
 // ============================================================================
 #ifdef MPPI_SMOKE_TEST
 #include <cstdio>
+#include <cstdlib>
 
 int main() {
     using namespace f1tenth_control;
 
-    MppiParams p;                 // 기본값 사용
+    MppiParams p;                 // 기본값 (환경변수로 개별 오버라이드 가능 — 아래 참고)
+
+    // 파라미터 스윕용 환경변수 오버라이드. gym/ROS를 띄우지 않고 비용 정식화·가중치를
+    // 초 단위로 반복 시험하기 위한 것(시뮬 폐루프 1회가 2분, 여기는 1초).
+    //   예) W_LAT=80 W_DSTEER=20 LAMBDA_REL=0.3 /tmp/mppi_smoke
+    auto envd = [](const char* k, double d) { const char* v = std::getenv(k); return v ? std::atof(v) : d; };
+    p.lambda_rel  = envd("LAMBDA_REL",  p.lambda_rel);
+    p.lambda      = envd("LAMBDA",      p.lambda);
+    p.noise_beta  = envd("NOISE_BETA",  p.noise_beta);
+    p.sigma_steer = envd("SIGMA_STEER", p.sigma_steer);
+    p.sigma_accel = envd("SIGMA_ACCEL", p.sigma_accel);
+    p.w_lat       = envd("W_LAT",       p.w_lat);
+    p.w_lon       = envd("W_LON",       p.w_lon);
+    p.w_yaw       = envd("W_YAW",       p.w_yaw);
+    p.w_v         = envd("W_V",         p.w_v);
+    p.w_dsteer    = envd("W_DSTEER",    p.w_dsteer);
+    p.w_daccel    = envd("W_DACCEL",    p.w_daccel);
+    p.w_terminal  = envd("W_TERMINAL",  p.w_terminal);
+    p.u_smooth    = envd("U_SMOOTH",    p.u_smooth);
+    p.accel_max   = envd("ACCEL_MAX",   p.accel_max);
+    p.N           = static_cast<int>(envd("N", p.N));
+    p.K           = static_cast<int>(envd("K", p.K));
+
     MPPIController mppi(p);
 
     // 합성 기준경로: 반지름 R 원호(반시계). 목표속도 일정.
@@ -346,19 +505,25 @@ int main() {
     const double track_halfwidth = 1.2;
 
     // 현재 진행각 θ0에서 시작해 호 길이 v_ref·dt 간격으로 N+1개 기준점 생성
-    auto build_ref = [&](double theta0) {
+    // ⚠️ 수평 간격은 **차량 현재 속도**로 잡는다 — control_mppi_node의 build_reference와
+    //    동일한 규약(2026-07-22). 프로파일 속도로 잡으면 차가 못 따라갈 때 기준점이 달아나
+    //    lag 오차가 쌓이고, 이 하네스가 노드와 다른 것을 시험하게 된다.
+    auto build_ref = [&](double theta0, double vx0) {
         std::vector<MppiRef> ref;
         ref.reserve(p.N + 1);
-        const double dtheta = (v_ref * p.dt) / R;  // 스텝당 각 증가
+        double vh = std::max(1.0, vx0), th = theta0;
         for (int t = 0; t <= p.N; ++t) {
-            const double th = theta0 + dtheta * t;
             MppiRef r;
             r.x = R * std::cos(th);
             r.y = R * std::sin(th);
             r.yaw = wrap_pi(th + M_PI / 2.0);  // 반시계 접선방향
             r.v = v_ref;
-            r.half_width = track_halfwidth;
+            r.d_left = track_halfwidth;
+            r.d_right = track_halfwidth;
             ref.push_back(r);
+            // 다음 스테이지: 도달가능 가속으로 프로파일 속도까지 램프시킨 간격
+            vh = std::min(v_ref, vh + p.accel_max * p.dt);
+            th += (vh * p.dt) / R;
         }
         return ref;
     };
@@ -375,9 +540,11 @@ int main() {
     double max_lat = 0.0, worst_ms = 0.0;
     double lat_first = 0.0, lat_last = 0.0;
     bool control_ok = true, finite_ok = true;
+    int flips = 0;               // 조향 부호전환 횟수 — 채터링 정량 지표
+    double prev_steer = 0.0;
 
     for (int i = 0; i < STEPS; ++i) {
-        auto ref = build_ref(theta_of(s));
+        auto ref = build_ref(theta_of(s), s.vx);
         MppiControl u;
         bool ok = mppi.solve(s, ref, u);
         (void)ok;
@@ -385,6 +552,10 @@ int main() {
         if (!(std::isfinite(u.steer) && std::isfinite(u.accel))) finite_ok = false;
         if (std::abs(u.steer) > p.steer_max + 1e-6 ||
             u.accel > p.accel_max + 1e-6 || u.accel < p.accel_min - 1e-6) control_ok = false;
+
+        if (i > 0 && u.steer * prev_steer < 0.0 &&
+            std::abs(u.steer - prev_steer) > 0.02) ++flips;
+        prev_steer = u.steer;
 
         // 컨트롤러와 동일한 동역학으로 되먹임(폐루프)
         s = mppi.propagate(s, u);
@@ -394,6 +565,9 @@ int main() {
         worst_ms = std::max(worst_ms, mppi.last_solve_ms());
         if (i == 0) lat_first = lat;
         lat_last = lat;
+        if (std::getenv("TRACE") && (i % 25) == 0)
+            std::printf("  t=%4.1fs vx=%5.2f lat=%5.3f steer=%6.3f accel=%6.2f\n",
+                        i * p.dt, s.vx, lat, u.steer, u.accel);
     }
 
     std::printf("== MPPI smoke test ==\n");
@@ -402,6 +576,13 @@ int main() {
     std::printf("worst solve  : %.2f ms  (budget 20.0 ms @50Hz)\n", worst_ms);
     std::printf("controls in-limit: %s | finite: %s\n",
                 control_ok ? "OK" : "FAIL", finite_ok ? "OK" : "FAIL");
+    {   // 마지막 사이클의 솔버 진단 — 가중치가 어디로 쏠렸는지 숫자로 본다
+        const MppiDiag& d = mppi.last_diag();
+        std::printf("diag: ESS=%.1f/%d fin=%d lam_eff=%.2f | C[lat=%.1f lon=%.1f yaw=%.1f v=%.1f bnd=%.1f du=%.1f] max_lat=%.2f\n",
+                    d.ess, p.K, d.n_finite, d.lambda_eff,
+                    d.c_lat, d.c_lon, d.c_yaw, d.c_v, d.c_bnd, d.c_du, d.nominal_max_lat);
+        std::printf("steer 부호전환/100스텝: %.1f (채터링 지표)\n", flips * 100.0 / STEPS);
+    }
 
     const bool converged = (lat_last < lat_first) && (lat_last < 0.5);
     const bool rt_ok = worst_ms < 20.0;
