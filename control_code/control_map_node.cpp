@@ -19,6 +19,7 @@
 #include "f1tenth_control/imu_stability_controller.hpp"
 #include "f1tenth_control/steering_lookup_table.hpp"
 #include "f110_msgs/msg/wpnt_array.hpp"
+#include "f110_msgs/msg/obstacle_array.hpp"
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
 
@@ -295,6 +296,28 @@ public:
         obstacle_trigger_dist_ = this->declare_parameter<double>("obstacle_trigger_dist", 1.5);
         obstacle_margin_ = this->declare_parameter<double>("obstacle_margin", 0.3);
         obstacle_avoid_hold_cycles_ = this->declare_parameter<int>("obstacle_avoid_hold_cycles", 15);
+
+        // 장애물 종방향 감속 (2026-07-23) — opponent_detector의 raw 클러스터(추적 확정 전, 벽
+        // 필터 끝난 Frenet 장애물)를 받아, 내 통로 전방에 물체가 있으면 그 앞에서 멈출 수 있는
+        // 속도로 target_speed를 캡한다. 첫 바퀴 직선 강가속 중 장애물을 늦게 인지해 회피경로를
+        // 못 따라가고 박던 문제 대응 — 감속으로 회피 기동을 실행 가능한 속도까지 낮춰준다.
+        // ⚠️ 이건 "비상정지"가 아니라 종방향 soft 감속이다(조향 미개입). 최종 e-stop은 여전히
+        //    planning 파트 소관.
+        obstacle_brake_enable_ = this->declare_parameter<bool>("obstacle_brake_enable", true);
+        obstacle_raw_topic_ = this->declare_parameter<std::string>(
+            "obstacle_raw_topic", "/perception/detection/raw_obstacles");
+        // v_cap 산출용 감속도. base_max_decel(8.0)보다 낮게 잡아 사전감속 커브를 보수적으로 —
+        // 실제 감속은 램프의 max_decel이 담당하므로 이 값이 낮으면 더 일찍/완만히 제동한다.
+        obstacle_brake_decel_ = this->declare_parameter<double>("obstacle_brake_decel", 6.0);
+        obstacle_stop_gap_ = this->declare_parameter<double>("obstacle_stop_gap", 1.0);       // 장애물 앞 정지 여유[m]
+        obstacle_corridor_halfwidth_ = this->declare_parameter<double>("obstacle_corridor_halfwidth", 0.35); // 통로 반폭(차폭/2+여유)[m]
+        obstacle_max_range_ = this->declare_parameter<double>("obstacle_max_range", 9.0);      // 이 전방거리[m] 밖 장애물 무시
+        obstacle_brake_hold_cycles_ = this->declare_parameter<int>("obstacle_brake_hold_cycles", 10); // 소실 후 캡 유지(채터링 방지)
+        obstacle_brake_timeout_ = this->declare_parameter<double>("obstacle_brake_timeout", 0.3); // raw 토픽 신선도[s]
+        // 로컬 회피경로 추종 중엔 캡을 0(완전정지)이 아니라 이 하한에서 바닥 처리 — planner가 커밋한
+        // 회피 라인을 신뢰해 정지 대신 관통. 글로벌 대기(회피경로 없음)에선 하한 없이 정지까지 허용.
+        obstacle_avoid_min_speed_ = this->declare_parameter<double>("obstacle_avoid_min_speed", 1.5);
+
         auto qos_local = rclcpp::QoS(rclcpp::KeepLast(1)).reliable(); // 로컬 퍼블리셔에 맞춰 volatile
         local_path_sub_ = this->create_subscription<f110_msgs::msg::WpntArray>(
             "/local_waypoints", qos_local,
@@ -317,6 +340,15 @@ public:
         scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
             "/scan", 10,
             std::bind(&ControlMapNode::scan_callback, this, std::placeholders::_1));
+
+        if (obstacle_brake_enable_) {
+            obstacle_sub_ = this->create_subscription<f110_msgs::msg::ObstacleArray>(
+                obstacle_raw_topic_, 10,
+                std::bind(&ControlMapNode::obstacle_callback, this, std::placeholders::_1));
+            RCLCPP_INFO(this->get_logger(),
+                        "장애물 감속 활성 — raw 장애물 토픽(%s) 구독", obstacle_raw_topic_.c_str());
+        }
+        obstacle_last_recv_time_ = this->now(); // 노드 클럭 타입으로 초기화(clock mismatch 방지)
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             "/drive_autonomous", 10);
@@ -376,6 +408,104 @@ private:
         latest_scan_ = msg;
     }
 
+    // opponent_detector의 raw 장애물(추적 확정 전, 벽 제거+Frenet 투영 완료)을 그대로 보관.
+    void obstacle_callback(const f110_msgs::msg::ObstacleArray::ConstSharedPtr msg) {
+        latest_obstacles_ = msg;
+        obstacle_last_recv_time_ = this->now();
+    }
+
+    // 에고를 글로벌 raceline에 투영해 Frenet (s, d)를 얻는다. 장애물이 글로벌 raceline 프레임의
+    // (s,d)라 감속 판정도 반드시 같은 프레임에서 해야 한다 — 로컬 회피경로를 추종 중이어도
+    // 에고 기준은 글로벌로 고정한다. 직전 인덱스 주변 윈도우 스캔(+이탈 시 전역 재탐색).
+    // 반환 true = 유효 투영. ego_s/ego_d에 결과 기록.
+    bool project_ego_to_global(double& ego_s, double& ego_d) {
+        const size_t n = waypoints_.size();
+        if (n == 0) return false;
+        if (last_global_proj_idx_ >= n) last_global_proj_idx_ = 0;
+
+        const double spacing = std::max(0.01, avg_waypoint_spacing_);
+        int win = std::max(8, static_cast<int>(std::ceil(3.0 / spacing)));
+        win = std::min(win, static_cast<int>(n / 2));
+
+        double min_dist = std::numeric_limits<double>::max();
+        size_t g = last_global_proj_idx_;
+        for (int i = -win; i <= win; ++i) {
+            size_t idx = (last_global_proj_idx_ + i + n) % n;
+            double dist = std::hypot(waypoints_[idx].x - current_x_, waypoints_[idx].y - current_y_);
+            if (dist < min_dist) { min_dist = dist; g = idx; }
+        }
+        if (min_dist > 2.5) {
+            std::tie(min_dist, g) = scan_closest(waypoints_, current_x_, current_y_);
+        }
+        last_global_proj_idx_ = g;
+
+        ego_s = waypoints_[g].s;
+        // 부호 있는 횡거리 d: 진행방향 좌측 법선(-sin ψ, cos ψ)에 (에고−wp)를 투영.
+        const double nx = -std::sin(waypoints_[g].yaw);
+        const double ny =  std::cos(waypoints_[g].yaw);
+        ego_d = (current_x_ - waypoints_[g].x) * nx + (current_y_ - waypoints_[g].y) * ny;
+        return true;
+    }
+
+    // 통로 전방 장애물에 대한 속도 상한을 계산한다. 반환값은 target_speed에 min으로 씌울 캡
+    // (장애물 없음/신선도 만료/비활성이면 +inf). latch-on 즉시 / release는 hold로 느리게(채터링 방지).
+    // following_local=true(로컬 회피경로 추종 중)면 캡을 obstacle_avoid_min_speed에서 바닥 처리해
+    // 정지 대신 회피 관통(planner 라인 신뢰). 글로벌 대기 중이면 하한 없이 정지까지 허용.
+    double compute_obstacle_speed_limit(bool following_local) {
+        const double kInf = std::numeric_limits<double>::max();
+        if (!obstacle_brake_enable_) return kInf;
+
+        // 신선도: raw 토픽이 끊기면 마지막 홀드만 소진하고 해제.
+        bool fresh = latest_obstacles_ &&
+                     (this->now() - obstacle_last_recv_time_).seconds() < obstacle_brake_timeout_;
+
+        double cap = kInf;
+        if (fresh && track_length_s_ > 1e-3) {
+            double ego_s = 0.0, ego_d = 0.0;
+            if (project_ego_to_global(ego_s, ego_d)) {
+                const double half_len = 0.5 * track_length_s_;
+                const double lane_lo = ego_d - obstacle_corridor_halfwidth_;
+                const double lane_hi = ego_d + obstacle_corridor_halfwidth_;
+                for (const auto& ob : latest_obstacles_->obstacles) {
+                    if (!ob.is_visible) continue;
+                    // 횡방향 통로 겹침: 장애물 [d_right, d_left] 구간이 내 통로 밴드와 겹치나.
+                    double od_lo = std::min(ob.d_right, ob.d_left);
+                    double od_hi = std::max(ob.d_right, ob.d_left);
+                    if (od_hi < lane_lo || od_lo > lane_hi) continue;
+                    // 전방거리(s-wrap): 장애물 근단(s_start)까지.
+                    double ds = ob.s_start - ego_s;
+                    while (ds > half_len)  ds -= track_length_s_;
+                    while (ds < -half_len) ds += track_length_s_;
+                    if (ds <= 0.0 || ds > obstacle_max_range_) continue; // 뒤/너무 먼 것 제외
+                    // 이 앞에서 stop_gap 두고 멈출 수 있는 속도. ds<=gap이면 0(정지).
+                    double free = ds - obstacle_stop_gap_;
+                    double v_cap = (free <= 0.0) ? 0.0
+                                                 : std::sqrt(2.0 * obstacle_brake_decel_ * free);
+                    if (v_cap < cap) cap = v_cap;
+                }
+            }
+        }
+
+        // latch-on 즉시 / release 느리게: 이번 사이클에 유효 캡이 잡히면 홀드 재충전,
+        // 아니면 홀드가 남아있는 동안 직전 캡을 유지한다.
+        if (cap < kInf) {
+            obstacle_held_cap_ = cap;
+            obstacle_brake_hold_counter_ = obstacle_brake_hold_cycles_;
+        } else if (obstacle_brake_hold_counter_ > 0) {
+            obstacle_brake_hold_counter_--;
+            cap = obstacle_held_cap_;
+        }
+
+        // 회피 관통 속도 하한: 로컬 회피경로를 따라가는 중이면 캡을 완전정지(0)까지 내리지 않고
+        // obstacle_avoid_min_speed에서 바닥 처리한다. 차가 옆으로 스윙아웃하는 동안 서버리지 않고
+        // 최소 회피속도로 관통 → 부드러운 회피. 실제 벽처럼 정말 막혔으면 planner가 라인을
+        // 안 주거나 상류 e-stop이 판단한다. (장애물 없음(cap=inf)엔 영향 없음)
+        if (following_local && cap < kInf) {
+            cap = std::max(cap, obstacle_avoid_min_speed_);
+        }
+        return cap;
+    }
+
     void global_path_callback(const f110_msgs::msg::WpntArray::ConstSharedPtr msg) {
         if (msg->wpnts.empty()) {
             RCLCPP_WARN(this->get_logger(), "Received empty global waypoints.");
@@ -397,6 +527,7 @@ private:
             interp_wp.speed = wp.vx_mps;
             interp_wp.curvature = wp.kappa_radpm;
             interp_wp.yaw = wp.psi_rad;
+            interp_wp.s = wp.s_m; // Frenet 호길이(장애물 감속의 에고 s 기준)
 
             // 안전라인 시프트: 벽에 너무 붙은 점을 트랙 중심 쪽으로 이동시켜 최소 클리어런스 C 확보.
             // d_left/d_right = 경로점에서 좌/우 트랙 경계까지의 거리. normal_left=(-sin psi, cos psi)는
@@ -458,6 +589,10 @@ private:
         avg_waypoint_spacing_ = waypoints_.empty() ? 0.36
                                                     : std::max(0.01, total_path_length / waypoints_.size());
 
+        // 장애물(s,d) 감속의 s-wrap 기준 트랙 총길이. s_m은 호길이라 Euclidean 총둘레와
+        // 사실상 동일 — 이미 계산한 값을 재사용한다(닫힌 루프 전제).
+        track_length_s_ = total_path_length;
+
         // 곡률 창 평활 (근거·주의사항은 smooth_curvature 정의부 주석 참고). 글로벌은 닫힌 루프.
         smooth_curvature(waypoints_, /*closed=*/true);
 
@@ -487,6 +622,7 @@ private:
             w.curvature = wp.kappa_radpm;
             w.smoothed_curvature = wp.kappa_radpm; // 아래 smooth_curvature가 덮어씀(임시값)
             w.yaw = wp.psi_rad;
+            w.s = wp.s_m; // Frenet 호길이(로컬도 글로벌 raceline s로 발행됨)
             local_waypoints_.push_back(w);
         }
 
@@ -923,6 +1059,14 @@ private:
             target_speed = std::max(min_speed_, target_speed * (1.0 - (roll_ratio - 0.8)));
         }
 
+        // 8-a. 장애물 종방향 감속 캡. 모든 스케일링 뒤 최종 상한으로 적용 — min_speed 하한을
+        // 무시하고 0(정지)까지 눌러야 하므로 여기(램프 직전)가 마지막 게이트다. 실제 감속률은
+        // 아래 램프의 max_decel이 제한하므로 급브레이크는 나지 않는다.
+        double obstacle_speed_limit = compute_obstacle_speed_limit(following_local);
+        if (obstacle_speed_limit < target_speed) {
+            target_speed = obstacle_speed_limit;
+        }
+
         double speed_error = target_speed - current_speed_;
         double final_speed = last_target_speed_;
 
@@ -1094,6 +1238,23 @@ private:
     int obstacle_avoid_hold_cycles_ = 15;      // 회피 유지 사이클(50Hz→0.3s), 채터링 방지
     int avoid_hold_counter_ = 0;
 
+    // 장애물 종방향 감속 (opponent_detector raw 장애물 → target_speed 캡)
+    bool obstacle_brake_enable_ = true;
+    std::string obstacle_raw_topic_ = "/perception/detection/raw_obstacles";
+    double obstacle_brake_decel_ = 6.0;        // v_cap 산출용 감속도 [m/s²]
+    double obstacle_stop_gap_ = 1.0;           // 장애물 앞 정지 여유 [m]
+    double obstacle_corridor_halfwidth_ = 0.35;// 통로 반폭(차폭/2+여유) [m]
+    double obstacle_max_range_ = 9.0;          // 이 전방거리[m] 밖 장애물 무시
+    int obstacle_brake_hold_cycles_ = 10;      // 소실 후 캡 유지 사이클(채터링 방지)
+    double obstacle_brake_timeout_ = 0.3;      // raw 토픽 신선도 [s]
+    double obstacle_avoid_min_speed_ = 1.5;    // 로컬 회피경로 추종 중 캡 하한(정지 대신 관통) [m/s]
+    int obstacle_brake_hold_counter_ = 0;
+    double obstacle_held_cap_ = std::numeric_limits<double>::max();
+    double track_length_s_ = 0.0;              // s-wrap 기준 트랙 총길이 [m]
+    size_t last_global_proj_idx_ = 0;          // 에고 글로벌 투영 인덱스 추적기
+    f110_msgs::msg::ObstacleArray::ConstSharedPtr latest_obstacles_ = nullptr;
+    rclcpp::Time obstacle_last_recv_time_;
+
     std::unique_ptr<GapFollower> gap_follower_;
     std::unique_ptr<StabilityController> stability_controller_;
 
@@ -1101,6 +1262,7 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+    rclcpp::Subscription<f110_msgs::msg::ObstacleArray>::SharedPtr obstacle_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr global_path_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr local_path_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;

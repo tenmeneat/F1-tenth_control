@@ -138,6 +138,46 @@ def declare_common_args():
             description='회피 폴백 유지 사이클 수(50Hz 기준, 채터링 방지)'
         ),
 
+        # ── 장애물 종방향 감속 (opponent_detector raw 장애물 → 속도 캡) ──
+        DeclareLaunchArgument(
+            'obstacle_brake_enable', default_value='true',
+            description='통로 전방 장애물(opponent_detector raw)에 대해 정지 가능 속도로 감속. '
+                        '조향 미개입 종방향 soft 감속 — 최종 e-stop은 planning 소관. false로 비활성.'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_raw_topic', default_value='/perception/detection/raw_obstacles',
+            description='raw 장애물(추적 확정 전, 벽 제거+Frenet) 토픽 (f110_msgs/ObstacleArray)'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_brake_decel', default_value='6.0',
+            description='감속 캡 v=√(2·a·d) 산출용 감속도 [m/s²]. base_max_decel보다 낮게 잡아 보수적으로.'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_stop_gap', default_value='1.0',
+            description='장애물 앞 정지 여유 거리 [m]'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_corridor_halfwidth', default_value='0.35',
+            description='통로 반폭(차폭/2+여유) [m] — 장애물이 이 밴드와 겹칠 때만 감속'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_max_range', default_value='9.0',
+            description='이 전방거리[m] 밖 장애물은 무시(라이다 유효거리)'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_brake_hold_cycles', default_value='10',
+            description='장애물 소실 후 캡 유지 사이클 수(50Hz, 채터링 방지)'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_brake_timeout', default_value='0.3',
+            description='raw 장애물 토픽 신선도 타임아웃 [s]'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_avoid_min_speed', default_value='1.5',
+            description='로컬 회피경로 추종 중 감속캡 하한 [m/s] — 정지 대신 최소속도로 회피 관통. '
+                        '글로벌 대기(회피경로 없음) 중엔 미적용(정지까지 허용)'
+        ),
+
         # ── L1 Guidance 룩어헤드 거리 ──
         # 공식: L1 = clamp(l1_gain + v*l1_distance, max(t_clip_min, sqrt2*lat_err), t_clip_max)
         DeclareLaunchArgument(
@@ -369,6 +409,16 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'obstacle_margin': LaunchConfiguration('obstacle_margin'),
             'obstacle_avoid_hold_cycles': ParameterValue(
                 LaunchConfiguration('obstacle_avoid_hold_cycles'), value_type=int),
+            'obstacle_brake_enable': LaunchConfiguration('obstacle_brake_enable'),
+            'obstacle_raw_topic': LaunchConfiguration('obstacle_raw_topic'),
+            'obstacle_brake_decel': LaunchConfiguration('obstacle_brake_decel'),
+            'obstacle_stop_gap': LaunchConfiguration('obstacle_stop_gap'),
+            'obstacle_corridor_halfwidth': LaunchConfiguration('obstacle_corridor_halfwidth'),
+            'obstacle_max_range': LaunchConfiguration('obstacle_max_range'),
+            'obstacle_brake_hold_cycles': ParameterValue(
+                LaunchConfiguration('obstacle_brake_hold_cycles'), value_type=int),
+            'obstacle_brake_timeout': LaunchConfiguration('obstacle_brake_timeout'),
+            'obstacle_avoid_min_speed': LaunchConfiguration('obstacle_avoid_min_speed'),
         }]
     )
 
