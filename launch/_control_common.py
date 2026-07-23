@@ -206,6 +206,13 @@ def declare_common_args():
             'base_max_decel', default_value='8.0',
             description='종방향 최대 감속도 한계 [m/s^2] (곡률 사전감속 제동거리 계산에 사용, 실측 전 추정값)'
         ),
+        # ── 최저 순항 속도 하한 ──
+        # 곡률 사전감속·헤어핀에서 목표속도가 이 값 밑으로 안 내려가게 하는 하한(sim/real 공용).
+        # ⚠️ 장애물 정지 경로는 이 하한을 무시하고 0까지 내려간다(안전 우선) — 순수 순항 프로파일에만 적용.
+        DeclareLaunchArgument(
+            'min_speed', default_value='2.5',
+            description='최저 순항 속도 [m/s] (곡률 감속 하한). 장애물 정지엔 미적용(0까지 허용)'
+        ),
 
         # ── 기동 실패(VESC 센서리스 탈조) 가드 ──
         # 2026-07-22 실차: 출발 시 4초간 덜그럭거리다 출발하는 증상. 그동안 컨트롤러의 속도
@@ -373,7 +380,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             't_clip_max': LaunchConfiguration('t_clip_max'),
             'lateral_error_coeff': 1.0,
             'max_speed': max_speed,
-            'min_speed': 2.5,
+            'min_speed': LaunchConfiguration('min_speed'),
             'max_lateral_accel': max_lateral_accel,
             'curvature_lookahead_count': 20,
             'base_max_accel': base_max_accel,

@@ -13,6 +13,8 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "ackermann_msgs/msg/ackermann_drive_stamped.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
+#include "geometry_msgs/msg/point.hpp"
 
 #include "f1tenth_control/types.hpp"
 #include "f1tenth_control/gap_follower.hpp"
@@ -353,6 +355,10 @@ public:
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             "/drive_autonomous", 10);
 
+        // L1 look-ahead 목표점 디버그 시각화 (RViz MarkerArray) — 제어 경로와 무관한 표시 전용
+        l1_marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/debug/l1_lookahead", 10);
+
         // 실시간 50Hz (20ms) 주기 타이머 가동
         control_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(20),
@@ -364,6 +370,8 @@ public:
 
 private:
     void odom_callback(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
+        // 웨이포인트와 pose가 같은 프레임(보통 map)에서 직접 뺄셈되므로, L1 마커도 이 프레임에 그린다.
+        if (!msg->header.frame_id.empty()) odom_frame_ = msg->header.frame_id;
         current_x_ = msg->pose.pose.position.x;
         current_y_ = msg->pose.pose.position.y;
 
@@ -902,6 +910,9 @@ private:
         double L1_x = wps[idx_a].x;
         double L1_y = wps[idx_a].y;
 
+        // 디버그: L1 look-ahead 목표점을 RViz에 시각화 (표시 전용, 제어에 영향 없음)
+        publish_l1_marker(L1_x, L1_y);
+
         // 3. sin(eta) 직접 계산 (차량 헤딩과 L1 point 간의 횡방향 sin 오차)
         // asin() 후 sin() 호출은 항등식: sin(asin(x)) == x — 중간 삼각함수 2회를 제거
         double L1_vector_x = L1_x - current_x_;
@@ -1122,6 +1133,51 @@ private:
         drive_pub_->publish(drive_msg);
     }
 
+    // 8.4 디버그: L1 look-ahead 목표점 시각화
+    // - 초록 구: 현재 겨냥 중인 L1 목표점
+    // - 노란 선: 차량 위치 → L1 목표점 (룩어헤드 벡터)
+    // 웨이포인트/pose와 동일 프레임(odom_frame_, 보통 map)에 그린다. 제어 경로와 완전 분리된 표시 전용.
+    void publish_l1_marker(double L1_x, double L1_y) {
+        visualization_msgs::msg::MarkerArray arr;
+        auto stamp = this->now();
+
+        // 목표점 구
+        visualization_msgs::msg::Marker sphere;
+        sphere.header.frame_id = odom_frame_;
+        sphere.header.stamp = stamp;
+        sphere.ns = "l1_lookahead";
+        sphere.id = 0;
+        sphere.type = visualization_msgs::msg::Marker::SPHERE;
+        sphere.action = visualization_msgs::msg::Marker::ADD;
+        sphere.pose.position.x = L1_x;
+        sphere.pose.position.y = L1_y;
+        sphere.pose.position.z = 0.0;
+        sphere.pose.orientation.w = 1.0;
+        sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.30;
+        sphere.color.r = 0.0f; sphere.color.g = 1.0f; sphere.color.b = 0.0f; sphere.color.a = 1.0f;
+        arr.markers.push_back(sphere);
+
+        // 차량 → 목표점 룩어헤드 선
+        visualization_msgs::msg::Marker line;
+        line.header.frame_id = odom_frame_;
+        line.header.stamp = stamp;
+        line.ns = "l1_lookahead";
+        line.id = 1;
+        line.type = visualization_msgs::msg::Marker::LINE_STRIP;
+        line.action = visualization_msgs::msg::Marker::ADD;
+        line.pose.orientation.w = 1.0;
+        line.scale.x = 0.05; // 선 두께
+        line.color.r = 1.0f; line.color.g = 1.0f; line.color.b = 0.0f; line.color.a = 0.8f;
+        geometry_msgs::msg::Point p0, p1;
+        p0.x = current_x_; p0.y = current_y_; p0.z = 0.0;
+        p1.x = L1_x;       p1.y = L1_y;       p1.z = 0.0;
+        line.points.push_back(p0);
+        line.points.push_back(p1);
+        arr.markers.push_back(line);
+
+        l1_marker_pub_->publish(arr);
+    }
+
     // 8.5 헬퍼: 룩어헤드 투영점 기준 최근접 웨이포인트 인덱스 반환
     size_t find_lookahead_wp_idx(const std::vector<Waypoint>& wps, bool closed, size_t base_idx, double lookahead_time) const {
         size_t nn = wps.size();
@@ -1266,6 +1322,8 @@ private:
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr global_path_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr local_path_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr l1_marker_pub_;
+    std::string odom_frame_ = "map"; // odom 메시지 header.frame_id (L1 마커 프레임)
     rclcpp::TimerBase::SharedPtr control_timer_;
 
     sensor_msgs::msg::LaserScan::ConstSharedPtr latest_scan_ = nullptr;

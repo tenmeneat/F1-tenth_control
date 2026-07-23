@@ -318,7 +318,8 @@ $$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\p
 | 파라미터 | 기본값 | 설명 |
 |---|---|---|
 | `max_speed` | 7.0(real)/12.0(sim) | 직선 최고속도 캡 [m/s]. 곡률 제한은 코너에서만 걸리므로 직선 상한은 이 값이 유일하다. control_mppi_node의 `v_max`로도 전달됨 |
-| `max_lateral_accel` | 10.0(real·sim 공통) | 코너 그립 클램프 a_lat [m/s²] — ⚠️ LUT 실그립 피크(~6.7)를 크게 초과하는 sim 낙관치, 실차 검증 전 그대로 쓰면 슬라이드 위험 |
+| `min_speed` | 2.5(real·sim 공통) | 최저 순항 속도 [m/s] (곡률 감속 하한). 2026-07-23 `declare_common_args()`로 승격 — 이제 터미널 인자. ⚠️ 장애물 정지 경로는 이 하한을 무시하고 0까지 내려감(안전 우선) |
+| `max_lateral_accel` | 6.5(real)/10.0(sim) | 코너 그립 클램프 a_lat [m/s²]. 실차 기본을 LUT 실그립 피크(~6.7) 이내인 6.5로 보수화(2026-07-23). sim은 랩타임 튜닝 기준 유지차 10.0 낙관치 그대로 |
 | `yaw_rate_gain` | 0.08 | 요레이트 카운터스티어 게인 (낮게 시작해 채터링 보며 상향) |
 | `use_imu` | true | IMU 보정 전체 on/off (요레이트 카운터스티어 + 롤 인지 ESC). 조향 채터링 시 false로 순수 L1+LUT 회귀 |
 | `odom_topic` | `/pf/pose/odom` | 위치추정 odom 소스 (real만 인자, sim은 `/ego_racecar/odom` 고정) |
@@ -347,7 +348,7 @@ $$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\p
 `build_control_map_node()` 안에 고정 정의된 공통 파라미터 — 여기 고치면 시뮬·실차 둘 다 바뀜:
 
 `wheelbase`(0.33), `l1_gain`(0.5), `l1_distance`(0.3), `t_clip_min`(0.8), `t_clip_max`(5.0),
-`lateral_error_coeff`(1.0), `min_speed`(2.0), `curvature_lookahead_count`(20),
+`lateral_error_coeff`(1.0), `curvature_lookahead_count`(20),
 `base_max_decel`(8.0), `wall_safety_margin`(0.6), `curvature_ff_blend`(0.0),
 `heading_damping_gain`(0.0)
 

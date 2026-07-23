@@ -45,14 +45,13 @@ def generate_launch_description():
     )
 
     # max_lateral_accel = backward-pass 사전감속 그립 클램프 min(프로파일 vx, sqrt(a_lat/kappa)).
-    # ⚠️⚠️ 실차 안전 경고: 10.0은 LUT 실 그립 마찰피크(~6.7)를 크게 초과하는 sim 낙관치.
-    # 보수적 프로파일에선 backward-pass가 min(프로파일, sqrt(10/kappa))라 사실상 무효(프로파일이
-    # 이김)이지만, 프로파일을 공격적으로 재생성해 코너속도가 sqrt(6.7/kappa)를 넘으면 실 타이어
-    # 그립 초과로 언더스티어/슬라이드 위험. 실그립 매칭 프로파일+저속 셰이크다운 검증 필수,
-    # 슬라이드 시 6.7로 되돌릴 것.
+    # 실차 기본값을 6.5로 보수화(2026-07-23) — LUT 실 그립 마찰피크(~6.7) 이내로 잡아 코너에서
+    # 실 타이어 그립을 초과하지 않도록. 프로파일을 공격적으로 재생성해 코너속도가 sqrt(6.5/kappa)를
+    # 넘으면 backward-pass가 여기서 클램프한다. 실그립 매칭 프로파일+저속 셰이크다운 후, 여유가
+    # 확인되면 상향 가능(sim 런치는 여전히 낙관치 10.0 — 랩타임 튜닝 기준 유지).
     max_lateral_accel_arg = DeclareLaunchArgument(
-        'max_lateral_accel', default_value='10.0',
-        description='코너 그립 클램프 a_lat [m/s^2] (⚠️ sim 승리값, 실그립 ~6.7 초과 — 실차 검증 필수)'
+        'max_lateral_accel', default_value='6.5',
+        description='코너 그립 클램프 a_lat [m/s^2] (실차 보수 기본, 실그립 피크 ~6.7 이내)'
     )
 
     # 비워두면 기존 폴백 순서(steering_lookup share → f1tenth_control share)로 로드.

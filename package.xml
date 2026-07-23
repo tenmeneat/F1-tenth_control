@@ -15,6 +15,7 @@
   <depend>ackermann_msgs</depend>
   <depend>std_msgs</depend>
   <depend>f110_msgs</depend>
+  <depend>visualization_msgs</depend>
   <depend>ament_index_cpp</depend>
 
   <export>

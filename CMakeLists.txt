@@ -32,6 +32,7 @@ find_package(nav_msgs REQUIRED)
 find_package(ackermann_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(f110_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 
 # ==============================================================================
@@ -69,6 +70,7 @@ ament_target_dependencies(control_map_node
   ackermann_msgs
   std_msgs
   f110_msgs
+  visualization_msgs
   ament_index_cpp
 )
 
