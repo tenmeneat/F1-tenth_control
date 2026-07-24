@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>F1TENTH Bag Analyzer</title>
+<style>
+/* 다크 계열 계기(RViz 스타일)로 의도적으로 단일 테마 고정 — 3D 포인트클라우드 가독성 우선 */
+:root{--bg:#0e1116;--panel:#161b22;--line:#2a313c;--fg:#e6edf3;--dim:#9aa4b2;--accent:#4c8dff}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,'Segoe UI','Noto Sans KR',sans-serif}
+h1{font-size:18px;margin:0}h2{font-size:15px;margin:24px 0 10px;color:var(--dim);font-weight:600}
+h3{font-size:14px;margin:16px 0 6px}
+header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.wrap{max-width:1200px;margin:0 auto;padding:0 20px 60px}
+.hint{font-size:12px;color:var(--dim)}
+/* dropzone */
+#drop{margin:40px 0;border:2px dashed var(--line);border-radius:14px;padding:54px 20px;text-align:center;
+  background:var(--panel);cursor:pointer;transition:border-color .15s,background .15s}
+#drop.hot{border-color:var(--accent);background:#1a2130}
+#drop .big{font-size:34px}#drop .t{font-size:16px;margin-top:8px}
+#drop .s{font-size:13px;color:var(--dim);margin-top:6px}
+#status{margin:14px 0;color:var(--dim);min-height:20px}
+.err{color:#e5484d}
+#results{display:none}
+.tiles{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 16px;min-width:108px}
+.tv{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}.tl{font-size:12px;color:var(--dim)}
+.viewer{background:#0a0d12;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+#gl{width:100%;height:460px;display:block;cursor:grab}#gl:active{cursor:grabbing}
+.ctl{display:flex;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+.ctl button,#drop2{background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:14px}
+.ctl button:hover{border-color:var(--accent)}
+#seek{flex:1;min-width:180px}
+.tval{font-variant-numeric:tabular-nums;color:var(--dim);min-width:130px}
+.charts{display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px}
+.chart{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+.chart canvas{width:100%;height:120px;display:block;cursor:crosshair}
+.chart .clab{font-size:12px;color:var(--dim);padding:2px 4px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:760px){.grid2{grid-template-columns:1fr}}
+.finding{background:var(--panel);border-radius:8px;padding:10px 14px;margin:8px 0}
+.finding b{font-size:14px}.finding p{margin:4px 0 0;color:var(--dim);font-size:13px}
+.badge{color:#fff;font-size:11px;padding:1px 7px;border-radius:10px;margin-right:8px;font-weight:600}
+pre.cmd{background:#0a0d12;border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;color:#7ee787;font-size:13px;white-space:pre-wrap}
+.note{color:#f5a623;font-size:13px}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--dim);padding:4px 2px;flex-wrap:wrap}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;vertical-align:middle;margin-right:4px}
+canvas.traj{width:100%;height:340px;display:block;background:#0a0d12;border:1px solid var(--line);border-radius:8px}
+a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
+#readout{margin:8px 2px 0;padding:8px 12px;background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  font-variant-numeric:tabular-nums;font-size:13px;color:var(--dim);white-space:pre-wrap}
+#readout b{color:var(--fg)}
+#tip{position:fixed;pointer-events:none;z-index:50;display:none;background:#0a0d12ee;border:1px solid var(--accent);
+  border-radius:6px;padding:6px 9px;font-size:12px;font-variant-numeric:tabular-nums;color:var(--fg);white-space:pre}
+</style></head>
+<body>
+<header>
+  <h1>🏎️ F1TENTH Bag Analyzer</h1>
+  <span class="hint">rosbag(.db3)을 브라우저에서 바로 분석 — ROS·터미널 불필요</span>
+  <a class="reload" id="again" style="display:none">↺ 다른 bag 열기</a>
+</header>
+<div class="wrap">
+  <div id="drop">
+    <div class="big">📦⬇︎</div>
+    <div class="t">여기로 <b>rosbag 폴더</b>를 통째로 드래그 <span class="hint">(또는 클릭해서 파일 선택)</span></div>
+    <div class="s">폴더 안의 <code>metadata.yaml</code>로 형식을 확인하고 <code>*.db3</code>(분할 bag도 지원)를 자동으로 찾습니다. 실제 데이터는 <code>.db3</code>에 있어요(yaml은 목차일 뿐). 파일은 서버로 안 올라가고 브라우저 안에서만 처리됩니다.</div>
+    <input id="file" type="file" accept=".db3,.yaml" multiple hidden>
+  </div>
+  <div id="status"></div>
+
+  <div id="results">
+    <div class="tiles" id="tiles"></div>
+
+    <h2>3D 주행 리플레이 <span class="hint">— 드래그: 회전 · 휠: 줌 · Shift+드래그: 이동</span></h2>
+    <div class="viewer">
+      <canvas id="gl"></canvas>
+      <div class="ctl">
+        <button id="play">▶︎ 재생</button>
+        <input id="seek" type="range" min="0" max="1000" value="0">
+        <span class="tval" id="tval">0.00 s</span>
+        <label class="hint">속도 <select id="rate"><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select>×</label>
+        <button id="reset">시점 리셋</button>
+      </div>
+    </div>
+    <div class="legend">
+      <span><span class="dot" style="background:#39d353"></span>저속</span>
+      <span><span class="dot" style="background:#e3b341"></span>중속</span>
+      <span><span class="dot" style="background:#e5484d"></span>고속</span>
+      <span><span class="dot" style="background:#58a6ff"></span>LiDAR</span>
+      <span><span class="dot" style="background:#bc8cff"></span>글로벌 경로</span>
+    </div>
+    <div class="charts">
+      <div class="chart"><div class="clab">속도 vx [m/s]</div><canvas id="c_v"></canvas></div>
+      <div class="chart"><div class="clab" id="lab_a">횡가속도 a_lat = vx·wz [m/s²]</div><canvas id="c_a"></canvas></div>
+      <div class="chart"><div class="clab">종가속도 dvx/dt [m/s²] (0 아래 = 감속)</div><canvas id="c_d"></canvas></div>
+    </div>
+    <div id="readout">그래프를 클릭·드래그하면 그 시점 수치가 여기에 표시됩니다.</div>
+
+    <h2>자동 튜닝 가이드</h2>
+    <div id="guide"></div>
+    <h3>권장 다음 셰이크다운</h3>
+    <div id="reccmd"></div>
+
+    <h2>주행상태 분석 그래프</h2>
+    <div class="grid2">
+      <div><div class="clab hint">궤적 (map, 속도색 · 빨강=그립초과)</div><canvas id="traj" class="traj"></canvas></div>
+      <div>
+        <div class="chart"><div class="clab">요레이트 [rad/s] (파랑 odom · 주황 IMU)</div><canvas id="c_y" style="height:150px"></canvas></div>
+        <div class="chart" style="margin-top:8px"><div class="clab">IMU raw (gyro deg/s · acc g)</div><canvas id="c_i" style="height:150px"></canvas></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="tip"></div>
+
+<!-- sql.js (SQLite WASM) 인라인 -->
+<script>/*__SQLJS_GLUE__*/</script>
+<script>
+const WASM_B64="__WASM_B64__";
+function b64ToBytes(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u;}
+
+// ══ CDR 리더 (cdr_validate.py 검증 알고리즘의 JS 포팅) ══
+class CDR{
+  constructor(u8){this.u8=u8;this.dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);this.le=(u8[1]&1)===1;this.o=4;}
+  align(n){const p=(this.o-4)%n;if(p)this.o+=n-p;}
+  u8v(){return this.u8[this.o++];}
+  i32(){this.align(4);const v=this.dv.getInt32(this.o,this.le);this.o+=4;return v;}
+  u32(){this.align(4);const v=this.dv.getUint32(this.o,this.le);this.o+=4;return v;}
+  f32(){this.align(4);const v=this.dv.getFloat32(this.o,this.le);this.o+=4;return v;}
+  f64(){this.align(8);const v=this.dv.getFloat64(this.o,this.le);this.o+=8;return v;}
+  str(){const n=this.u32();let s='';for(let i=0;i<n-1;i++)s+=String.fromCharCode(this.u8[this.o+i]);this.o+=n;return s;}
+  seqF32(){const n=this.u32();this.align(4);const a=new Float32Array(n);for(let i=0;i<n;i++){a[i]=this.dv.getFloat32(this.o,this.le);this.o+=4;}return a;}
+  seqI32(){const n=this.u32();const a=new Int32Array(n);for(let i=0;i<n;i++)a[i]=this.i32();return a;}
+}
+function hdr(c){c.i32();c.u32();return c.str();}
+function qyaw(x,y,z,w){return Math.atan2(2*(w*z+x*y),1-2*(y*y+z*z));}
+function pOdom(c){hdr(c);c.str();
+  const px=c.f64(),py=c.f64();c.f64();
+  const ox=c.f64(),oy=c.f64(),oz=c.f64(),ow=c.f64();
+  for(let i=0;i<36;i++)c.f64();
+  const lx=c.f64();c.f64();c.f64();c.f64();c.f64();const az=c.f64();
+  return {x:px,y:py,yaw:qyaw(ox,oy,oz,ow),vx:lx,wz:az};}
+function pImu(c){hdr(c);for(let i=0;i<4;i++)c.f64();for(let i=0;i<9;i++)c.f64();
+  c.f64();c.f64();const gz=c.f64();for(let i=0;i<9;i++)c.f64();
+  const ax=c.f64(),ay=c.f64();c.f64();return {gz:gz,ax:ax,ay:ay};}
+function pScan(c){hdr(c);const amin=c.f32();c.f32();const ainc=c.f32();c.f32();c.f32();c.f32();
+  const rmax=c.f32();const ranges=c.seqF32();return {amin:amin,ainc:ainc,rmax:rmax,ranges:ranges};}
+function pTf(c){const n=c.u32();const out=[];for(let i=0;i<n;i++){const fid=hdr(c);const child=c.str();
+  const tx=c.f64(),ty=c.f64();c.f64();const rx=c.f64(),ry=c.f64(),rz=c.f64(),rw=c.f64();
+  out.push({fid:fid,child:child,x:tx,y:ty,yaw:qyaw(rx,ry,rz,rw)});}return out;}
+function pFloat(c){return c.f64();}
+function pBool(c){return c.u8v()!==0;}
+function pJoy(c){hdr(c);const axes=c.seqF32();const btns=c.seqI32();return {axes:axes,btns:btns};}
+
+// ══ 상수 (control_map_node 기준) ══
+const WHEELBASE=0.33,MAX_STEER=0.41,CAR_W=0.31,CAR_L=0.58,DEG2RAD=Math.PI/180;
+const R_MIN=WHEELBASE/Math.tan(MAX_STEER);
+let GRIP=5.0;
+
+// ══ bag 파싱: 한 .db3 → 원시 메시지(절대 타임스탬프) ══
+function parseDb(bytes,SQL){
+  const db=new SQL.Database(bytes);
+  const tq=db.exec("SELECT id,name,type FROM topics")[0];
+  if(!tq)throw new Error("topics 테이블이 없습니다 (rosbag2 sqlite(.db3)가 맞나요?)");
+  const TOPIC={};tq.values.forEach(r=>TOPIC[r[0]]={name:r[1],type:r[2]});
+  const stmt=db.prepare("SELECT topic_id,timestamp,data FROM messages ORDER BY timestamp");
+  const R={odom:[],imu:[],scanRaw:[],tfRaw:[],estop:[],joy:[]};
+  while(stmt.step()){
+    const row=stmt.get(),tid=row[0],ts=row[1],blob=row[2];
+    const tp=TOPIC[tid];if(!tp)continue;
+    const u8=blob instanceof Uint8Array?blob:new Uint8Array(blob);
+    try{switch(tp.type){
+      case "nav_msgs/msg/Odometry":{const m=pOdom(new CDR(u8));m.t=ts;R.odom.push(m);break;}
+      case "sensor_msgs/msg/Imu":{const m=pImu(new CDR(u8));m.t=ts;R.imu.push(m);break;}
+      case "sensor_msgs/msg/LaserScan":{const m=pScan(new CDR(u8));m.t=ts;R.scanRaw.push(m);break;}
+      case "tf2_msgs/msg/TFMessage":{R.tfRaw.push({t:ts,tr:pTf(new CDR(u8))});break;}
+      case "std_msgs/msg/Bool":{R.estop.push([ts,pBool(new CDR(u8))]);break;}
+      case "sensor_msgs/msg/Joy":{const m=pJoy(new CDR(u8));m.t=ts;R.joy.push(m);break;}
+      default:break;
+    }}catch(e){/* 개별 메시지 파싱 실패는 건너뜀 */}
+  }
+  stmt.free();db.close();return R;
+}
+
+// ══ 여러 .db3 병합 → 시리즈/진단 (분할 bag 지원) ══
+async function analyze(buffers){
+  const SQL=await initSqlJs({wasmBinary:b64ToBytes(WASM_B64)});
+  const parts=buffers.map(b=>parseDb(b,SQL));
+  const odom=[],imu=[],scanRaw=[],tfRaw=[],estop=[],joy=[];
+  parts.forEach(p=>{odom.push(...p.odom);imu.push(...p.imu);scanRaw.push(...p.scanRaw);tfRaw.push(...p.tfRaw);estop.push(...p.estop);joy.push(...p.joy);});
+  const getT=m=>Array.isArray(m)?m[0]:m.t;
+  let t0=Infinity;[odom,imu,scanRaw,tfRaw,estop,joy].forEach(a=>a.forEach(m=>{const v=getT(m);if(v<t0)t0=v;}));
+  const relSort=a=>{a.forEach(m=>{if(Array.isArray(m))m[0]=(m[0]-t0)/1e9;else m.t=(m.t-t0)/1e9;});a.sort((x,y)=>getT(x)-getT(y));};
+  [odom,imu,scanRaw,tfRaw,estop,joy].forEach(relSort);
+  if(!odom.length)throw new Error("odom(/odom) 메시지가 없습니다.");
+
+  // TF 합성 (map→odom→base_link)
+  const mo=tfRaw.flatMap(f=>f.tr.filter(x=>x.fid==="map"&&x.child==="odom").map(x=>({t:f.t,...x})));
+  const ob=tfRaw.flatMap(f=>f.tr.filter(x=>x.fid==="odom"&&x.child==="base_link").map(x=>({t:f.t,...x})));
+  const sortT=a=>a.sort((p,q)=>p.t-q.t);sortT(mo);sortT(ob);
+  const hasMap=mo.length>0&&ob.length>0;
+  function latest(arr,t){let lo=0,hi=arr.length-1;if(!arr.length)return null;if(t<=arr[0].t)return arr[0];if(t>=arr[hi].t)return arr[hi];
+    while(lo+1<hi){const m=(lo+hi)>>1;if(arr[m].t<=t)lo=m;else hi=m;}return arr[lo];}
+  function mapPose(t){
+    if(hasMap){const o=latest(mo,t),b=latest(ob,t);
+      return {x:o.x+Math.cos(o.yaw)*b.x-Math.sin(o.yaw)*b.y,y:o.y+Math.sin(o.yaw)*b.x+Math.cos(o.yaw)*b.y,yaw:o.yaw+b.yaw};}
+    if(ob.length){const b=latest(ob,t);return {x:b.x,y:b.y,yaw:b.yaw};}
+    return null;}
+
+  // pose(map) per odom + 파생
+  const N=odom.length;
+  const track=[];
+  for(let i=0;i<N;i++){const o=odom[i];const p=mapPose(o.t)||{x:o.x,y:o.y,yaw:o.yaw};
+    track.push([o.t,p.x,p.y,p.yaw,o.vx,o.vx*o.wz,0,o.wz]);}
+  // dvx/dt (중앙차분 + 3-tap 평활)
+  for(let i=0;i<N;i++){const im=Math.max(0,i-1),ip=Math.min(N-1,i+1);const dt=track[ip][0]-track[im][0];
+    track[i][6]=dt>1e-6?(track[ip][4]-track[im][4])/dt:0;}
+  const dv=track.map(p=>p[6]);for(let i=0;i<N;i++){const a=dv[Math.max(0,i-1)],b=dv[i],c=dv[Math.min(N-1,i+1)];track[i][6]=(a+b+c)/3;}
+
+  // LiDAR map 프레임 프레임들 (≤140)
+  const LASER_FWD=0.27,MAXF=140,STRIDE=6;const step=Math.max(1,Math.floor(scanRaw.length/MAXF));
+  const scans=[];
+  for(let k=0;k<scanRaw.length;k+=step){const s=scanRaw[k];const p=mapPose(s.t);if(!p)continue;
+    const lx=p.x+Math.cos(p.yaw)*LASER_FWD,ly=p.y+Math.sin(p.yaw)*LASER_FWD;const pts=[];
+    const cap=Math.min(s.rmax,15);
+    for(let i=0;i<s.ranges.length;i+=STRIDE){const r=s.ranges[i];if(!(r>0.05&&r<cap))continue;
+      const a=s.amin+i*s.ainc+p.yaw;pts.push(+(lx+r*Math.cos(a)).toFixed(3),+(ly+r*Math.sin(a)).toFixed(3));}
+    scans.push({t:+s.t.toFixed(3),pts:pts});}
+
+  // IMU 시리즈
+  const IMU={t:imu.map(m=>m.t),gz_raw:imu.map(m=>m.gz),gz_rad:imu.map(m=>m.gz*DEG2RAD),ax:imu.map(m=>m.ax),ay:imu.map(m=>m.ay)};
+
+  const S={track,scans,wp:[],imu:IMU,estop,hasMap,dur:track.length?track[N-1][0]:0};
+  const D=diagnose(S,GRIP);
+  return Object.assign(S,D);
+}
+
+// ══ 자동 진단 (analyze_bag.py diagnose 포팅) ══
+function diagnose(S,grip){
+  const tr=S.track,N=tr.length;const findings=[],rec={};
+  const t=tr.map(p=>p[0]),vx=tr.map(p=>p[4]),wz=tr.map(p=>p[7]),alat=tr.map(p=>p[5]),dvx=tr.map(p=>p[6]);
+  const absmax=a=>a.reduce((m,v)=>Math.max(m,Math.abs(v)),0);
+  const driving=i=>{let st=false;for(const[et,ev]of S.estop){if(et<=t[i])st=!ev;}return st&&vx[i]>1.0;};
+  const dm=tr.map((_,i)=>driving(i));
+  const peakV=Math.max(...vx),peakAl=absmax(alat);
+  const over=alat.filter(a=>Math.abs(a)>grip).length,overFrac=over/N;
+  // 사고 이전만: 감속권한
+  let onset=N;for(let i=0;i<N;i++){if(Math.abs(alat[i])>1.6*grip||Math.abs(dvx[i])>15){onset=i;break;}}
+  let minDecel=Infinity,accelFrac=0,nPre=0,sumAcc=0;
+  for(let i=0;i<onset;i++){if(dm[i]&&vx[i]>1.5){nPre++;minDecel=Math.min(minDecel,dvx[i]);if(dvx[i]>0)sumAcc++;}}
+  if(nPre)accelFrac=sumAcc/nPre;else minDecel=0;
+  const onsetT=onset<N?t[onset]:(t[N-1]||0);
+  if(nPre>=10){
+    if(minDecel>-0.8)findings.push({level:"critical",title:"감속 권한 없음 (근본 원인)",
+      body:`그립 붕괴 이전(${onsetT.toFixed(1)}s)까지 최저 종가속도 ${minDecel>=0?'+':''}${minDecel.toFixed(2)} m/s² — 감속 국면이 사실상 없음(구간의 ${(accelFrac*100).toFixed(0)}%가 가속). 실제 감속은 벽/E-stop 이후에만 나타남. 속도명령을 낮춰도 차가 안 서므로 코너 사전감속(√(a_lat/κ) 캡)이 무효. → 브레이크 채널/VESC 회생제동 점검이 근본 해결. 그전까지는 max_speed를 코너 안전속도로 낮추는 게 유일한 레버.`});
+    else if(minDecel>-2.5)findings.push({level:"warn",title:"감속 권한 약함",
+      body:`그립 붕괴 이전 최저 종가속도 ${minDecel.toFixed(2)} m/s². 감속이 약해 코너 사전감속이 부족할 수 있음.`});
+  }
+  // 그립 초과 / 스핀
+  let nSpin=0;for(let i=0;i<N;i++){const R=Math.abs(wz[i])>1e-3?vx[i]/Math.abs(wz[i]):1e9;if(R<1.15*R_MIN&&vx[i]>2)nSpin++;}
+  if(peakAl>1.6*grip)findings.push({level:"critical",title:"그립 초과 → 스핀/조향 포화",
+    body:`최대 |a_lat| = ${peakAl.toFixed(1)} m/s² (목표 그립 ${grip.toFixed(1)}의 ${(peakAl/grip).toFixed(1)}배). 전체의 ${(overFrac*100).toFixed(0)}%가 그립 초과. 선회반경이 최소반경(${R_MIN.toFixed(2)}m)에 닿는 조향 포화 샘플 ${nSpin}개 = 풀락 스핀. 코너 진입속도가 그립 대비 과속.`});
+  else if(overFrac>0.05)findings.push({level:"warn",title:"간헐적 그립 초과",
+    body:`최대 |a_lat| = ${peakAl.toFixed(1)}, 그립 초과 ${(overFrac*100).toFixed(0)}%. 마진 부족.`});
+  else findings.push({level:"ok",title:"그립 마진 양호",
+    body:`최대 |a_lat| = ${peakAl.toFixed(1)} m/s² < 목표 ${grip.toFixed(1)}. 코너 그립 마진 확보.`});
+  // 권장 max_speed (사고 이전 그립초과 코너)
+  let vSafe=null;for(let i=0;i<onset;i++){if(Math.abs(alat[i])>grip&&vx[i]>0.5){const vs=vx[i]*Math.sqrt(grip/Math.abs(alat[i]));vSafe=vSafe===null?vs:Math.min(vSafe,vs);}}
+  if(vSafe!==null)rec.max_speed=Math.max(1.5,Math.floor(vSafe*2)/2);
+  if(peakAl>1.6*grip){rec.max_lateral_accel=5.0;rec.min_speed=1.5;rec.note=true;}
+  // IMU deg/s
+  if(S.imu.gz_raw.length&&absmax(S.imu.gz_raw)>30)findings.push({level:"info",title:"IMU 자이로 = deg/s 확인",
+    body:`자이로 z 최대 ${absmax(S.imu.gz_raw).toFixed(0)} (deg/s 스케일). IMU_ANGULAR_SCALE(π/180) 보정 전제. 언더스티어 시 요레이트 카운터스티어가 조향을 더 밀어 포화를 앞당길 수 있으니 use_imu:=false A/B 권장.`});
+  const stats={dur:S.dur,peakV,peakAl,overFrac,minDecel,nSpin,grip};
+  return {findings,rec,stats};
+}
+
+// ══ 렌더/뷰어 (데스크톱 도구의 3D 뷰어 코드 기반) ══
+let DATA,track,T0,T1,DUR,scans,wp,VMAX;
+let cam,bounds,cur=0,playing=false,rate=1,lastTs=0;
+let gl,ctx,B,chV,chA,chD,chY,chI,trajCv;
+
+function speedColor(v){const x=Math.min(1,Math.max(0,v/VMAX));
+  const r=Math.round(57+x*(229-57)),g=Math.round(211-x*(211-72)),b=Math.round(83-x*(83-77));return `rgb(${r},${g},${b})`;}
+
+function computeBounds(){const xs=track.map(p=>p[1]),ys=track.map(p=>p[2]);
+  const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+  bounds={cx:(x0+x1)/2,cy:(y0+y1)/2,r:Math.max(4,Math.hypot(x1-x0,y1-y0)/2)};}
+function defcam(){cam={az:-0.9,el:0.62,dist:bounds.r*2.6,tx:bounds.cx,ty:bounds.cy,tz:0};}
+
+function basis(){
+  const cp=[cam.tx+cam.dist*Math.cos(cam.el)*Math.cos(cam.az),cam.ty+cam.dist*Math.cos(cam.el)*Math.sin(cam.az),cam.tz+cam.dist*Math.sin(cam.el)];
+  let f=[cam.tx-cp[0],cam.ty-cp[1],cam.tz-cp[2]];const fl=Math.hypot(...f);f=f.map(v=>v/fl);
+  let up=[0,0,1];let r=[f[1]*up[2]-f[2]*up[1],f[2]*up[0]-f[0]*up[2],f[0]*up[1]-f[1]*up[0]];const rl=Math.hypot(...r);r=r.map(v=>v/rl);
+  let u=[r[1]*f[2]-r[2]*f[1],r[2]*f[0]-r[0]*f[2],r[0]*f[1]-r[1]*f[0]];return {cp,f,r,u};}
+function proj(p){const d=[p[0]-B.cp[0],p[1]-B.cp[1],p[2]-B.cp[2]];
+  const zc=d[0]*B.f[0]+d[1]*B.f[1]+d[2]*B.f[2];if(zc<0.05)return null;
+  const xc=d[0]*B.r[0]+d[1]*B.r[1]+d[2]*B.r[2],yc=d[0]*B.u[0]+d[1]*B.u[1]+d[2]*B.u[2];
+  const W=gl.clientWidth,H=gl.clientHeight,foc=H*0.9;return [W/2+foc*xc/zc,H/2-foc*yc/zc,zc];}
+function line3(a,b,col,w){const p=proj(a),q=proj(b);if(!p||!q)return;ctx.strokeStyle=col;ctx.lineWidth=w||1;ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(q[0],q[1]);ctx.stroke();}
+
+function idxAt(t){let lo=0,hi=track.length-1;if(t<=track[0][0])return 0;if(t>=track[hi][0])return hi;
+  while(lo+1<hi){const m=(lo+hi)>>1;if(track[m][0]<=t)lo=m;else hi=m;}return lo;}
+function poseAt(t){const i=idxAt(t),a=track[i],b=track[Math.min(i+1,track.length-1)];const d=b[0]-a[0],s=d>1e-6?(t-a[0])/d:0;
+  let dy=b[3]-a[3];while(dy>Math.PI)dy-=2*Math.PI;while(dy<-Math.PI)dy+=2*Math.PI;
+  return {x:a[1]+s*(b[1]-a[1]),y:a[2]+s*(b[2]-a[2]),yaw:a[3]+s*dy,vx:a[4]+s*(b[4]-a[4])};}
+function scanAt(t){let s=null;for(const f of scans){if(f.t<=t)s=f;else break;}return s;}
+
+function drawGround(){const g=Math.max(1,Math.round(bounds.r/6)),R=Math.ceil(bounds.r*1.6);
+  const x0=Math.floor(bounds.cx-R),x1=Math.ceil(bounds.cx+R),y0=Math.floor(bounds.cy-R),y1=Math.ceil(bounds.cy+R);
+  for(let x=x0;x<=x1;x+=g)line3([x,y0,0],[x,y1,0],'#1c2230',1);
+  for(let y=y0;y<=y1;y+=g)line3([x0,y,0],[x1,y,0],'#1c2230',1);}
+function drawCar(px,py,yaw){const hl=CAR_L/2,hw=CAR_W/2,hz=0.16,c=Math.cos(yaw),s=Math.sin(yaw);
+  const cor=(dx,dy,dz)=>[px+dx*c-dy*s,py+dx*s+dy*c,dz];
+  const bot=[cor(hl,hw,0),cor(hl,-hw,0),cor(-hl,-hw,0),cor(-hl,hw,0)],top=bot.map(p=>[p[0],p[1],hz]);
+  const tp=top.map(proj);if(tp.every(p=>p)){ctx.fillStyle='rgba(88,166,255,.5)';ctx.beginPath();ctx.moveTo(tp[0][0],tp[0][1]);for(let i=1;i<4;i++)ctx.lineTo(tp[i][0],tp[i][1]);ctx.closePath();ctx.fill();}
+  for(let i=0;i<4;i++){line3(bot[i],bot[(i+1)%4],'#58a6ff',1.5);line3(top[i],top[(i+1)%4],'#79c0ff',1.5);line3(bot[i],top[i],'#58a6ff',1.5);}
+  line3(cor(hl,0,hz),cor(hl+0.35,0,hz),'#ffdd55',2.5);}
+
+function draw(){B=basis();const W=gl.clientWidth,H=gl.clientHeight;ctx.fillStyle='#0a0d12';ctx.fillRect(0,0,W,H);
+  drawGround();
+  if(wp.length)for(let i=0;i+1<wp.length;i++)line3([wp[i][0],wp[i][1],0.01],[wp[i+1][0],wp[i+1][1],0.01],'#bc8cff',1.2);
+  for(let i=0;i+1<track.length;i++)line3([track[i][1],track[i][2],0.02],[track[i+1][1],track[i+1][2],0.02],speedColor(track[i][4]),2);
+  const sc=scanAt(cur);if(sc){ctx.fillStyle='#58a6ff';for(let i=0;i<sc.pts.length;i+=2){const p=proj([sc.pts[i],sc.pts[i+1],0.03]);if(p){ctx.beginPath();ctx.arc(p[0],p[1],1.6,0,7);ctx.fill();}}}
+  const ps=poseAt(cur);drawCar(ps.x,ps.y,ps.yaw);drawCharts();}
+
+// ── 차트 (다중 시리즈 + 선택적 playhead/grip) ──
+function drawChart(cv,series,opt){opt=opt||{};const c=cv.getContext('2d'),W=cv.clientWidth,Ht=cv.clientHeight;c.clearRect(0,0,W,Ht);
+  let mn=Infinity,mx=-Infinity;series.forEach(s=>s.v.forEach(v=>{if(v<mn)mn=v;if(v>mx)mx=v;}));
+  if(!isFinite(mn)){mn=-1;mx=1;}
+  if(opt.zeroCenter){const a=Math.max(Math.abs(mn),Math.abs(mx),opt.grip||1);mn=-a;mx=a;}
+  if(mx-mn<1e-6)mx=mn+1;const pad=6;
+  const X=t=>pad+(t-T0)/DUR*(W-2*pad),Y=v=>Ht-pad-(v-mn)/(mx-mn)*(Ht-2*pad);
+  c.strokeStyle='#2a313c';c.lineWidth=1;
+  if(opt.zeroCenter){c.beginPath();c.moveTo(pad,Y(0));c.lineTo(W-pad,Y(0));c.stroke();}
+  if(opt.grip){c.strokeStyle='#f5a623';c.setLineDash([4,3]);[opt.grip,-opt.grip].forEach(g=>{c.beginPath();c.moveTo(pad,Y(g));c.lineTo(W-pad,Y(g));c.stroke();});c.setLineDash([]);}
+  series.forEach(s=>{c.strokeStyle=s.color;c.lineWidth=1.3;c.beginPath();let started=false;
+    for(let i=0;i<s.t.length;i++){const x=X(s.t[i]),y=Y(s.v[i]);if(!started){c.moveTo(x,y);started=true;}else c.lineTo(x,y);}c.stroke();});
+  if(opt.playhead){const px=X(cur);c.strokeStyle='#e6edf3';c.lineWidth=1;c.beginPath();c.moveTo(px,pad);c.lineTo(px,Ht-pad);c.stroke();}}
+function drawCharts(){const T=track.map(p=>p[0]);
+  drawChart(chV,[{t:T,v:track.map(p=>p[4]),color:'#39d353'}],{playhead:true});
+  drawChart(chA,[{t:T,v:track.map(p=>p[5]),color:'#e5484d'}],{zeroCenter:true,grip:GRIP,playhead:true});
+  drawChart(chD,[{t:T,v:track.map(p=>p[6]),color:'#2dd4bf'}],{zeroCenter:true,playhead:true});}
+function drawStaticCharts(){const T=track.map(p=>p[0]);
+  drawChart(chY,[{t:T,v:track.map(p=>p[7]),color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.gz_rad,color:'#f5a623'}],{zeroCenter:true});
+  drawChart(chI,[{t:DATA.imu.t,v:DATA.imu.gz_raw,color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.ax,color:'#e5484d'},{t:DATA.imu.t,v:DATA.imu.ay,color:'#39d353'}],{zeroCenter:true});}
+
+// ── 궤적 탑다운 ──
+function drawTrajectory(){const cv=trajCv,c=cv.getContext('2d'),W=cv.clientWidth,H=cv.clientHeight;c.clearRect(0,0,W,H);
+  const xs=track.map(p=>p[1]),ys=track.map(p=>p[2]);const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+  const pad=24,sx=(W-2*pad)/Math.max(0.1,x1-x0),sy=(H-2*pad)/Math.max(0.1,y1-y0),s=Math.min(sx,sy);
+  const X=x=>pad+(x-x0)*s+(W-2*pad-(x1-x0)*s)/2,Y=y=>H-pad-(y-y0)*s-(H-2*pad-(y1-y0)*s)/2;
+  for(let i=0;i+1<track.length;i++){c.strokeStyle=speedColor(track[i][4]);c.lineWidth=3;c.beginPath();c.moveTo(X(track[i][1]),Y(track[i][2]));c.lineTo(X(track[i+1][1]),Y(track[i+1][2]));c.stroke();}
+  c.fillStyle='#e5484d';for(let i=0;i<track.length;i++)if(Math.abs(track[i][5])>GRIP){c.beginPath();c.arc(X(track[i][1]),Y(track[i][2]),2.4,0,7);c.fill();}}
+
+// ── 캔버스 리사이즈 ──
+function fit(cv){const dpr=window.devicePixelRatio||1;cv.width=cv.clientWidth*dpr;cv.height=cv.clientHeight*dpr;cv.getContext('2d').setTransform(dpr,0,0,dpr,0,0);}
+function resizeAll(){fit(gl);[chV,chA,chD,chY,chI,trajCv].forEach(fit);}
+
+function updateReadout(){const p=track[idxAt(cur)],ro=document.getElementById('readout');if(!ro||!p)return;
+  ro.innerHTML=`<b>t=${(cur-T0).toFixed(2)} s</b>    vx <b>${p[4].toFixed(2)}</b> m/s    `+
+    `a_lat <b>${p[5].toFixed(1)}</b> m/s²    dvx/dt <b>${p[6].toFixed(2)}</b> m/s²    `+
+    `요레이트 <b>${p[7].toFixed(2)}</b> rad/s    heading <b>${(p[3]*180/Math.PI).toFixed(0)}</b>°`;}
+function syncSeek(){const seek=document.getElementById('seek');seek.value=((cur-T0)/DUR*1000)|0;const ps=poseAt(cur);
+  document.getElementById('tval').textContent=`${(cur-T0).toFixed(2)} s | ${ps.vx.toFixed(2)} m/s`;updateReadout();}
+function loop(ts){if(!playing)return;if(lastTs){cur+=(ts-lastTs)/1000*rate;if(cur>=T1)cur=T0;}lastTs=ts;syncSeek();draw();requestAnimationFrame(loop);}
+
+function wireControls(){
+  const seek=document.getElementById('seek'),playBtn=document.getElementById('play');
+  seek.oninput=()=>{cur=T0+seek.value/1000*DUR;syncSeek();draw();};
+  document.getElementById('rate').onchange=e=>rate=parseFloat(e.target.value);
+  playBtn.onclick=()=>{playing=!playing;playBtn.textContent=playing?'❚❚ 일시정지':'▶︎ 재생';lastTs=0;if(playing)requestAnimationFrame(loop);};
+  document.getElementById('reset').onclick=()=>{defcam();draw();};
+  const tip=document.getElementById('tip');
+  [chV,chA,chD,chY,chI].forEach(cv=>{
+    cv.onclick=e=>{cur=T0+(e.offsetX/cv.clientWidth)*DUR;syncSeek();draw();};
+    cv.onmousemove=e=>{const t=T0+(e.offsetX/cv.clientWidth)*DUR,p=track[idxAt(t)];
+      tip.style.display='block';tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';
+      tip.textContent=`t=${(t-T0).toFixed(2)} s\nvx    ${p[4].toFixed(2)} m/s\na_lat ${p[5].toFixed(1)} m/s²\ndvx   ${p[6].toFixed(2)} m/s²\nwz    ${p[7].toFixed(2)} rad/s`;};
+    cv.onmouseleave=()=>tip.style.display='none';
+  });
+  let drag=null;
+  gl.onmousedown=e=>{drag={x:e.clientX,y:e.clientY,shift:e.shiftKey,btn:e.button};};
+  window.onmouseup=()=>drag=null;
+  window.onmousemove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;drag.x=e.clientX;drag.y=e.clientY;
+    if(drag.shift||drag.btn===2){const k=cam.dist*0.0015,ca=Math.cos(cam.az),sa=Math.sin(cam.az);
+      cam.tx-=(-sa*dx)*k;cam.ty-=(ca*dx)*k;cam.tx+=(ca*dy)*k*0.6;cam.ty+=(sa*dy)*k*0.6;}
+    else{cam.az-=dx*0.008;cam.el=Math.max(0.08,Math.min(1.5,cam.el+dy*0.006));}draw();};
+  gl.onwheel=e=>{e.preventDefault();cam.dist*=Math.exp(e.deltaY*0.0011);cam.dist=Math.max(1,Math.min(bounds.r*8,cam.dist));draw();};
+  gl.oncontextmenu=e=>e.preventDefault();
+  window.onresize=()=>{resizeAll();drawTrajectory();drawStaticCharts();draw();};
+}
+
+function renderReport(D,name){
+  DATA=D;track=D.track;scans=D.scans;wp=D.wp||[];
+  T0=track[0][0];T1=track[track.length-1][0];DUR=(T1-T0)||1;VMAX=Math.max(1,...track.map(p=>p[4]));
+  const st=D.stats;
+  const tiles=[["주행 시간",`${st.dur.toFixed(1)} s`],["최고 속도",`${st.peakV.toFixed(2)} m/s`],["최대 |a_lat|",`${st.peakAl.toFixed(1)} m/s²`],
+    ["그립 초과",`${(st.overFrac*100).toFixed(0)} %`],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],["스핀 샘플",`${st.nSpin}`]];
+  document.getElementById('tiles').innerHTML=tiles.map(([k,v])=>`<div class="tile"><div class="tv">${v}</div><div class="tl">${k}</div></div>`).join('');
+  // 가이드
+  const col={critical:"#e5484d",warn:"#f5a623",info:"#4c8dff",ok:"#30a46c"},lab={critical:"치명",warn:"주의",info:"참고",ok:"양호"},ord={critical:0,warn:1,info:2,ok:3};
+  const fs=D.findings.slice().sort((a,b)=>ord[a.level]-ord[b.level]);
+  document.getElementById('guide').innerHTML=fs.map(f=>`<div class="finding" style="border-left:4px solid ${col[f.level]}"><span class="badge" style="background:${col[f.level]}">${lab[f.level]}</span><b>${f.title}</b><p>${f.body}</p></div>`).join('');
+  const r=D.rec,args=[];if('max_speed'in r)args.push(`max_speed:=${r.max_speed}`);if('max_lateral_accel'in r)args.push(`max_lateral_accel:=${r.max_lateral_accel}`);if('min_speed'in r)args.push(`min_speed:=${r.min_speed}`);
+  let cmd="ros2 launch f1tenth_control control_real.launch.py";if(args.length)cmd+=" \\\n    "+args.join(" \\\n    ");
+  let recHtml=`<pre class="cmd">${cmd}</pre>`;if(r.note)recHtml+=`<p class="note">＋ 코드 안전망 권장: 측정 a_lat이 그립 초과하거나 조향이 ±0.41에 포화되면 target_speed를 하드컷(스핀/limit-cycle 차단), recovery_lat_error 1.0→0.5.</p>`;
+  document.getElementById('reccmd').innerHTML=recHtml;
+  document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] (주황선 = 그립 ±${GRIP})`;
+  // 캔버스
+  gl=document.getElementById('gl');ctx=gl.getContext('2d');
+  chV=document.getElementById('c_v');chA=document.getElementById('c_a');chD=document.getElementById('c_d');
+  chY=document.getElementById('c_y');chI=document.getElementById('c_i');trajCv=document.getElementById('traj');
+  computeBounds();defcam();cur=T0;playing=false;
+  wireControls();
+  const paint=()=>{resizeAll();drawTrajectory();drawStaticCharts();syncSeek();draw();};
+  paint();                              // 즉시 (레이아웃 준비됨)
+  requestAnimationFrame(paint);         // 안전망: 컨테이너 표시 직후 clientWidth=0였던 경우 재렌더
+}
+
+// ══ 업로드 UI (bag 폴더 통째로 / 다중 파일 / 단일 .db3 모두 허용) ══
+const drop=document.getElementById('drop'),file=document.getElementById('file'),status=document.getElementById('status'),
+      results=document.getElementById('results'),again=document.getElementById('again');
+drop.addEventListener('click',()=>file.click());
+file.addEventListener('change',e=>handleFiles([...e.target.files]));
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('hot');}));
+['dragleave'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('hot');}));
+drop.addEventListener('drop',async e=>{e.preventDefault();drop.classList.remove('hot');
+  const files=await filesFromDrop(e.dataTransfer);handleFiles(files);});
+again.addEventListener('click',()=>{results.style.display='none';drop.style.display='';again.style.display='none';status.textContent='';});
+
+// 드롭된 항목에서 File 수집(폴더면 안을 훑음)
+async function filesFromDrop(dt){
+  const items=dt.items;
+  if(items&&items.length&&items[0].webkitGetAsEntry){
+    const ents=[...items].map(i=>i.webkitGetAsEntry()).filter(Boolean);
+    const out=[];for(const e of ents)await collectEntry(e,out);
+    if(out.length)return out;
+  }
+  return [...dt.files];
+}
+function collectEntry(entry,out){
+  return new Promise(res=>{
+    if(entry.isFile){entry.file(f=>{out.push(f);res();},()=>res());}
+    else if(entry.isDirectory){const rd=entry.createReader();
+      const step=()=>rd.readEntries(async ents=>{if(!ents.length){res();return;}for(const e of ents)await collectEntry(e,out);step();},()=>res());step();}
+    else res();
+  });
+}
+async function handleFiles(files){
+  files=files||[];
+  const db3s=files.filter(f=>f.name.endsWith('.db3')).sort((a,b)=>a.name.localeCompare(b.name));
+  const yaml=files.find(f=>f.name.endsWith('.yaml'));
+  const mcap=files.find(f=>f.name.endsWith('.mcap'));
+  if(!db3s.length){
+    if(mcap){status.innerHTML='<span class="err">MCAP(.mcap) 형식은 아직 미지원입니다 — sqlite3(.db3)로 기록된 bag을 넣어주세요. (metadata.yaml의 storage_identifier가 sqlite3여야 함)</span>';return;}
+    if(yaml){status.innerHTML='<span class="err">metadata.yaml만으로는 분석할 수 없습니다 — 실제 데이터는 .db3에 있습니다. bag 폴더를 통째로 넣거나 .db3를 포함해 주세요.</span>';return;}
+    status.innerHTML='<span class="err">.db3 파일을 찾지 못했습니다. bag 폴더 또는 .db3를 넣어주세요.</span>';return;
+  }
+  // yaml이 있으면 저장형식 확인(호환성 안내)
+  if(yaml){try{const txt=await yaml.text();const m=txt.match(/storage_identifier:\s*(\S+)/);
+    if(m&&m[1]!=='sqlite3'&&!db3s.length){status.innerHTML=`<span class="err">storage_identifier=${m[1]} — sqlite3만 지원.</span>`;return;}}catch(e){}}
+  const label=db3s.length>1?`${db3s.length}개 .db3(분할 bag)`:db3s[0].name;
+  status.textContent=`읽는 중: ${label} …`;
+  try{
+    const buffers=[];for(const f of db3s)buffers.push(new Uint8Array(await f.arrayBuffer()));
+    status.textContent='파싱·분석 중 …';
+    await new Promise(r=>setTimeout(r,30));
+    const D=await analyze(buffers);
+    drop.style.display='none';results.style.display='block';again.style.display='inline';status.textContent='';
+    void results.offsetHeight;   // 표시 직후 레이아웃 강제 → 캔버스 clientWidth 확정(첫 렌더 0폭 방지)
+    renderReport(D,label);
+  }catch(err){status.innerHTML=`<span class="err">실패: ${err.message}</span>`;console.error(err);}
+}
+</script>
+</body></html>

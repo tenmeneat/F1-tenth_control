@@ -43,7 +43,7 @@ def declare_common_args():
         # 랩타임/속도는 게인 무관, 0.15부터 조향 채터링이 뚜렷(부호전환 0→3.32/s) → 보수값 0.08.
         DeclareLaunchArgument(
             'yaw_rate_gain',
-            default_value='0.08',
+            default_value='0.05',
             description='요레이트 카운터스티어 게인 (낮게 시작해 채터링 보며 상향)'
         ),
 

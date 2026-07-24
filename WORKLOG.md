@@ -4,6 +4,93 @@
 
 ---
 
+## 2026-07-24 — 🔍 시케인 크래시 근본원인(감속권한 0) 규명 + bag 분석도구 제작 + 조향↔요레이트/IMU 노이즈 진단
+
+07-23 실차 rosbag(`~/Downloads/rosbag2_2026_07_23-*` 5개)을 분석. 시케인 벽 충돌의 근본원인을
+정량 규명하고, 재사용 가능한 bag 분석 도구를 만들고, 조향↔요레이트 불일치·IMU 노이즈를 실측 진단.
+
+### 1. 시케인 스핀아웃 근본원인 = 자율모드 감속 권한 0
+`/odom`(vx·wz)을 직접 적분해 역학 확인 (팀원 분석 이미지의 "매칭 종료"는 증상일 뿐):
+- **`dvx/dt`가 자율 진입(t=4.35s) 후 전 구간 양수** — 0→4.11 m/s 단조 가속, **감속 0회**. 코너
+  한복판(a_lat 12~22)에서도 계속 가속. 실제 감속은 벽 충돌 후에만.
+- `a_lat = vx·wz`이 t=10부터 그립(6.5) 초과 → t=11.5 **−12.9** → t=13.4 **+22 m/s²**.
+- 스핀 중 `wz`가 5.3 rad/s에 고정, 반경 4.0/5.3=**0.75m = 차량 최소선회반경**(L/tanδ) → **조향 포화**.
+- 주행 구간 `/commands/motor/brake` = 0 (브레이크 채널 미사용, 감속은 속도명령 인하로만 → VESC
+  스피드모드가 저마찰서 회생제동 거의 못 함 → 코너 사전감속(√(a_lat/κ) 캡)이 물리적으로 무효).
+
+**세션 교차확인 (5개 bag):** 4 m/s 도달 런(22_25·22_43) 둘 다 peak a_lat~22 스핀; 2.9 m/s(22_28)
+아슬; ≤1.4 m/s 무사고. → **속도가 직접 knob.** 차가 못 서므로 코너 진입속도 ≈ `max_speed`.
+
+**결론:** 실그립 발생한계 ~6 m/s²(8.7에서 이미 슬라이드) → MLA 6.5는 낙관. 근본해결은 감속 권한
+복구(VESC 브레이크/회생제동). 그전까진 낮은 flat `max_speed`가 유일한 레버.
+
+**권장 (감속 복구 전, 다음 셰이크다운):**
+`control_real.launch.py max_speed:=2 max_lateral_accel:=5 min_speed:=1.5` (+ 첫 A/B로 `use_imu:=false`).
+후속: 감속 스텝테스트로 권한 정량화 → VESC 브레이크 config / profiler·kappa 규명. 코드 안전망(측정
+a_lat 초과·조향 포화 시 속도 하드컷 = limit-cycle 차단, `recovery_lat_error` 1.0→0.5).
+
+### 2. bag 분석 도구 3종 (`tools/bag_analyzer/`, 신규)
+셰이크다운마다 bag → 3D 리플레이 + 주행 그래프 + **자동 튜닝 가이드**를 뽑는 도구. 진단 휴리스틱은
+위 1번 판단을 규칙화(감속권한/그립초과/스핀/권장 max_speed 자동 산출).
+- **데스크톱 CLI** `analyze_bag.py` — `python3 analyze_bag.py <bag폴더>` → 자체완결 `report.html`.
+  matplotlib(한글 Nanum) 6패널 + 순수 JS 3D 뷰어 + 가이드. rclpy로 디시리얼라이즈.
+- **무터미널 웹앱** `webapp/` — 브라우저에 rosbag 폴더 드래그 → 클라이언트에서 전부 처리(ROS·터미널
+  불필요). **sql.js(WASM 인라인)로 .db3 SQLite 읽기 + 직접 짠 JS CDR 파서**. 폴더드롭/분할bag 병합/
+  yaml·mcap 판별, 그래프 클릭·호버 시 그 시점 수치 표시. `app.html`+`build.py`(sql.js 주입).
+- **검증:** ① 순수 파이썬 CDR 파서를 rclpy 정답과 **21/21 바이트 일치** 후 JS 포팅 ② **헤드리스
+  Chrome 엔드투엔드**로 실제 bag 분석 → 데스크톱과 stats 완전 일치, 3D/차트 렌더 확인. 그 과정에서
+  실버그 1건(`display:none` CSS로 결과 미표시) 발견·수정.
+- claude.ai 아티팩트 URL로 게시(팀 공유용). ⚠️ 아티팩트 CSP가 WASM 막으면 로컬 `webapp.html`
+  더블클릭이 확실한 대안(file://은 제약 없음). ※ 도구는 미커밋(원하면 커밋).
+
+### 3. 조향각 ↔ 요레이트 불일치 (실측 진단)
+`vesc_to_odom`이 `/odom` 요레이트를 **조향각 기구학**(`v·tanδ/L`, use_servo_cmd)으로 만들므로
+`/odom` wz = "조향이 의도한 요레이트", `/imu` gz = "실측". 대조 결과 **3겹 원인**:
+- **① 실제 슬립/언더스티어(물리):** `|odom|−|imu|` = **+0.98**(크래시봉)/+0.08(저속). 조향 지시보다
+  덜 돎. 고속·저그립일수록 큼 → 위 1번 그립문제와 동근.
+- **② ~100ms 시간지연(구조적):** 상호상관 최적지연 80~140ms, 지연보정 시 상관 0.55→**0.96**
+  (파형은 맞고 시간축만 어긋남). 카운터스티어([imu_stability_controller.cpp:31])는 *순간* 조향
+  기대치 vs *지연+LPF된* 실측을 비교 → 정상주행서도 phantom 오차 → 채터링.
+- **③ IMU 노이즈**(4번)가 실측 yaw 오염.
+
+**해결:** 셰이크다운 `use_imu:=false`(순수 L1+LUT부터) → Steering LUT를 BEXCO서 재보정
+(`lut_calibrator_node`, 현 NUC6 LUT라 조향→횡가속 매핑이 이 노면과 불일치) → 속도/MLA 낮춰 선형영역
+유지 → IMU 재투입 시 낮은 `yaw_rate_gain`(0.05)+지연보정.
+
+### 4. IMU 노이즈 — 원인=VESC IMU 필터 OFF (실측 + 라이브 설정)
+**실측(07-23 bag, = 필터 적용 *이전* 상태):** 정지 gyro z std **1.85 deg/s**(bias −0.4), 주행중
+gyro 차분 **12 deg/s/샘플**, accel 차분 **0.46 g/샘플**(가속도계 진동 심각), 발행 50Hz.
+- **원인:** VESC IMU의 gyro/accel LPF가 꺼져 있어 모터(1cm 근접) 진동이 날것으로 유입 + 200Hz→50Hz
+  데시메이션 안티에일리어싱 부재.
+- ⚠️ repo `vesc_appconf.xml`(7/8자)은 낡음 — 늘 실물 VESC를 볼 것([[jetson-vesc-yaml-divergence]] 패턴).
+
+**조치(사용자, 권고대로 VESC Tool서 방금 변경):** Accel/Gyro Filter=**HIGH**, gyro LPF=**30Hz**,
+accel LPF=**15Hz**, mag=False(INTERNAL IMU라 정확). ⇒ **07-23 노이즈 수치는 이제 무효, 재측정 필요.**
+
+**발견 버그 🐛:** IMU AHRS = Madgwick인데 **Madgwick Beta = 0.000** → 가속도(중력) 보정 0 →
+orientation(롤/피치)이 자이로 적분만으로 드리프트 → **롤-ESC가 엉터리 롤값으로 동작**.
+→ **Beta 0.1로 설정 + Write** (대기). ※ `rot_yaw −90°`는 요레이트(z축 불변)엔 무영향 — OK.
+※ 제어에서 **IMU 가속도 절대 미사용**(횡가속은 `vx·yaw_rate`) = 현 설계 정답, 유지.
+
+**대기(다음 실차):** ⓐ VESC Tool **Write** 확인 + Beta 0.1 ⓑ 정지5s+직선 짧게 **재로깅**
+(`ros2 bag record -o imu_check /sensors/imu/raw /odom`) ⓒ 웹앱/`imu_yaw.py`로 재측정.
+**합격 기준:** 정지 gyro std **<0.3~0.5 deg/s**, 주행 차분 **<3~5 deg/s**. 미달 시 컷오프 추가
+인하(gyro 20Hz)나 인플레이스 방진 패드.
+
+### 후속 과제 (우선순위)
+1. **IMU:** Write 확인 + Madgwick Beta 0.1 → 재로깅 → 재측정 (진행중).
+2. **셰이크다운:** `use_imu:=false max_speed:=2 max_lateral_accel:=5` 로 순수 L1+LUT 검증 (예정).
+3. **감속 권한 근본복구:** 직선 속도 스텝다운 테스트로 정량화 → VESC 브레이크 config 또는
+   profiler/kappa 규명.
+4. **코드 안전망:** 과대 a_lat/조향 포화 시 속도 하드컷, `recovery_lat_error` 1.0→0.5, 시동 자이로
+   바이어스 캘리브레이션 + 요레이트 median/deadband.
+5. **LUT 재보정:** BEXCO 실그립으로 `lut_calibrator_node` 실행.
+
+관련 메모: [[chicane-crash-no-decel]] [[stall-guard-antiwindup]] [[vesc-sensorless-startup-stall]]
+[[ifac-track-corner-ceiling]] [[jetson-vesc-yaml-divergence]]
+
+---
+
 ## 2026-07-23 — ✅ 출발 4초 덜그럭 원인 규명: 잘못 저장된 R (8.8→7.23mΩ). 벤치 해결 확인
 
 ### 결과 요약 (당일 학교 VESC 세션)
