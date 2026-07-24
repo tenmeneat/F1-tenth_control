@@ -105,7 +105,7 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
 
     <h2>주행상태 분석 그래프</h2>
     <div class="grid2">
-      <div><div class="clab hint">궤적 (map, 속도색 · 빨강=그립초과)</div><canvas id="traj" class="traj"></canvas></div>
+      <div><div class="clab hint" id="lab_traj">궤적 (map, 속도색 · 빨강=그립초과)</div><canvas id="traj" class="traj"></canvas></div>
       <div>
         <div class="chart"><div class="clab">요레이트 [rad/s] (파랑 odom · 주황 IMU)</div><canvas id="c_y" style="height:150px"></canvas></div>
         <div class="chart" style="margin-top:8px"><div class="clab">IMU raw (gyro deg/s · acc g)</div><canvas id="c_i" style="height:150px"></canvas></div>
@@ -236,6 +236,7 @@ async function analyze(buffers){
   // t0 = 전체 최소 타임스탬프 → 상대시간 + 정렬
   const getT=m=>Array.isArray(m)?m[0]:m.t;
   const all=[odom,imu,scanRaw,tfRaw,estop,mppi,drive,vesc,R.cmd_erpm,R.cmd_brake,R.cmd_servo,R.mode];
+  if(R.odom_pf!==odom)all.push(R.odom_pf);
   let t0=Infinity;all.forEach(a=>a.forEach(m=>{const v=getT(m);if(v<t0)t0=v;}));if(!isFinite(t0))t0=0;
   all.forEach(a=>{a.forEach(m=>{if(Array.isArray(m))m[0]=(m[0]-t0)/1e9;else m.t=(m.t-t0)/1e9;});a.sort((x,y)=>getT(x)-getT(y));});
   if(!odom.length)throw new Error("odom 메시지가 없습니다 (/odom·/pf/pose/odom).");
@@ -252,11 +253,18 @@ async function analyze(buffers){
       return {x:o.x+Math.cos(o.yaw)*b.x-Math.sin(o.yaw)*b.y,y:o.y+Math.sin(o.yaw)*b.x+Math.cos(o.yaw)*b.y,yaw:o.yaw+b.yaw};}
     if(ob.length){const b=latest(ob,t);return {x:b.x,y:b.y,yaw:b.yaw};}
     return null;}
+  // 위치 소스: /pf/pose/odom(=MCL이 map프레임에 직접 발행하는 localized pose)을 최우선.
+  // TF(map→odom)가 없어도(sim모드는 map→odom 미발행, 또는 미기록) map프레임 위치를 얻는다.
+  const pf=R.odom_pf;
+  function mapPoseBest(t){
+    if(pf.length){const q=latest(pf,t);return {x:q.x,y:q.y,yaw:q.yaw};}
+    return mapPose(t);}
+  const poseSrc=pf.length?"/pf/pose/odom (map)":(hasMap?"TF map→base_link":"odom 원본 (map 아님 · 정합 참고불가)");
 
   // pose(map) per odom + 파생
   const N=odom.length;
   const track=[];
-  for(let i=0;i<N;i++){const o=odom[i];const p=mapPose(o.t)||{x:o.x,y:o.y,yaw:o.yaw};
+  for(let i=0;i<N;i++){const o=odom[i];const p=mapPoseBest(o.t)||{x:o.x,y:o.y,yaw:o.yaw};
     track.push([o.t,p.x,p.y,p.yaw,o.vx,o.vx*o.wz,0,o.wz]);}
   // dvx/dt (중앙차분 + 3-tap 평활)
   for(let i=0;i<N;i++){const im=Math.max(0,i-1),ip=Math.min(N-1,i+1);const dt=track[ip][0]-track[im][0];
@@ -266,7 +274,7 @@ async function analyze(buffers){
   // LiDAR map 프레임 프레임들 (≤140)
   const LASER_FWD=0.27,MAXF=140,STRIDE=6;const step=Math.max(1,Math.floor(scanRaw.length/MAXF));
   const scans=[];
-  for(let k=0;k<scanRaw.length;k+=step){const s=scanRaw[k];const p=mapPose(s.t);if(!p)continue;
+  for(let k=0;k<scanRaw.length;k+=step){const s=scanRaw[k];const p=mapPoseBest(s.t);if(!p)continue;
     const lx=p.x+Math.cos(p.yaw)*LASER_FWD,ly=p.y+Math.sin(p.yaw)*LASER_FWD;const pts=[];
     const cap=Math.min(s.rmax,15);
     for(let i=0;i<s.ranges.length;i+=STRIDE){const r=s.ranges[i];if(!(r>0.05&&r<cap))continue;
@@ -298,7 +306,7 @@ async function analyze(buffers){
   const modeStr=R.mode.map(x=>[x[0],x[1]]);
 
   const S={track,scans,wp,imu:IMU,estop,mppi,hasMap,dur:track.length?track[N-1][0]:0,
-    cmd,plannedVx,xtrack,vesc:vescS,cmdErpm,cmdBrake,cmdServo,modeStr,odomLabel};
+    cmd,plannedVx,xtrack,vesc:vescS,cmdErpm,cmdBrake,cmdServo,modeStr,odomLabel,poseSrc};
   const D=diagnose(S,GRIP);
   return Object.assign(S,D);
 }
@@ -511,6 +519,7 @@ function renderReport(D,name){
   document.getElementById('reccmd').innerHTML=recHtml;
   document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] (주황선 = 그립 ±${GRIP})`;
   document.getElementById('lab_v').innerHTML='속도 vx [m/s] — 실측(초록)'+(D.cmd?` · 명령(흰 점선, ${D.cmd.src})`:'')+(D.plannedVx?' · 계획(보라 점선)':'');
+  document.getElementById('lab_traj').textContent=`궤적 (map · 위치소스: ${D.poseSrc} · 속도색·빨강=그립초과)`;
   // 캔버스
   gl=document.getElementById('gl');ctx=gl.getContext('2d');
   chV=document.getElementById('c_v');chA=document.getElementById('c_a');chD=document.getElementById('c_d');

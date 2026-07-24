@@ -4,6 +4,71 @@
 
 ---
 
+## 2026-07-25 — ✅ "경로 ≠ MCL / 출발 조향 랜덤" 근본원인 = 맵 불일치 규명 + F1_MAP 통일 origin/main 반영 + 5랩 라이브 검증 (데드존은 푸시스타트 회피)
+
+07-24 실차 rosbag(`~/rosbag_log/run_0724_*` 8개)을 웹앱/직접 CDR 파싱으로 분석해, 오래 끌던
+두 증상 — **① 글로벌 경로와 MCL이 한 번도 안 맞음 ② 출발하자마자 매번 왼/오 제멋대로 조향** —
+의 근본원인이 **동일하게 "맵 불일치"** 임을 확정하고, F1_MAP 통일을 origin/main에 반영해
+학교 팀이 **5랩 완주**로 라이브 검증했다.
+
+### 1. 근본원인 = 차와 경로가 서로 다른 지도를 봄 (맵 불일치)
+bag의 `/pf/pose/odom`(MCL 추정)과 `/global_waypoints`(경로)를 같은 map 프레임에서 좌표 대조:
+- **pf(차 위치) x[3.8, 8.8]** (전부 양수) vs **global(경로) x[-18.5, 0.0]** (전부 음수~0) → **겹침 0.**
+- global origin `[-20.3, -1.4]` = **ifac_track**. pf가 놓인 x[3.8,8.8] = 젯슨 SLAM **`map`**.
+- ⇒ **MCL은 `map`에 localize, global_planning은 `ifac_track` 라인을 발행.** 로컬라이제이션
+  자체가 틀린 게 아니라, 차와 경로가 **다른 지도**에 있어 영원히 안 맞은 것.
+
+### 2. "출발 조향 매번 왼/오 랜덤" = 같은 원인 (8개 bag 교차확인)
+각 bag의 pf 시작 pose·경로 최근접점·출발 15프레임 평균 조향을 뽑음:
+- **pf 시작 위치가 런마다 -7.2 ~ +11.3m로 제각각** — 초기포즈(`/initialpose`) 미설정 → MCL이
+  매번 다른 데로 수렴. (사용자가 봤던 "이니셜포즈 안 맞음"의 정체)
+- 컨트롤러는 그 (틀린) pose로 경로 최근접점을 찾아 L1 타깃을 잡음 → 차가 맵 밖에 떨어져 있으면
+  타깃 방향이 arbitrary → **출발 조향 +21.8°(왼끝) ~ −20.4°(오른끝)로 매번 뒤집힘.**
+- 즉 조향 로직 버그가 아니라 **localization·맵 입력이 흔들려서** 컨트롤러 입력이 매번 달라진 것.
+
+### 3. 부수 발견 — sim/real 프레임 오염
+bag의 /tf에 **`map→odom`(실차 MCL)과 `map→ego_racecar/base_link`(시뮬 gym, last=(26.7,40.1))가
+공존.** 팀원이 "다 실차 모드"라 했지만 **gym_bridge(시뮬)가 같이 떠 있었다** → map→odom 오염.
+⇒ 실차는 f110 브링업만, ego_racecar 프레임 보이면 시뮬 혼입.
+
+### 4. 해결 — F1_MAP 환경변수로 세 스택 맵 통일 (origin/main 반영)
+- `mcl_launch.py`/`global_planning.launch.py`/`local_planning.launch.py`가 `F1_MAP` env(기본
+  ifac_track)로 같은 맵을 보게 통일. **origin/main 커밋 35ff8af** (랩탑 clean worktree로 push).
+- **맵 파일 저장 위치 확정**: MCL·local 둘 다 **`particle_filter_cpp/maps/<F1_MAP>.{png,yaml}`** 에서
+  읽음 = `src/monte_carlo_localization/maps/` + `install/particle_filter_cpp/share/particle_filter_cpp/maps/`
+  (젯슨 install은 심링크 아님 → 둘 다, 또는 `colcon build --packages-select monte_carlo_localization`).
+- ⚠️ **global은 png 대신 raceline을 씀** — 새 맵은 `offline_trajectory_generator/output/<map>/`
+  raceline **수동 재생성** 필수(안 하면 ifac_track로 폴백 = 또 불일치). [[f1map-name-unification]]
+
+### 5. 라이브 검증 ✅ — 5랩 완주
+학교 팀이 F1_MAP 통일 스택으로 **max_speed 2.5 / min_speed 0.5로 5랩 완주.** 맵 정합 후
+pose·경로가 같은 지도를 봐서 컨트롤러 타깃 정상화 = **1·2번 진단 확정.**
+
+### 6. 웹앱(bag analyzer) 수정
+옛 웹앱은 차 위치를 `map→odom→base_link` TF 합성으로 그렸는데, 이 bag들의 **map→odom이 거의
+identity(0)** 라 사실상 생 odom(원점 근처)을 찍어 경로와 어긋나 **보였다**(착시). **`/pf/pose/odom`
+(진짜 map프레임 추정)을 직접 쓰도록 수정** + "위치소스" 라벨 표시. 같은 아티팩트 URL 유지.
+※ 수정 후엔 웹앱이 **진실(차≠경로, 맵 불일치)** 을 정직하게 보여줌 — 표시 버그가 아니라 데이터가 그랬던 것.
+
+### 7. VESC 데드존 — 미해결, 푸시스타트로 회피 중
+5랩 완주의 **출발은 푸시스타트**(사용자 지시). 즉 데드존 자체는 미해결이고 회피만 지속.
+- min_speed 0.5가 센서리스 데드존 상단(0.49) **바로 위**라 랩 중 재스톨은 안 남(부수효과, 아슬아슬).
+- 근본책 미착수 — 다음 세션: **오픈루프 전류 ~20A 상향**(친구 제안, HFI보다 우선 시도) → 안 되면 HFI.
+  [[vesc-deadzone-confirmed-pushstart]]
+
+### 후속 과제 (다음 실차 세션)
+1. **데드존 근본해결**: VESC Tool로 오픈루프 전류 ~20A 상향(먼저) → 미해결 시 HFI(돌극성 marginal).
+2. **초기포즈**: 매 시작 전 RViz 2D Pose Estimate로 실제 출발점 정확히 찍기(통일해도 이게 없으면 pose 튐).
+3. **맵 통일 실사용**: `export F1_MAP=<맵>` 후 7터미널 기동, `--show-args`로 셋 다 같은 맵인지 확인.
+   젯슨은 통일 안 된 로컬 버전 남아있을 수 있음 → `git checkout` 후 pull.
+4. **raceline 재생성**: 새 맵마다 `offline_trajectory_generator/output/<map>/` (global 정합).
+5. **gym_bridge 시뮬 혼입 방지**: 실차는 f110 브링업만.
+
+관련 메모: [[f1map-name-unification]] [[vesc-deadzone-confirmed-pushstart]]
+[[obstacle-avoidance-chain-unwired]] [[ifac-track-map-v1-v2-mismatch]]
+
+---
+
 ## 2026-07-24 — 🔍 시케인 크래시 근본원인(감속권한 0) 규명 + bag 분석도구 제작 + 조향↔요레이트/IMU 노이즈 진단
 
 07-23 실차 rosbag(`~/Downloads/rosbag2_2026_07_23-*` 5개)을 분석. 시케인 벽 충돌의 근본원인을
