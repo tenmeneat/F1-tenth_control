@@ -43,6 +43,27 @@ a_lat 초과·조향 포화 시 속도 하드컷 = limit-cycle 차단, `recovery
 - claude.ai 아티팩트 URL로 게시(팀 공유용). ⚠️ 아티팩트 CSP가 WASM 막으면 로컬 `webapp.html`
   더블클릭이 확실한 대안(file://은 제약 없음). ※ 도구는 미커밋(원하면 커밋).
 
+### 2-B. 웹앱 대폭 확장 — f1rec 풀 bag 완전 분석 + 통합 로깅 alias
+자율주행 분석에 필요한 토픽을 전부 담는 통합 로깅 alias와, 그걸 하나도 안 빠지고 읽는 웹앱 확장.
+- **`f1rec` alias** (`~/.zshrc` 랩탑 + 젯슨용 heredoc 제공): ROS/워크스페이스 소싱 포함, 매 실행
+  `~/rosbags/run_MMDD_HHMMSS/`로 타임스탬프 저장(덮어쓰기 X). 토픽: drive_autonomous/mppi/drive·
+  joy·drive_mode·mppi_active·estop_lock·pf/pose/odom·odom·tf·tf_static·scan·imu(raw/data)·
+  global_waypoints·local_waypoints·commands(motor speed/brake, servo)·sensors/core. ⚠️ **젯슨에서**
+  녹화할 것(랩탑 wifi는 /scan 드롭). 젯슨 셸=zsh 확인.
+- **웹앱 파서 = 토픽명 기준으로 재작성** — 겹치는 토픽 자동 분류: `/odom`+`/pf/pose/odom`(전자 우선),
+  Bool 2개(`/estop_lock`↔`/mppi_active` 분리), IMU 2개, drive 3개. 임의 네임스페이스(sim
+  `/ego_racecar/odom`)는 타입 폴백. (이전엔 타입으로만 분류해 중복 타입을 섞던 **잠재 버그** 수정.)
+- **신규 CDR 파서**(JS): AckermannDriveStamped·f110_msgs/WpntArray·std_msgs/String·Float64 —
+  rclpy **합성 라운드트립**(serialize→parse)으로 검증. vesc_msgs/VescStateStamped는 이 랩탑에
+  패키지 부재라 표준 f1tenth 레이아웃 best-effort(손수 CDR 바이트로 헤드리스 검증: 전류·전압 정확).
+- **신규 시각화**: 속도차트에 실측+**명령**+**계획 vx** 오버레이(명령 vs 실측 vs 계획), 명령 조향각
+  차트(±0.41), **크로스트랙 오차**(글로벌 경로 최근접), **VESC 전류·전압**, 브레이크 명령(0이면
+  채널 미사용 즉시 보임), **모드 타임라인 스트립**(E-STOP/MANUAL/AUTO + MPPI 색띠), 3D에 글로벌
+  경로. 각 차트는 해당 토픽 없으면 자동 숨김.
+- **검증**: 신규 토픽 전부 든 합성 bag을 헤드리스 Chrome에서 → odomLabel `/odom`(겹침 분류),
+  cross-track 0.117(합성 오프셋 일치), 명령/계획/VESC 값·모든 차트 렌더 정확, JS 에러 0. 기존
+  크래시 bag 회귀 완전 동일(peakAl 22.2, 진단 3건). 같은 아티팩트 URL 유지.
+
 ### 3. 조향각 ↔ 요레이트 불일치 (실측 진단)
 `vesc_to_odom`이 `/odom` 요레이트를 **조향각 기구학**(`v·tanδ/L`, use_servo_cmd)으로 만들므로
 `/odom` wz = "조향이 의도한 요레이트", `/imu` gz = "실측". 대조 결과 **3겹 원인**:

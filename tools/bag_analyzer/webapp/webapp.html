@@ -52,6 +52,7 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
 #readout b{color:var(--fg)}
 #tip{position:fixed;pointer-events:none;z-index:50;display:none;background:#0a0d12ee;border:1px solid var(--accent);
   border-radius:6px;padding:6px 9px;font-size:12px;font-variant-numeric:tabular-nums;color:var(--fg);white-space:pre}
+#modestrip{width:100%;height:22px;display:none;border:1px solid var(--line);border-radius:6px;margin:8px 0 2px;cursor:crosshair}
 </style></head>
 <body>
 <header>
@@ -89,8 +90,9 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
       <span><span class="dot" style="background:#58a6ff"></span>LiDAR</span>
       <span><span class="dot" style="background:#bc8cff"></span>글로벌 경로</span>
     </div>
+    <canvas id="modestrip" title="주행 모드 타임라인"></canvas>
     <div class="charts">
-      <div class="chart"><div class="clab">속도 vx [m/s]</div><canvas id="c_v"></canvas></div>
+      <div class="chart"><div class="clab" id="lab_v">속도 vx [m/s]</div><canvas id="c_v"></canvas></div>
       <div class="chart"><div class="clab" id="lab_a">횡가속도 a_lat = vx·wz [m/s²]</div><canvas id="c_a"></canvas></div>
       <div class="chart"><div class="clab">종가속도 dvx/dt [m/s²] (0 아래 = 감속)</div><canvas id="c_d"></canvas></div>
     </div>
@@ -108,6 +110,14 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
         <div class="chart"><div class="clab">요레이트 [rad/s] (파랑 odom · 주황 IMU)</div><canvas id="c_y" style="height:150px"></canvas></div>
         <div class="chart" style="margin-top:8px"><div class="clab">IMU raw (gyro deg/s · acc g)</div><canvas id="c_i" style="height:150px"></canvas></div>
       </div>
+    </div>
+
+    <h2 id="h_extra" style="display:none">명령 · 경로 · VESC <span class="hint">— 해당 토픽이 있을 때만</span></h2>
+    <div class="charts">
+      <div class="chart" id="wrap_steer" style="display:none"><div class="clab">명령 조향각 [rad] <span class="hint">(±0.41 = 물리한계)</span></div><canvas id="c_steer" style="height:130px"></canvas></div>
+      <div class="chart" id="wrap_x" style="display:none"><div class="clab">크로스트랙 오차 [m] <span class="hint">(글로벌 경로 최근접 거리)</span></div><canvas id="c_x" style="height:130px"></canvas></div>
+      <div class="chart" id="wrap_vesc" style="display:none"><div class="clab">VESC — 모터전류 [A] · 입력전압 [V] <span class="hint">(best-effort, 미검증 레이아웃)</span></div><canvas id="c_vesc" style="height:130px"></canvas></div>
+      <div class="chart" id="wrap_cmd" style="display:none"><div class="clab">VESC 명령 — ERPM(파랑)·브레이크(빨강)·서보(초록)</div><canvas id="c_cmd" style="height:130px"></canvas></div>
     </div>
   </div>
 </div>
@@ -344,33 +354,60 @@ function pTf(c){const n=c.u32();const out=[];for(let i=0;i<n;i++){const fid=hdr(
 function pFloat(c){return c.f64();}
 function pBool(c){return c.u8v()!==0;}
 function pJoy(c){hdr(c);const axes=c.seqF32();const btns=c.seqI32();return {axes:axes,btns:btns};}
+// 신규(합성 라운드트립 검증됨): Ackermann/WpntArray/String
+function pAckermann(c){hdr(c);const st=c.f32();c.f32();const sp=c.f32();const ac=c.f32();c.f32();return {steer:st,speed:sp,accel:ac};}
+function pWpntArray(c){hdr(c);const n=c.u32();const out=[];for(let i=0;i<n;i++){c.i32();
+  c.f64();c.f64();const x=c.f64(),y=c.f64(),dr=c.f64(),dl=c.f64(),psi=c.f64(),kap=c.f64(),vx=c.f64();c.f64();
+  out.push({x:x,y:y,dr:dr,dl:dl,psi:psi,kap:kap,vx:vx});}return out;}
+function pString(c){return c.str();}
+// vesc_msgs/VescStateStamped — 표준 f1tenth 레이아웃(best-effort, 이 랩탑에 vesc_msgs 없어 미검증)
+function pVesc(c){hdr(c);const volt=c.f64();c.f64();const cm=c.f64(),ci=c.f64(),erpm=c.f64(),duty=c.f64();
+  return {volt:volt,curr:cm,curr_in:ci,erpm:erpm,duty:duty};}
 
 // ══ 상수 (control_map_node 기준) ══
 const WHEELBASE=0.33,MAX_STEER=0.41,CAR_W=0.31,CAR_L=0.58,DEG2RAD=Math.PI/180;
 const R_MIN=WHEELBASE/Math.tan(MAX_STEER);
 let GRIP=5.0;
 
-// ══ bag 파싱: 한 .db3 → 원시 메시지(절대 타임스탬프) ══
+// ══ bag 파싱: 한 .db3 → 원시 메시지(절대 타임스탬프). 토픽명 우선 분류(겹치는 타입 자동 구분) ══
+const RAW_KEYS=["odom_vesc","odom_pf","odom_gen","imu_raw","imu_data","imu_gen","scanRaw","tfRaw",
+  "estop","mppi","drive","drive_auto","drive_mppi","vesc","cmd_erpm","cmd_brake","cmd_servo","mode"];
 function parseDb(bytes,SQL){
   const db=new SQL.Database(bytes);
   const tq=db.exec("SELECT id,name,type FROM topics")[0];
   if(!tq)throw new Error("topics 테이블이 없습니다 (rosbag2 sqlite(.db3)가 맞나요?)");
   const TOPIC={};tq.values.forEach(r=>TOPIC[r[0]]={name:r[1],type:r[2]});
   const stmt=db.prepare("SELECT topic_id,timestamp,data FROM messages ORDER BY timestamp");
-  const R={odom:[],imu:[],scanRaw:[],tfRaw:[],estop:[],joy:[]};
+  const R={};RAW_KEYS.forEach(k=>R[k]=[]);R.wpnts=null;
   while(stmt.step()){
     const row=stmt.get(),tid=row[0],ts=row[1],blob=row[2];
-    const tp=TOPIC[tid];if(!tp)continue;
+    const tp=TOPIC[tid];if(!tp)continue;const nm=tp.name,ty=tp.type;
     const u8=blob instanceof Uint8Array?blob:new Uint8Array(blob);
-    try{switch(tp.type){
-      case "nav_msgs/msg/Odometry":{const m=pOdom(new CDR(u8));m.t=ts;R.odom.push(m);break;}
-      case "sensor_msgs/msg/Imu":{const m=pImu(new CDR(u8));m.t=ts;R.imu.push(m);break;}
-      case "sensor_msgs/msg/LaserScan":{const m=pScan(new CDR(u8));m.t=ts;R.scanRaw.push(m);break;}
-      case "tf2_msgs/msg/TFMessage":{R.tfRaw.push({t:ts,tr:pTf(new CDR(u8))});break;}
-      case "std_msgs/msg/Bool":{R.estop.push([ts,pBool(new CDR(u8))]);break;}
-      case "sensor_msgs/msg/Joy":{const m=pJoy(new CDR(u8));m.t=ts;R.joy.push(m);break;}
-      default:break;
-    }}catch(e){/* 개별 메시지 파싱 실패는 건너뜀 */}
+    const P=fn=>{const m=fn(new CDR(u8));m.t=ts;return m;};
+    try{
+      // ── 토픽명 기준(겹치는 토픽 자동 분류) ──
+      if(nm==="/odom")R.odom_vesc.push(P(pOdom));
+      else if(nm==="/pf/pose/odom")R.odom_pf.push(P(pOdom));
+      else if(nm==="/sensors/imu/raw")R.imu_raw.push(P(pImu));
+      else if(nm==="/imu/data")R.imu_data.push(P(pImu));
+      else if(nm==="/estop_lock")R.estop.push([ts,pBool(new CDR(u8))]);
+      else if(nm==="/mppi_active")R.mppi.push([ts,pBool(new CDR(u8))]);
+      else if(nm==="/drive")R.drive.push(P(pAckermann));
+      else if(nm==="/drive_autonomous")R.drive_auto.push(P(pAckermann));
+      else if(nm==="/drive_mppi")R.drive_mppi.push(P(pAckermann));
+      else if(nm==="/global_waypoints")R.wpnts=pWpntArray(new CDR(u8));
+      else if(nm==="/sensors/core")R.vesc.push(P(pVesc));
+      else if(nm==="/commands/motor/speed")R.cmd_erpm.push([ts,pFloat(new CDR(u8))]);
+      else if(nm==="/commands/motor/brake")R.cmd_brake.push([ts,pFloat(new CDR(u8))]);
+      else if(nm==="/commands/servo/position")R.cmd_servo.push([ts,pFloat(new CDR(u8))]);
+      else if(nm==="/drive_mode")R.mode.push([ts,pString(new CDR(u8))]);
+      // ── 타입 폴백(임의 네임스페이스: 예 sim의 /ego_racecar/odom, /scan, /tf) ──
+      else if(ty==="nav_msgs/msg/Odometry")R.odom_gen.push(P(pOdom));
+      else if(ty==="sensor_msgs/msg/Imu")R.imu_gen.push(P(pImu));
+      else if(ty==="sensor_msgs/msg/LaserScan")R.scanRaw.push(P(pScan));
+      else if(ty==="tf2_msgs/msg/TFMessage")R.tfRaw.push({t:ts,tr:pTf(new CDR(u8))});
+      else if(ty==="ackermann_msgs/msg/AckermannDriveStamped")R.drive.push(P(pAckermann));
+    }catch(e){/* 개별 메시지 파싱 실패는 건너뜀 */}
   }
   stmt.free();db.close();return R;
 }
@@ -379,13 +416,21 @@ function parseDb(bytes,SQL){
 async function analyze(buffers){
   const SQL=await initSqlJs({wasmBinary:b64ToBytes(WASM_B64)});
   const parts=buffers.map(b=>parseDb(b,SQL));
-  const odom=[],imu=[],scanRaw=[],tfRaw=[],estop=[],joy=[];
-  parts.forEach(p=>{odom.push(...p.odom);imu.push(...p.imu);scanRaw.push(...p.scanRaw);tfRaw.push(...p.tfRaw);estop.push(...p.estop);joy.push(...p.joy);});
+  const R={};RAW_KEYS.forEach(k=>R[k]=[]);let wpnts=null;
+  parts.forEach(p=>{RAW_KEYS.forEach(k=>{const s=p[k];if(s)for(let i=0;i<s.length;i++)R[k].push(s[i]);});if(p.wpnts)wpnts=p.wpnts;});
+  // 겹치는 토픽 자동 선택 (우선순위)
+  const odom=R.odom_vesc.length?R.odom_vesc:(R.odom_pf.length?R.odom_pf:R.odom_gen);
+  const odomLabel=R.odom_vesc.length?"/odom":(R.odom_pf.length?"/pf/pose/odom":"odom");
+  const imu=R.imu_raw.length?R.imu_raw:(R.imu_data.length?R.imu_data:R.imu_gen);
+  const drive=R.drive.length?R.drive:(R.drive_auto.length?R.drive_auto:R.drive_mppi);
+  const driveLabel=R.drive.length?"/drive":(R.drive_auto.length?"/drive_autonomous":(R.drive_mppi.length?"/drive_mppi":""));
+  const scanRaw=R.scanRaw,tfRaw=R.tfRaw,estop=R.estop,mppi=R.mppi,vesc=R.vesc;
+  // t0 = 전체 최소 타임스탬프 → 상대시간 + 정렬
   const getT=m=>Array.isArray(m)?m[0]:m.t;
-  let t0=Infinity;[odom,imu,scanRaw,tfRaw,estop,joy].forEach(a=>a.forEach(m=>{const v=getT(m);if(v<t0)t0=v;}));
-  const relSort=a=>{a.forEach(m=>{if(Array.isArray(m))m[0]=(m[0]-t0)/1e9;else m.t=(m.t-t0)/1e9;});a.sort((x,y)=>getT(x)-getT(y));};
-  [odom,imu,scanRaw,tfRaw,estop,joy].forEach(relSort);
-  if(!odom.length)throw new Error("odom(/odom) 메시지가 없습니다.");
+  const all=[odom,imu,scanRaw,tfRaw,estop,mppi,drive,vesc,R.cmd_erpm,R.cmd_brake,R.cmd_servo,R.mode];
+  let t0=Infinity;all.forEach(a=>a.forEach(m=>{const v=getT(m);if(v<t0)t0=v;}));if(!isFinite(t0))t0=0;
+  all.forEach(a=>{a.forEach(m=>{if(Array.isArray(m))m[0]=(m[0]-t0)/1e9;else m.t=(m.t-t0)/1e9;});a.sort((x,y)=>getT(x)-getT(y));});
+  if(!odom.length)throw new Error("odom 메시지가 없습니다 (/odom·/pf/pose/odom).");
 
   // TF 합성 (map→odom→base_link)
   const mo=tfRaw.flatMap(f=>f.tr.filter(x=>x.fid==="map"&&x.child==="odom").map(x=>({t:f.t,...x})));
@@ -423,7 +468,29 @@ async function analyze(buffers){
   // IMU 시리즈
   const IMU={t:imu.map(m=>m.t),gz_raw:imu.map(m=>m.gz),gz_rad:imu.map(m=>m.gz*DEG2RAD),ax:imu.map(m=>m.ax),ay:imu.map(m=>m.ay)};
 
-  const S={track,scans,wp:[],imu:IMU,estop,hasMap,dur:track.length?track[N-1][0]:0};
+  // ── 신규: 명령(조향/속도) ──
+  const cmd=drive.length?{t:drive.map(d=>d.t),speed:drive.map(d=>d.speed),steer:drive.map(d=>d.steer),src:driveLabel}:null;
+
+  // ── 신규: 글로벌 경로 → 3D경로 + 크로스트랙 오차 + 계획속도 ──
+  let wp=[],plannedVx=null,xtrack=null;
+  if(wpnts&&wpnts.length){
+    wp=wpnts.map(w=>[w.x,w.y]);
+    const wt=[],wv=[],xv=[];
+    for(let i=0;i<N;i++){const px=track[i][1],py=track[i][2];let best=1e18,bvx=0;
+      for(let j=0;j<wpnts.length;j++){const dx=wpnts[j].x-px,dy=wpnts[j].y-py,d=dx*dx+dy*dy;if(d<best){best=d;bvx=wpnts[j].vx;}}
+      wt.push(track[i][0]);wv.push(bvx);xv.push(Math.sqrt(best));}
+    plannedVx={t:wt,v:wv};xtrack={t:wt,v:xv};
+  }
+
+  // ── 신규: VESC / 커맨드 / 모드 ──
+  const vescS=vesc.length?{t:vesc.map(v=>v.t),curr:vesc.map(v=>v.curr),volt:vesc.map(v=>v.volt),erpm:vesc.map(v=>v.erpm)}:null;
+  const cmdErpm=R.cmd_erpm.length?{t:R.cmd_erpm.map(x=>x[0]),v:R.cmd_erpm.map(x=>x[1])}:null;
+  const cmdBrake=R.cmd_brake.length?{t:R.cmd_brake.map(x=>x[0]),v:R.cmd_brake.map(x=>x[1])}:null;
+  const cmdServo=R.cmd_servo.length?{t:R.cmd_servo.map(x=>x[0]),v:R.cmd_servo.map(x=>x[1])}:null;
+  const modeStr=R.mode.map(x=>[x[0],x[1]]);
+
+  const S={track,scans,wp,imu:IMU,estop,mppi,hasMap,dur:track.length?track[N-1][0]:0,
+    cmd,plannedVx,xtrack,vesc:vescS,cmdErpm,cmdBrake,cmdServo,modeStr,odomLabel};
   const D=diagnose(S,GRIP);
   return Object.assign(S,D);
 }
@@ -471,7 +538,7 @@ function diagnose(S,grip){
 // ══ 렌더/뷰어 (데스크톱 도구의 3D 뷰어 코드 기반) ══
 let DATA,track,T0,T1,DUR,scans,wp,VMAX;
 let cam,bounds,cur=0,playing=false,rate=1,lastTs=0;
-let gl,ctx,B,chV,chA,chD,chY,chI,trajCv;
+let gl,ctx,B,chV,chA,chD,chY,chI,trajCv,chSteer,chX,chVesc,chCmd,modeStrip;
 
 function speedColor(v){const x=Math.min(1,Math.max(0,v/VMAX));
   const r=Math.round(57+x*(229-57)),g=Math.round(211-x*(211-72)),b=Math.round(83-x*(83-77));return `rgb(${r},${g},${b})`;}
@@ -527,16 +594,50 @@ function drawChart(cv,series,opt){opt=opt||{};const c=cv.getContext('2d'),W=cv.c
   c.strokeStyle='#2a313c';c.lineWidth=1;
   if(opt.zeroCenter){c.beginPath();c.moveTo(pad,Y(0));c.lineTo(W-pad,Y(0));c.stroke();}
   if(opt.grip){c.strokeStyle='#f5a623';c.setLineDash([4,3]);[opt.grip,-opt.grip].forEach(g=>{c.beginPath();c.moveTo(pad,Y(g));c.lineTo(W-pad,Y(g));c.stroke();});c.setLineDash([]);}
-  series.forEach(s=>{c.strokeStyle=s.color;c.lineWidth=1.3;c.beginPath();let started=false;
+  series.forEach(s=>{c.strokeStyle=s.color;c.lineWidth=s.w||1.3;c.setLineDash(s.dash||[]);c.beginPath();let started=false;
     for(let i=0;i<s.t.length;i++){const x=X(s.t[i]),y=Y(s.v[i]);if(!started){c.moveTo(x,y);started=true;}else c.lineTo(x,y);}c.stroke();});
+  c.setLineDash([]);
   if(opt.playhead){const px=X(cur);c.strokeStyle='#e6edf3';c.lineWidth=1;c.beginPath();c.moveTo(px,pad);c.lineTo(px,Ht-pad);c.stroke();}}
 function drawCharts(){const T=track.map(p=>p[0]);
-  drawChart(chV,[{t:T,v:track.map(p=>p[4]),color:'#39d353'}],{playhead:true});
+  // 속도: 실측(초록) + 명령(흰 점선) + 계획(보라 점선) 오버레이
+  const vs=[{t:T,v:track.map(p=>p[4]),color:'#39d353'}];
+  if(DATA.cmd)vs.push({t:DATA.cmd.t,v:DATA.cmd.speed,color:'#e6edf3',dash:[5,3],w:1});
+  if(DATA.plannedVx)vs.push({t:DATA.plannedVx.t,v:DATA.plannedVx.v,color:'#bc8cff',dash:[2,3],w:1});
+  drawChart(chV,vs,{playhead:true});
   drawChart(chA,[{t:T,v:track.map(p=>p[5]),color:'#e5484d'}],{zeroCenter:true,grip:GRIP,playhead:true});
   drawChart(chD,[{t:T,v:track.map(p=>p[6]),color:'#2dd4bf'}],{zeroCenter:true,playhead:true});}
 function drawStaticCharts(){const T=track.map(p=>p[0]);
   drawChart(chY,[{t:T,v:track.map(p=>p[7]),color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.gz_rad,color:'#f5a623'}],{zeroCenter:true});
-  drawChart(chI,[{t:DATA.imu.t,v:DATA.imu.gz_raw,color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.ax,color:'#e5484d'},{t:DATA.imu.t,v:DATA.imu.ay,color:'#39d353'}],{zeroCenter:true});}
+  drawChart(chI,[{t:DATA.imu.t,v:DATA.imu.gz_raw,color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.ax,color:'#e5484d'},{t:DATA.imu.t,v:DATA.imu.ay,color:'#39d353'}],{zeroCenter:true});
+  if(DATA.cmd)drawChart(chSteer,[{t:DATA.cmd.t,v:DATA.cmd.steer,color:'#e3b341'}],{zeroCenter:true,grip:MAX_STEER});
+  if(DATA.xtrack)drawChart(chX,[{t:DATA.xtrack.t,v:DATA.xtrack.v,color:'#4c8dff'}],{});
+  if(DATA.vesc)drawChart(chVesc,[{t:DATA.vesc.t,v:DATA.vesc.curr,color:'#e5484d'},{t:DATA.vesc.t,v:DATA.vesc.volt,color:'#39d353'}],{});
+  if(DATA.cmdBrake)drawChart(chCmd,[{t:DATA.cmdBrake.t,v:DATA.cmdBrake.v,color:'#e5484d'}],{});
+  drawModeStrip();}
+
+// ── 모드 타임라인 스트립 ──
+function modeInfo(t){
+  let es=false;for(const[et,ev]of(DATA.estop||[]))if(et<=t)es=ev;
+  if(es)return{c:'#e5484d',label:'E-STOP'};
+  let md=null;for(const[mt,mv]of(DATA.modeStr||[]))if(mt<=t)md=mv;
+  if(md){const a=(md||'').toUpperCase();
+    if(a.includes('AUTO'))return{c:'#30a46c',label:'AUTO'};
+    if(a.includes('MANUAL'))return{c:'#6b7280',label:'MANUAL'};
+    if(a.includes('STOP'))return{c:'#e5484d',label:md};
+    return{c:'#4c8dff',label:md};}
+  return{c:'#3b424d',label:'—'};
+}
+function mppiOn(t){let v=false;for(const[mt,mv]of(DATA.mppi||[]))if(mt<=t)v=mv;return v;}
+function drawModeStrip(){if(!modeStrip)return;const c=modeStrip.getContext('2d'),W=modeStrip.clientWidth,H=modeStrip.clientHeight;
+  c.clearRect(0,0,W,H);
+  for(let x=0;x<W;x++){const t=T0+(x/W)*DUR;c.fillStyle=modeInfo(t).c;c.fillRect(x,0,1,H);
+    if(mppiOn(t)){c.fillStyle='#bc8cff';c.fillRect(x,H-4,1,4);}}
+  // 세그먼트 라벨(겹침 방지: 최소 46px 간격)
+  c.font='11px system-ui';c.textBaseline='middle';let prev='',lastX=-100;
+  for(let x=0;x<W;x+=2){const l=modeInfo(T0+(x/W)*DUR).label;
+    if(l!==prev){if(x-lastX>46){c.fillStyle='#0a0d12';c.fillText(l,x+4,H/2+1);c.fillStyle='#e6edf3';c.fillText(l,x+3,H/2);lastX=x;}prev=l;}}
+  // playhead
+  const px=(cur-T0)/DUR*W;c.strokeStyle='#fff';c.lineWidth=1;c.beginPath();c.moveTo(px,0);c.lineTo(px,H);c.stroke();}
 
 // ── 궤적 탑다운 ──
 function drawTrajectory(){const cv=trajCv,c=cv.getContext('2d'),W=cv.clientWidth,H=cv.clientHeight;c.clearRect(0,0,W,H);
@@ -548,7 +649,7 @@ function drawTrajectory(){const cv=trajCv,c=cv.getContext('2d'),W=cv.clientWidth
 
 // ── 캔버스 리사이즈 ──
 function fit(cv){const dpr=window.devicePixelRatio||1;cv.width=cv.clientWidth*dpr;cv.height=cv.clientHeight*dpr;cv.getContext('2d').setTransform(dpr,0,0,dpr,0,0);}
-function resizeAll(){fit(gl);[chV,chA,chD,chY,chI,trajCv].forEach(fit);}
+function resizeAll(){fit(gl);[chV,chA,chD,chY,chI,trajCv,chSteer,chX,chVesc,chCmd,modeStrip].filter(Boolean).forEach(fit);}
 
 function updateReadout(){const p=track[idxAt(cur)],ro=document.getElementById('readout');if(!ro||!p)return;
   ro.innerHTML=`<b>t=${(cur-T0).toFixed(2)} s</b>    vx <b>${p[4].toFixed(2)}</b> m/s    `+
@@ -565,11 +666,12 @@ function wireControls(){
   playBtn.onclick=()=>{playing=!playing;playBtn.textContent=playing?'❚❚ 일시정지':'▶︎ 재생';lastTs=0;if(playing)requestAnimationFrame(loop);};
   document.getElementById('reset').onclick=()=>{defcam();draw();};
   const tip=document.getElementById('tip');
-  [chV,chA,chD,chY,chI].forEach(cv=>{
+  [chV,chA,chD,chY,chI,chSteer,chX,chVesc,chCmd,modeStrip].filter(Boolean).forEach(cv=>{
     cv.onclick=e=>{cur=T0+(e.offsetX/cv.clientWidth)*DUR;syncSeek();draw();};
-    cv.onmousemove=e=>{const t=T0+(e.offsetX/cv.clientWidth)*DUR,p=track[idxAt(t)];
+    cv.onmousemove=e=>{const t=T0+(e.offsetX/cv.clientWidth)*DUR,p=track[idxAt(t)];const md=modeInfo(t);
       tip.style.display='block';tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';
-      tip.textContent=`t=${(t-T0).toFixed(2)} s\nvx    ${p[4].toFixed(2)} m/s\na_lat ${p[5].toFixed(1)} m/s²\ndvx   ${p[6].toFixed(2)} m/s²\nwz    ${p[7].toFixed(2)} rad/s`;};
+      let s=`t=${(t-T0).toFixed(2)} s\nvx    ${p[4].toFixed(2)} m/s\na_lat ${p[5].toFixed(1)} m/s²\ndvx   ${p[6].toFixed(2)} m/s²\nwz    ${p[7].toFixed(2)} rad/s\n모드  ${md.label}${mppiOn(t)?' · MPPI':''}`;
+      tip.textContent=s;};
     cv.onmouseleave=()=>tip.style.display='none';
   });
   let drag=null;
@@ -600,10 +702,18 @@ function renderReport(D,name){
   let recHtml=`<pre class="cmd">${cmd}</pre>`;if(r.note)recHtml+=`<p class="note">＋ 코드 안전망 권장: 측정 a_lat이 그립 초과하거나 조향이 ±0.41에 포화되면 target_speed를 하드컷(스핀/limit-cycle 차단), recovery_lat_error 1.0→0.5.</p>`;
   document.getElementById('reccmd').innerHTML=recHtml;
   document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] (주황선 = 그립 ±${GRIP})`;
+  document.getElementById('lab_v').innerHTML='속도 vx [m/s] — 실측(초록)'+(D.cmd?` · 명령(흰 점선, ${D.cmd.src})`:'')+(D.plannedVx?' · 계획(보라 점선)':'');
   // 캔버스
   gl=document.getElementById('gl');ctx=gl.getContext('2d');
   chV=document.getElementById('c_v');chA=document.getElementById('c_a');chD=document.getElementById('c_d');
   chY=document.getElementById('c_y');chI=document.getElementById('c_i');trajCv=document.getElementById('traj');
+  chSteer=document.getElementById('c_steer');chX=document.getElementById('c_x');chVesc=document.getElementById('c_vesc');chCmd=document.getElementById('c_cmd');modeStrip=document.getElementById('modestrip');
+  // 신규 섹션 show/hide (해당 토픽 있을 때만)
+  const show=(id,on)=>{const e=document.getElementById(id);if(e)e.style.display=on?(id==='modestrip'||id.startsWith('h_')?'block':'block'):'none';};
+  const anyMode=(D.estop&&D.estop.length)||(D.modeStr&&D.modeStr.length)||(D.mppi&&D.mppi.length);
+  show('modestrip',anyMode);
+  show('wrap_steer',!!D.cmd);show('wrap_x',!!D.xtrack);show('wrap_vesc',!!D.vesc);show('wrap_cmd',!!D.cmdBrake);
+  show('h_extra',!!(D.cmd||D.xtrack||D.vesc||D.cmdBrake));
   computeBounds();defcam();cur=T0;playing=false;
   wireControls();
   const paint=()=>{resizeAll();drawTrajectory();drawStaticCharts();syncSeek();draw();};
