@@ -339,6 +339,9 @@ $$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\p
 | `stall_speed_threshold` | 0.7 | 이 속도[m/s] 미만이면 "안 움직인다" 판정. 센서리스 데드존 상단(0.59)보다 위 |
 | `stall_hold_speed` | 1.5 | 탈조 판정 시 명령을 묶어둘 값 [m/s] |
 | `stall_hold_delay` | 1.0 | 이 시간[s] 이상 안 움직이면 발동 |
+| `base_max_decel` | 8.0 | **명령 속도 하강 rate limit** [m/s²]. 낮추면 감속 명령이 늦게 도달 → 높게 유지 (2026-07-25 역할 분리) |
+| `prebrake_decel` | 1.5 | **곡률 사전감속 제동거리 산출용 실측 감속 권한** [m/s²]. 낮을수록 코너를 일찍 봄. 실측은 ~0.4라 1.5도 아직 낙관 (2026-07-25 신설) |
+| `curvature_lookahead_count` | 60 | 곡률 룩어헤드 스캔 거리 하한 (×0.1m → 6m). 20(=2m)은 4 m/s에서 0.5초 앞밖에 못 봄 (2026-07-25 승격·상향) |
 
 (2026-07-11: 과거 "③ 어디에도 노출 안 됨" 그룹이었던 15개 전부 `_control_common.py`의
 `declare_common_args()`에 추가해 여기로 이동 — 이제 `control_map_node.cpp`를 안 건드리고도 전부
@@ -348,9 +351,27 @@ $$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\p
 `build_control_map_node()` 안에 고정 정의된 공통 파라미터 — 여기 고치면 시뮬·실차 둘 다 바뀜:
 
 `wheelbase`(0.33), `l1_gain`(0.5), `l1_distance`(0.3), `t_clip_min`(0.8), `t_clip_max`(5.0),
-`lateral_error_coeff`(1.0), `curvature_lookahead_count`(20),
-`base_max_decel`(8.0), `wall_safety_margin`(0.6), `curvature_ff_blend`(0.0),
+`lateral_error_coeff`(1.0), `wall_safety_margin`(0.6), `curvature_ff_blend`(0.0),
 `heading_damping_gain`(0.0)
+
+(2026-07-25: `base_max_decel`·`curvature_lookahead_count`는 여기서 ①(터미널 인자)로 승격됐고,
+새 파라미터 `prebrake_decel`이 추가됐다 — 아래 "감속도가 두 개인 이유" 참고)
+
+### ②-a 감속도 파라미터가 두 개인 이유 (2026-07-25 분리)
+전엔 `base_max_decel` 하나가 두 역할을 겸했는데, **튜닝 방향이 정반대**라 반드시 한쪽이 손해를 봤다.
+
+| 파라미터 | 의미 | 쓰이는 곳 | 방향 |
+|---|---|---|---|
+| `base_max_decel`(8.0) | 명령 속도를 초당 얼마나 빨리 떨어뜨릴 수 있나 (램프 rate limit) | control_loop 8 | **높게** 유지 — 낮추면 감속 명령이 늦게 도달 |
+| `prebrake_decel`(1.5) | 차가 **실제로 낼 수 있는** 감속도 (제동거리 `v²/2a`) | control_loop 1.5 (룩어헤드 거리 + backward-pass `v_reach`) | **실측값**에 맞춤 — 낮을수록 코너를 멀리서 보고 일찍 감속 |
+
+⚠️ `prebrake_decel`에 8.0(구 동작)을 쓰면 4 m/s에서 제동거리를 1.0m로 착각한다. 07-25 실차 bag
+실측 감속은 **-0.4 m/s²**(명령 4.00→3.11로 내렸는데 실속 4.03→3.80, 주행 중
+`/commands/motor/brake`는 0건 — VESC 속도모드는 회생제동이 거의 없어 사실상 coast)이라 실제로는
+~8m가 필요하다. 사전감속이 0.5초 앞만 보고 시작 → 시케인 언더스티어 크래시의 직접 원인.
+`curvature_lookahead_count`(20→60)는 그 스캔 거리의 하한(×0.1m)이라 같이 올렸다.
+⚠️ 미해결: `obstacle_brake_decel`(6.0)도 같은 성격인데 아직 낙관치다 — 장애물/추월 거동에 직접
+영향이 있어 별도 실차 검증 후 조정할 것.
 
 - `wall_safety_margin` — **안전라인 시프트**: 플래너 최적라인이 벽에 너무 붙은(클리어런스 부족)
   구간에서 메시지의 `d_left/d_right`로 웨이포인트를 트랙 중심 쪽으로 밀어 최소 벽 여유 확보.

@@ -157,7 +157,17 @@ public:
         this->declare_parameter<double>("max_roll_limit", 0.15);
         this->declare_parameter<double>("decel_attenuation", 0.6);
         this->declare_parameter<double>("base_max_accel", 4.0);
+        // base_max_decel: **명령 속도의 하강 rate limit 전용** [m/s²] (control_loop 8의 램프).
+        //   차가 실제로 낼 수 있는 감속도가 아니라 "명령을 얼마나 빨리 떨어뜨릴 수 있나"이므로
+        //   낮추면 오히려 감속 명령이 늦게 도달한다 → 높게 유지할 것.
         this->declare_parameter<double>("base_max_decel", 8.0);
+        // prebrake_decel: **곡률 사전감속 계산 전용** [m/s²] (control_loop 1.5의 룩어헤드 거리
+        //   v²/2a 와 backward-pass v_reach). 2026-07-25 실차 bag에서 base_max_decel과 분리.
+        //   ⚠️ 여기엔 차의 **실측 감속 권한**을 넣어야 한다. 07-25 bag 기준 주행 중 실측은
+        //   약 -0.4 m/s²(명령 4.00→3.11로 내렸는데 실속 4.03→3.80). VESC 속도모드는 회생제동이
+        //   거의 없어 사실상 coast다. 8.0을 쓰면 4 m/s에서 제동거리를 1.0m로 착각해 사전감속
+        //   개시가 ~16배 늦어진다(→ 시케인 언더스티어 크래시). 실측 스텝 테스트 전 잠정 1.5.
+        this->declare_parameter<double>("prebrake_decel", 1.5);
 
         // 기동 실패(VESC 센서리스 탈조) 가드 — 아래 control_loop 8-b 참고.
         // ⚠️ "명령이 실측보다 앞서지 못하게" 일반 clamp를 거는 방식은 쓰면 안 된다. VESC 속도
@@ -180,7 +190,7 @@ public:
         this->declare_parameter<double>("min_speed", 2.0);
 
         // 곡률 룩어헤드 감속 파라미터
-        this->declare_parameter<int>("curvature_lookahead_count", 20);
+        this->declare_parameter<int>("curvature_lookahead_count", 60);
         this->declare_parameter<double>("max_lateral_accel", 6.0);
         this->declare_parameter<double>("curvature_ff_blend", 0.0); // 곡률 FF 비활성: 검증된 순수 L1 격리 (원본 MAP 컨트롤러 미보유 항목)
         this->declare_parameter<std::string>("odom_topic", "/ego_racecar/odom");
@@ -224,6 +234,7 @@ public:
         this->get_parameter("stall_hold_speed", stall_hold_speed_);
         this->get_parameter("stall_hold_delay", stall_hold_delay_);
         this->get_parameter("base_max_decel", base_max_decel_);
+        this->get_parameter("prebrake_decel", prebrake_decel_);
         this->get_parameter("use_imu", use_imu_);
         this->get_parameter("imu_angular_scale", imu_angular_scale_);
         this->get_parameter("imu_linear_scale", imu_linear_scale_);
@@ -308,8 +319,12 @@ public:
         obstacle_brake_enable_ = this->declare_parameter<bool>("obstacle_brake_enable", true);
         obstacle_raw_topic_ = this->declare_parameter<std::string>(
             "obstacle_raw_topic", "/perception/detection/raw_obstacles");
-        // v_cap 산출용 감속도. base_max_decel(8.0)보다 낮게 잡아 사전감속 커브를 보수적으로 —
-        // 실제 감속은 램프의 max_decel이 담당하므로 이 값이 낮으면 더 일찍/완만히 제동한다.
+        // v_cap 산출용 감속도. 실제 감속은 램프의 max_decel이 담당하므로 이 값이 낮으면 더
+        // 일찍/완만히 제동한다.
+        // ⚠️ 2026-07-25 미해결: 이 값도 prebrake_decel과 같은 성격(실측 감속 권한)인데 6.0은
+        //    실측(~0.4 m/s²)보다 훨씬 낙관적이다. 즉 장애물 앞 정지거리를 실제의 1/15로 보고
+        //    있어 늦게 제동한다. 장애물 회피/추월 거동에 직접 영향이 있어 곡률 사전감속과
+        //    분리해 별도 실차 검증 후 조정할 것(무턱대고 낮추면 상대차만 봐도 기어간다).
         obstacle_brake_decel_ = this->declare_parameter<double>("obstacle_brake_decel", 6.0);
         obstacle_stop_gap_ = this->declare_parameter<double>("obstacle_stop_gap", 1.0);       // 장애물 앞 정지 여유[m]
         obstacle_corridor_halfwidth_ = this->declare_parameter<double>("obstacle_corridor_halfwidth", 0.35); // 통로 반폭(차폭/2+여유)[m]
@@ -843,14 +858,17 @@ private:
         // 1.5 곡률 룩어헤드 사전 감속 (Curvature Lookahead Pre-deceleration)
         // 속도비례 룩어헤드: 현재속도 제동거리(v^2/2a)만큼 전방 곡률을 미리 스캔.
         // 고정 2m는 고속 진입 시 감속 개시가 늦어 헤어핀 오버스피드 → 제동거리만큼 확장.
-        double brake_dist = (current_speed_ * current_speed_) / (2.0 * std::max(0.1, base_max_decel_));
+        // ⚠️ 여기 a는 base_max_decel(명령 하강 rate limit)이 아니라 prebrake_decel(실측 감속
+        //    권한)이다 — 2026-07-25 분리. 둘을 한 값으로 쓰면 "명령을 빨리 떨어뜨리고 싶다"와
+        //    "차가 실제로 못 서니 멀리 봐야 한다"가 정반대 방향으로 충돌한다.
+        double brake_dist = (current_speed_ * current_speed_) / (2.0 * std::max(0.1, prebrake_decel_));
         double min_lookahead_dist = static_cast<double>(curvature_lookahead_count_) * 0.1; // 기존 고정값을 하한으로 유지
         double curv_lookahead_dist = std::max(min_lookahead_dist, brake_dist);
 
         // 프로파일 신뢰형 사전감속 (backward-pass): 오프라인 최적화된 프로파일 vx_mps는 이미
         // 각 지점의 최적 속도(코너 감속 램프 포함)를 담고 있다는 전제로, 전방 각 지점의 그립
         // 제한 목표속도 v_cap[i] = min(vx_profile[i], √(a_lat/κ_smoothed[i]))까지
-        // base_max_decel로 감속 가능한 현재 최대 속도 v_reach = √(v_cap[i]² + 2·a_decel·d_i)의
+        // prebrake_decel로 감속 가능한 현재 최대 속도 v_reach = √(v_cap[i]² + 2·a_decel·d_i)의
         // 최소값을 사전감속 캡으로 쓴다(accum=0인 현재 위치 항이 순간 그립 클램프 역할도 겸함).
         // 직선·완만구간은 κ≈0 → v_cap=프로파일이라 안 눌리고, 코너는 제동거리만큼 앞에서부터
         // 정확히 그립속도로 선제동된다. (구 방식인 "창 내 최대 κ로 √(a_lat/κ) 블랭킷 재캡"은
@@ -863,7 +881,7 @@ private:
             if (k_i > 0.01) {
                 v_cap_i = std::min(v_cap_i, std::sqrt(max_lateral_accel_ / k_i));
             }
-            double v_reach = std::sqrt(v_cap_i * v_cap_i + 2.0 * base_max_decel_ * accum);
+            double v_reach = std::sqrt(v_cap_i * v_cap_i + 2.0 * prebrake_decel_ * accum);
             if (v_reach < curvature_speed_limit) {
                 curvature_speed_limit = v_reach;
             }
@@ -1236,7 +1254,8 @@ private:
     double stall_hold_speed_ = 1.5;
     double stall_hold_delay_ = 1.0;
     double stall_time_ = 0.0;   // 실측이 멈춰 있는데 명령만 커진 상태의 누적 시간 [s]
-    double base_max_decel_;
+    double base_max_decel_;                    // 명령 속도 하강 rate limit [m/s²]
+    double prebrake_decel_ = 1.5;              // 곡률 사전감속 계산용 실측 감속 권한 [m/s²]
     bool use_imu_;
     double imu_angular_scale_;
     double imu_linear_scale_ = 1.0;

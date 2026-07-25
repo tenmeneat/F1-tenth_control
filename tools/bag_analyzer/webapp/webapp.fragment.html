@@ -104,7 +104,7 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
       <div class="explain" id="ex_v"></div>
     </div>
     <div class="chartrow">
-      <div class="chart"><div class="clab" id="lab_a">횡가속도 a_lat = vx·wz [m/s²]</div><canvas id="c_a"></canvas></div>
+      <div class="chart"><div class="clab" id="lab_a">횡가속도 a_lat = vx·wz(실측 요레이트) [m/s²]</div><canvas id="c_a"></canvas></div>
       <div class="explain" id="ex_a"></div>
     </div>
     <div class="chartrow">
@@ -395,6 +395,8 @@ function pVesc(c){hdr(c);const volt=c.f64();c.f64();const cm=c.f64(),ci=c.f64(),
 
 // ══ 상수 (control_map_node 기준) ══
 const WHEELBASE=0.33,MAX_STEER=0.41,CAR_W=0.31,CAR_L=0.58,DEG2RAD=Math.PI/180;
+// 실측 요레이트 출처 라벨 — /odom angular.z는 실측이 아니라 조향 기구학 합성값이다(2026-07-25).
+const SRC_LABEL={imu:'IMU',mcl:'MCL pose',odom_kinematic:'⚠️명령값'};
 const R_MIN=WHEELBASE/Math.tan(MAX_STEER);
 let GRIP=6.5;const GRIP_ASSUMED=6.5;
 
@@ -483,11 +485,44 @@ async function analyze(buffers){
     return mapPose(t);}
   const poseSrc=pf.length?"/pf/pose/odom (map)":(hasMap?"TF map→base_link":"odom 원본 (map 아님 · 정합 참고불가)");
 
-  // pose(map) per odom + 파생
+  // ── 실측 요레이트 (2026-07-25) ──────────────────────────────────────────────
+  // ⚠️ 실차 /odom(vesc_to_odom)의 angular.z는 **측정값이 아니라** 조향 명령의 기구학 합성값
+  //    v·tan(δ)/L 이다. 07-25 bag 22_08_50 t=9.5에서 합성 5.30 vs odom 5.29로 완전 일치 확인.
+  //    이걸 a_lat에 쓰면 언더스티어 구간에서 최대 3배 과장된다(실측 7 → 표시 21.5) — 실제로
+  //    07-23 크래시를 "풀락 스핀"으로 오진했다. 실측은 IMU 자이로 → MCL pose yaw 미분 순으로
+  //    잡고, 명령값은 "차가 얼마나 돌려고 했나"의 프록시로 따로 보관해 추종률을 계산한다.
   const N=odom.length;
+  let wzMeasAt=null, alatSource='odom_kinematic';
+  if(imu.length>=5){
+    const it=imu.map(m=>m.t), ig=imu.map(m=>m.gz*DEG2RAD);
+    let k=0;
+    wzMeasAt=(t)=>{while(k<it.length-2&&it[k+1]<t)k++;while(k>0&&it[k]>t)k--;
+      const t0=it[k],t1=it[Math.min(k+1,it.length-1)];
+      if(t1<=t0)return ig[k];
+      const f=Math.max(0,Math.min(1,(t-t0)/(t1-t0)));return ig[k]+(ig[Math.min(k+1,ig.length-1)]-ig[k])*f;};
+    alatSource='imu';
+  }
   const track=[];
   for(let i=0;i<N;i++){const o=odom[i];const p=mapPoseBest(o.t)||{x:o.x,y:o.y,yaw:o.yaw};
-    track.push([o.t,p.x,p.y,p.yaw,o.vx,o.vx*o.wz,0,o.wz]);}
+    // [t, x, y, yaw, vx, a_lat(실측), dvx, wz(실측), wz(명령), a_lat(명령)]
+    track.push([o.t,p.x,p.y,p.yaw,o.vx,0,0,0,o.wz,o.vx*o.wz]);}
+  if(!wzMeasAt&&N>=5&&(pf.length||hasMap)){
+    // IMU가 없으면 map 프레임 pose yaw 미분(MCL) — 휠·조향과 완전히 독립인 두 번째 실측원.
+    const yu=[];let acc=0;
+    for(let i=0;i<N;i++){if(i){let d=track[i][3]-track[i-1][3];
+      while(d>Math.PI)d-=2*Math.PI;while(d<-Math.PI)d+=2*Math.PI;acc+=d;}yu.push(acc);}
+    const raw=[];
+    for(let i=0;i<N;i++){const im=Math.max(0,i-1),ip=Math.min(N-1,i+1);
+      const dt=track[ip][0]-track[im][0];raw.push(dt>0.005?(yu[ip]-yu[im])/dt:0);}
+    for(let i=0;i<N;i++){let s=0,n=0;              // MCL 보정 점프 완화용 5-tap 평활
+      for(let j=Math.max(0,i-2);j<=Math.min(N-1,i+2);j++){s+=raw[j];n++;}track[i][7]=s/n;}
+    alatSource='mcl';
+  }
+  for(let i=0;i<N;i++){
+    if(wzMeasAt)track[i][7]=wzMeasAt(track[i][0]);
+    else if(alatSource==='odom_kinematic')track[i][7]=track[i][8];   // 폴백: 명령값(경고 표시됨)
+    track[i][5]=track[i][4]*track[i][7];
+  }
   // dvx/dt (중앙차분 + 3-tap 평활)
   for(let i=0;i<N;i++){const im=Math.max(0,i-1),ip=Math.min(N-1,i+1);const dt=track[ip][0]-track[im][0];
     let d=dt>0.005?(track[ip][4]-track[im][4])/dt:0;track[i][6]=Math.max(-25,Math.min(25,d));}  // dt 뭉침·E-stop 스파이크 클램프(물리 ±25)
@@ -556,7 +591,7 @@ async function analyze(buffers){
       else start=null;}
   }
 
-  const S={track,scans,wp,imu:IMU,estop,mppi,hasMap,dur,
+  const S={track,scans,wp,imu:IMU,estop,mppi,hasMap,dur,alatSource,
     cmd,plannedVx,xtrack,plannedStats,vesc:vescS,cmdErpm,cmdBrake,cmdServo,modeStr,odomLabel,poseSrc,
     loc,scanRate,stallDur,hasLocal:!!(lwpnts&&lwpnts.length)};
   const D=diagnose(S);
@@ -568,9 +603,24 @@ function estimateGrip(tr){
   const N=tr.length,GCAP=11;   // 물리 상한 μ≈1.1 → 스핀 중 vx·wz 폭주(그립 아님) 차단
   // 제어상실 onset: a_lat 비물리(>GCAP) 또는 조향 포화 + 큰 횡하중. 이 이전만 '제어된 그립'
   let onset=N;
-  for(let i=0;i<N;i++){const v=tr[i][4],w=Math.abs(tr[i][7]),a=Math.abs(tr[i][5]);
-    if(v<1.5)continue;const rad=w>1e-3?v/w:1e9;
-    if(a>GCAP||(rad<1.2*R_MIN&&a>6)){onset=i;break;}}
+  // ⚠️ 예전엔 '스핀'(선회반경이 최소반경에 닿음)만 제어상실 신호로 봤다. 그건 a_lat을 명령
+  //    기구학값으로 계산하던 시절의 신호다 — 실측 요레이트로 바꾸면 언더스티어 사고는 반경이
+  //    줄지 않아 영영 안 걸리고, 결과적으로 "그립 한계 미도달"로 오판한다(2026-07-25).
+  //    조향이 크게 지시된 상태에서 실측 요레이트가 절반 아래로 붕괴하면 그것도 제어상실이다.
+  // ⚠️⚠️ 단, **지속**을 요구해야 한다. 조향↔요레이트에는 위상지연이 있어 코너 진입 순간마다
+  //    비율이 순간적으로 무너진다 — 단일 샘플로 잡으면 정상 주행 bag에서도 첫 코너가 onset이
+  //    되어 실측 그립이 바닥(3.0)으로 붕괴한다(구현 중 실제로 겪음). 0.25초 이상 + 유의미한
+  //    횡하중을 함께 요구한다.
+  const WASH_HOLD=0.25,WASH_ALAT=4.0;
+  let runStart=-1;
+  for(let i=0;i<N;i++){const v=tr[i][4],w=Math.abs(tr[i][7]),a=Math.abs(tr[i][5]),wc=Math.abs(tr[i][8]);
+    if(v<1.5){runStart=-1;continue;}
+    const rad=w>1e-3?v/w:1e9;
+    if(a>GCAP||(rad<1.2*R_MIN&&a>6)){onset=i;break;}
+    if(wc>1.5&&a>WASH_ALAT&&w/Math.max(wc,1e-6)<0.5){
+      if(runStart<0)runStart=i;
+      if(tr[i][0]-tr[runStart][0]>=WASH_HOLD){onset=runStart;break;}
+    }else runStart=-1;}
   const reached=onset<N;
   const clean=[];for(let i=0;i<onset;i++){if(tr[i][4]>1.5)clean.push(Math.abs(tr[i][5]));}
   clean.sort((x,y)=>x-y);
@@ -599,7 +649,9 @@ function segmentCorners(tr,grip){
 function diagnose(S){
   const tr=S.track,N=tr.length;const findings=[],rec={};
   const F=(part,level,title,body,fix)=>findings.push({part,level,title,body,fix});
+  // wz/alat은 **실측**(IMU 또는 MCL). 명령 기구학값은 wzCmd/alatCmd — 섞지 말 것(2026-07-25).
   const t=tr.map(p=>p[0]),vx=tr.map(p=>p[4]),wz=tr.map(p=>p[7]),alat=tr.map(p=>p[5]),dvx=tr.map(p=>p[6]);
+  const wzCmd=tr.map(p=>p[8]),alatCmd=tr.map(p=>p[9]);
   const absmax=a=>a.reduce((m,v)=>Math.max(m,Math.abs(v)),0);
   const driving=i=>{let st=false;for(const[et,ev]of S.estop){if(et<=t[i])st=!ev;}return st&&vx[i]>1.0;};
   const dm=tr.map((_,i)=>driving(i));
@@ -667,7 +719,12 @@ function diagnose(S){
 
   // ═══ 컨트롤 (조향·속도) ═══
   // 감속 권한 (사고 이전만)
-  let onset=N;for(let i=0;i<N;i++){if(Math.abs(alat[i])>1.6*grip||Math.abs(dvx[i])>15){onset=i;break;}}
+  // 감속 권한은 **제어 상실 이전** 구간에서만 재야 한다. 벽에 긁히며 죽는 속도나 E-stop 제동은
+  // '브레이크가 듣는다'는 증거가 아니기 때문. estimateGrip이 이미 washout/스핀 기준으로 제어상실
+  // onset을 찾아 두므로 그걸 함께 쓴다 — a_lat 임계만 쓰면 언더스티어 사고에선 충돌 감속까지
+  // 창 안에 들어와 "감속 잘 됨"으로 뒤집힌다(2026-07-25: -0.6이 -6.9로 보였음).
+  let onset=Math.min(gi.onset,N);
+  for(let i=0;i<onset;i++){if(Math.abs(alat[i])>1.6*grip||Math.abs(dvx[i])>15){onset=i;break;}}
   let minDecel=Infinity,accelFrac=0,nPre=0,sumAcc=0;
   for(let i=0;i<onset;i++){if(dm[i]&&vx[i]>1.5){nPre++;minDecel=Math.min(minDecel,dvx[i]);if(dvx[i]>0)sumAcc++;}}
   if(nPre)accelFrac=sumAcc/nPre;else minDecel=0;
@@ -701,14 +758,28 @@ function diagnose(S){
       c.vSafe!=null?`이 코너 안전 진입속도 <b>v_safe ${c.vSafe.toFixed(1)} m/s</b>. 이 구간만 프로파일 감속(offline_trajectory_generator)하거나, 여의치 않으면 전역 <code>max_speed</code>로 캡.`:'');});
   if(!bad.length)F('control','ok','코너 그립 마진 양호',
     `감지된 코너 ${corners.length}개 모두 그립(${grip.toFixed(1)}) 이내 — 오버스피드·조향 포화 없음.`);
-  // 코너 언더스티어 (odom 조향의도 vs IMU 실측 요레이트)
-  if(S.imu.t.length&&corners.length){const it=S.imu.t,ig=S.imu.gz_rad;
-    const nr=x=>{let lo=0,hi=it.length-1;if(x<=it[0])return 0;if(x>=it[hi])return hi;while(lo+1<hi){const m=(lo+hi)>>1;if(it[m]<=x)lo=m;else hi=m;}return lo;};
-    let sum=0,n=0;corners.forEach(c=>{for(let i=c.i0;i<=c.i1;i++){if(tr[i][4]<1.5)continue;sum+=Math.abs(tr[i][7])-Math.abs(ig[nr(tr[i][0])]);n++;}});
-    const u=n?sum/n:0;
-    if(n>=20&&u>0.3)F('control','warn',`코너 언더스티어 Δ${u.toFixed(2)} rad/s`,
-      `코너에서 조향이 지시한 요레이트(odom)보다 실측(IMU)이 평균 ${u.toFixed(2)} rad/s 작음 = 앞이 안 물려 바깥으로 밀림.`,
-      `<code>yaw_rate_gain</code> 0.08→0.10~0.12로 카운터스티어 보강(채터링 관찰). 근본은 프런트 그립/타이어·진입속도.`);}
+  // ── 요레이트 추종률: 언더스티어(그립) vs 조향 게인 결손(캘리브레이션) 분리 ──
+  // 명령(기구학) 대비 실측 비율. 그립 근처에서 낮으면 언더스티어, **그립 한참 아래에서도**
+  // 낮으면 슬립이 아니라 차가 명령한 만큼 안 꺾이는 것 = 서보 게인/링키지 문제.
+  const med=a=>{const s=a.slice().sort((x,y)=>x-y);return s.length?s[Math.floor(s.length/2)]:null;};
+  const ratios=[],lowRatios=[];
+  const dwz=tr.map((_,i)=>{const im=Math.max(0,i-1),ip=Math.min(N-1,i+1);const dt=t[ip]-t[im];
+    return dt>0.005?Math.abs((wzCmd[ip]-wzCmd[im])/dt):0;});
+  for(let i=0;i<N;i++){
+    if(vx[i]>1.5&&Math.abs(wzCmd[i])>1.0)ratios.push(Math.abs(wz[i])/Math.abs(wzCmd[i]));
+    // 저슬립 표본은 **명령** a_lat으로 골라야 한다 — 실측 a_lat으로 고르면 wz가 작은 샘플만
+    // 뽑히는 순환 선택 편향으로 비율이 구조적으로 낮게 나온다(07-25: 0.16 vs 실제 0.69).
+    if(vx[i]>1.0&&Math.abs(wzCmd[i])>0.5&&Math.abs(alatCmd[i])<0.5*grip&&dwz[i]<3.0)
+      lowRatios.push(Math.abs(wz[i])/Math.abs(wzCmd[i]));}
+  const usRatio=ratios.length>=8?med(ratios):null;
+  const gainRatio=lowRatios.length>=20?med(lowRatios):null;
+  if(usRatio!=null&&usRatio<0.6)F('control','warn',`코너 언더스티어 (요레이트 추종률 ${(usRatio*100).toFixed(0)}%)`,
+    `조향이 지시한 요레이트의 ${(usRatio*100).toFixed(0)}%만 실제로 나옵니다 = 앞이 안 물려 바깥으로 밀림. 더 꺾어도 안 돕니다.`,
+    `<b>진입속도를 낮추는 것</b>이 유일한 레버(<code>max_speed</code>↓). ⚠️ <code>yaw_rate_gain</code>은 이 상황에서 조향을 <b>더</b> 밀어 슬립각 피크를 넘긴 앞타이어를 악화시키므로 <code>yaw_rate_gain:=0.0</code>으로 A/B할 것.`);
+  if(gainRatio!=null&&gainRatio<0.85&&S.alatSource!=='odom_kinematic')
+    F('control',gainRatio<0.75?'critical':'warn',`조향 게인 결손 ${(gainRatio*100).toFixed(0)}% (슬립 아님)`,
+      `슬립이 불가능한 저횡가속 구간(명령 |a_lat| < ${(0.5*grip).toFixed(1)})에서도 실측/명령 요레이트가 ${gainRatio.toFixed(2)}입니다(기대 1.0). 그립 문제 이전에 <b>차가 명령한 만큼 안 꺾입니다</b>.`,
+      `젯슨 <b>f1tenth_stack vesc.yaml</b>의 <code>steering_angle_to_servo_gain</code>/offset과 조향 링키지 실가동범위 확인. 이게 틀리면 LUT·L1 튜닝이 전부 그 위에서 놉니다.`);
   // 권장 파라미터 (코너별 v_safe에서 도출)
   if(bad.length&&isFinite(vSafeMin))rec.max_speed=Math.max(1.5,Math.floor(vSafeMin*2)/2);
   if(gi.reached)rec.max_lateral_accel=+(grip*0.8).toFixed(1);
@@ -719,7 +790,13 @@ function diagnose(S){
     `자이로 z 최대 ${absmax(S.imu.gz_raw).toFixed(0)} (deg/s 스케일). IMU_ANGULAR_SCALE(π/180) 보정 전제. 언더스티어 시 요레이트 카운터스티어가 조향을 더 밀어 포화를 앞당길 수 있음.`,
     '조향 채터링 시 <code>use_imu:=false</code>로 순수 L1+LUT 회귀. IMU 재투입 시 낮은 <code>yaw_rate_gain</code>(0.05).');
 
-  const stats={dur:S.dur,peakV,peakAl,overFrac,minDecel,nCorners:corners.length,grip,gripReached:gi.reached,gripPeak:gi.peak};
+  // a_lat 출처 경고 — IMU도 TF/MCL도 없으면 a_lat이 '명령'이라 최대 3배 과장된다.
+  if(S.alatSource==='odom_kinematic')F('control','warn','a_lat이 실측이 아님 (IMU·MCL 없음)',
+    'bag에 IMU도 map pose도 없어 a_lat을 /odom의 angular.z로 계산했습니다. 실차 vesc_to_odom의 angular.z는 조향 명령의 기구학 합성값(v·tanδ/L)이라 언더스티어 구간에서 최대 3배 과장됩니다.',
+    '아래 그립 판정은 <b>상한</b>으로만 볼 것. 다음 녹화엔 <code>/sensors/imu/raw</code> 또는 <code>/tf</code>·<code>/pf/pose/odom</code>을 반드시 포함.');
+
+  const stats={dur:S.dur,peakV,peakAl,overFrac,minDecel,nCorners:corners.length,grip,gripReached:gi.reached,gripPeak:gi.peak,
+               alatSource:S.alatSource,peakAlCmd:absmax(alatCmd),usRatio,gainRatio};
   return {findings,rec,stats,gripUsed:grip,corners};
 }
 
@@ -815,10 +892,10 @@ function drawCharts(){const T=track.map(p=>p[0]);
   if(DATA.cmd)vs.push({t:DATA.cmd.t,v:DATA.cmd.speed,color:'#e6edf3',dash:[5,3],w:1});
   if(DATA.plannedVx)vs.push({t:DATA.plannedVx.t,v:DATA.plannedVx.v,color:'#bc8cff',dash:[2,3],w:1});
   drawChart(chV,vs,{playhead:true});
-  drawChart(chA,[{t:T,v:track.map(p=>p[5]),color:'#e5484d'}],{zeroCenter:true,grip:GRIP,playhead:true});
+  drawChart(chA,[{t:T,v:track.map(p=>p[9]),color:'#6b7280'},{t:T,v:track.map(p=>p[5]),color:'#e5484d'}],{zeroCenter:true,grip:GRIP,playhead:true});
   drawChart(chD,[{t:T,v:track.map(p=>p[6]),color:'#2dd4bf'}],{zeroCenter:true,playhead:true});}
 function drawStaticCharts(){const T=track.map(p=>p[0]);
-  drawChart(chY,[{t:T,v:track.map(p=>p[7]),color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.gz_rad,color:'#f5a623'}],{zeroCenter:true});
+  drawChart(chY,[{t:T,v:track.map(p=>p[8]),color:'#6b7280'},{t:T,v:track.map(p=>p[7]),color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.gz_rad,color:'#f5a623'}],{zeroCenter:true});
   drawChart(chI,[{t:DATA.imu.t,v:DATA.imu.gz_raw,color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.ax,color:'#e5484d'},{t:DATA.imu.t,v:DATA.imu.ay,color:'#39d353'}],{zeroCenter:true});
   if(DATA.cmd)drawChart(chSteer,[{t:DATA.cmd.t,v:DATA.cmd.steer,color:'#e3b341'}],{zeroCenter:true,grip:MAX_STEER});
   if(DATA.xtrack)drawChart(chX,[{t:DATA.xtrack.t,v:DATA.xtrack.v,color:'#4c8dff'}],{});
@@ -898,7 +975,7 @@ function wireControls(){
     cv.onclick=e=>{const g=cw(cv);cur=T0+Math.min(1,Math.max(0,(e.offsetX-g.l)/g.w))*DUR;syncSeek();draw();};
     cv.onmousemove=e=>{const g=cw(cv);const t=T0+Math.min(1,Math.max(0,(e.offsetX-g.l)/g.w))*DUR,p=track[idxAt(t)];const md=modeInfo(t);
       tip.style.display='block';tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';
-      let s=`t=${(t-T0).toFixed(2)} s\nvx    ${p[4].toFixed(2)} m/s\na_lat ${p[5].toFixed(1)} m/s²\ndvx   ${p[6].toFixed(2)} m/s²\nwz    ${p[7].toFixed(2)} rad/s\n모드  ${md.label}${mppiOn(t)?' · MPPI':''}`;
+      let s=`t=${(t-T0).toFixed(2)} s\nvx     ${p[4].toFixed(2)} m/s\na_lat  ${p[5].toFixed(1)} m/s²  (명령 ${p[9].toFixed(1)})\ndvx    ${p[6].toFixed(2)} m/s²\nwz     ${p[7].toFixed(2)} rad/s  (명령 ${p[8].toFixed(2)})\n모드   ${md.label}${mppiOn(t)?' · MPPI':''}`;
       tip.textContent=s;};
     cv.onmouseleave=()=>tip.style.display='none';
   });
@@ -926,10 +1003,11 @@ function fillExplain(D){const s=D.stats,L=D.loc;
   setEx('ex_v','초록=실측 vx · 흰 점선=명령 · 보라 점선=글로벌 계획속도. 세 선이 겹칠수록 추종이 좋다.',vc,vcc);
   // 횡가속도
   let ac,acc;const rr=s.peakAl/s.grip;
-  if(rr>1.6){ac=`최대 |a_lat| ${s.peakAl.toFixed(1)} = 그립의 ${rr.toFixed(1)}배, ${(s.overFrac*100).toFixed(0)}% 구간 초과 → 코너 과속·스핀.`;acc='#e5484d';}
+  if(rr>1.6){const um=(s.usRatio!=null&&s.usRatio<0.6)?`언더스티어(요레이트 추종률 ${(s.usRatio*100).toFixed(0)}%)`:'스핀';
+    ac=`최대 |a_lat| ${s.peakAl.toFixed(1)} = 그립의 ${rr.toFixed(1)}배, ${(s.overFrac*100).toFixed(0)}% 구간 초과 → 코너 과속·${um}.`;acc='#e5484d';}
   else if(s.overFrac>0.05){ac=`최대 ${s.peakAl.toFixed(1)}, 초과 ${(s.overFrac*100).toFixed(0)}% → 마진 부족.`;acc='#f5a623';}
   else{ac=`최대 ${s.peakAl.toFixed(1)} < 그립 ${s.grip.toFixed(1)} → 마진 확보.`;acc='#7ee787';}
-  setEx('ex_a',`빨강=vx·wz(횡가속). 주황 점선=${s.gripReached?'실측':'가정'} 그립 ±${GRIP.toFixed(1)}. 이 선을 넘으면 타이어가 못 버틴다.`,ac,acc);
+  setEx('ex_a',`빨강=실측 a_lat(vx×${SRC_LABEL[s.alatSource]||'?'} 요레이트) · 회색=명령 a_lat(조향 기구학, 참고). 주황 점선=${s.gripReached?'실측':'가정'} 그립 ±${GRIP.toFixed(1)}. 둘이 벌어지면 언더스티어.`,ac,acc);
   // 종가속도
   let dc,dcc;
   if(s.minDecel>-0.8){dc=`감속 국면 최저 ${s.minDecel>=0?'+':''}${s.minDecel.toFixed(2)} m/s² → 사실상 <b>감속 못 함</b>(브레이크/회생제동 미작동). 코너 사전감속 무효.`;dcc='#e5484d';}
@@ -944,8 +1022,11 @@ function fillExplain(D){const s=D.stats,L=D.loc;
   else tc='위치소스와 경로 겹침을 확인.';
   setEx('ex_traj',`선=주행궤적(속도색) · 초록점=시작 · 빨강점=그립초과 · 보라=글로벌 경로. 위치소스=${D.poseSrc}.`,tc,tcc);
   // 요레이트
-  setEx('ex_y','위: 파랑=odom 요레이트(조향이 의도한 값) · 주황=IMU 실측. 아래: IMU raw(진동/노이즈).',
-    '두 선이 벌어지면 슬립/언더스티어. 파형은 같은데 시간만 밀리면 IMU 지연. raw가 지저분하면 노이즈 → <code>use_imu:=false</code> 고려.','#9aa4b2');
+  {const ur=D.stats.usRatio;
+   setEx('ex_y','위: 회색=명령 요레이트(/odom = v·tanδ/L, 조향 의도) · 파랑=실측(a_lat 계산에 쓰는 값) · 주황=IMU raw 환산. 아래: IMU raw(진동/노이즈).',
+    ur!=null?`실측이 명령의 ${(ur*100).toFixed(0)}% — 100%면 명령대로 돌고, 낮을수록 안 돌고 밀림(언더스티어). 시간만 밀려 있으면 IMU 지연.`
+            :'두 선이 벌어지면 슬립/언더스티어. 파형은 같은데 시간만 밀리면 IMU 지연.',
+    ur!=null&&ur<0.6?'#e5484d':'#9aa4b2');}
   // 크로스트랙
   if(D.xtrack){const xv=D.xtrack.v,xm=xv.reduce((a,b)=>Math.max(a,b),0),xa=xv.reduce((a,b)=>a+b,0)/(xv.length||1);
     let xc,xcc;
@@ -966,8 +1047,10 @@ function renderReport(D,name){
   T0=track[0][0];T1=track[track.length-1][0];DUR=(T1-T0)||1;VMAX=Math.max(1,...track.map(p=>p[4]));
   const st=D.stats;
   const gripTile=st.gripReached?`${st.grip.toFixed(1)} m/s²`:`≥ ${st.gripPeak.toFixed(1)}`;
-  const tiles=[["주행 시간",`${st.dur.toFixed(1)} s`],["최고 속도",`${st.peakV.toFixed(2)} m/s`],["최대 |a_lat|",`${st.peakAl.toFixed(1)} m/s²`],
-    ["실측 그립",gripTile],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],["코너 수",`${st.nCorners}`]];
+  const tiles=[["주행 시간",`${st.dur.toFixed(1)} s`],["최고 속도",`${st.peakV.toFixed(2)} m/s`],
+    [`최대 |a_lat| (${SRC_LABEL[st.alatSource]||'?'})`,`${st.peakAl.toFixed(1)} m/s²`],
+    ["실측 그립",gripTile],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],
+    ["요레이트 추종률",st.usRatio!=null?`${(st.usRatio*100).toFixed(0)} %`:"—"],["코너 수",`${st.nCorners}`]];
   document.getElementById('tiles').innerHTML=tiles.map(([k,v])=>`<div class="tile"><div class="tv">${v}</div><div class="tl">${k}</div></div>`).join('');
   // 파트별 가이드
   const col={critical:"#e5484d",warn:"#f5a623",info:"#4c8dff",ok:"#30a46c"},lab={critical:"치명",warn:"주의",info:"참고",ok:"양호"},ord={critical:0,warn:1,info:2,ok:3};
@@ -984,7 +1067,7 @@ function renderReport(D,name){
   let cmd="ros2 launch f1tenth_control control_real.launch.py";if(args.length)cmd+=" \\\n    "+args.join(" \\\n    ");
   let recHtml=`<pre class="cmd">${cmd}</pre>`;if(r.note)recHtml+=`<p class="note">＋ 코드 안전망 권장: 측정 a_lat이 그립 초과하거나 조향이 ±0.41에 포화되면 target_speed를 하드컷(스핀/limit-cycle 차단), recovery_lat_error 1.0→0.5.</p>`;
   document.getElementById('reccmd').innerHTML=recHtml;
-  document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] (주황선 = ${st.gripReached?'실측':'가정'} 그립 ±${GRIP.toFixed(1)})`;
+  document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] · 요레이트 출처 ${SRC_LABEL[st.alatSource]||'?'} (주황선 = ${st.gripReached?'실측':'가정'} 그립 ±${GRIP.toFixed(1)})`;
   document.getElementById('lab_v').innerHTML='속도 vx [m/s] — 실측(초록)'+(D.cmd?` · 명령(흰 점선, ${D.cmd.src})`:'')+(D.plannedVx?' · 계획(보라 점선)':'');
   document.getElementById('lab_traj').textContent=`궤적 (map · 위치소스: ${D.poseSrc} · 속도색·빨강=그립초과)`;
   // 캔버스

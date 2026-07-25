@@ -198,13 +198,33 @@ def declare_common_args():
             description='L1 룩어헤드 거리 상한 [m]'
         ),
 
-        # ── 종방향 감속 한계 (곡률 사전감속 제동거리 계산에도 직접 쓰임) ──
-        # sim/real 둘 다 동일값이라 base_max_accel과 달리 여기서 공용 선언. 8.0은 실측 검증
-        # 전 추정값 — max_lateral_accel 마찰피크(~6.7) 대비 낙관적일 수 있어 실차에서 급제동
-        # IMU 실측(acc_mean) 후 재조정 권장.
+        # ── 종방향 감속: 두 개의 서로 다른 감속도 ──
+        # 2026-07-25 분리(그 전엔 base_max_decel 하나가 두 역할을 겸했다). 두 값은 튜닝 방향이
+        # 정반대라 한 노브로 묶으면 반드시 한쪽이 손해를 본다:
+        #   base_max_decel = "명령 속도를 초당 얼마나 빨리 떨어뜨릴 수 있나"(램프 rate limit).
+        #                    높을수록 감속 명령이 빨리 도달 → 높게 유지.
+        #   prebrake_decel = "차가 실제로 낼 수 있는 감속도"(곡률 사전감속 제동거리 v²/2a).
+        #                    낮을수록 코너를 더 멀리서 보고 일찍 감속 → 실측값에 맞춰야 함.
         DeclareLaunchArgument(
             'base_max_decel', default_value='8.0',
-            description='종방향 최대 감속도 한계 [m/s^2] (곡률 사전감속 제동거리 계산에 사용, 실측 전 추정값)'
+            description='명령 속도 하강 rate limit [m/s^2]. 낮추면 감속 명령이 늦게 도달하므로 높게 유지'
+        ),
+        # ⚠️ prebrake_decel은 반드시 **실측 감속 권한**이어야 한다. 2026-07-25 실차 bag
+        # (rosbag2_2026_07_25-22_08_50): 명령을 4.00→3.11로 내렸는데 실속은 4.03→3.80(-0.4 m/s²).
+        # VESC 속도모드는 회생제동이 거의 없어 사실상 coast고, 주행 중 /commands/motor/brake는
+        # 0건이었다. 예전처럼 8.0을 쓰면 4 m/s에서 제동거리를 1.0m로 착각(실제 필요 ~8m)해
+        # 사전감속이 0.5초 앞만 보고 시작 → 시케인 언더스티어 크래시. 1.5는 실측(0.4)과 8.0
+        # 사이의 잠정 보수값 — 감속 스텝 테스트로 실측 확정되면 그 값으로 교체할 것.
+        DeclareLaunchArgument(
+            'prebrake_decel', default_value='1.5',
+            description='곡률 사전감속 제동거리 산출용 실측 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
+        ),
+        # ── 곡률 사전감속 스캔 거리 하한 ──
+        # 전방 곡률 스캔 거리 = max(count*0.1, v²/(2·prebrake_decel)). count는 저속에서 제동거리가
+        # 짧아질 때의 하한. 20(=2m)은 4 m/s에서 0.5초 앞밖에 못 보게 만들던 값이라 60(=6m)로 상향.
+        DeclareLaunchArgument(
+            'curvature_lookahead_count', default_value='60',
+            description='곡률 룩어헤드 스캔 거리 하한 (×0.1m). 60 = 6m'
         ),
         # ── 최저 순항 속도 하한 ──
         # 곡률 사전감속·헤어핀에서 목표속도가 이 값 밑으로 안 내려가게 하는 하한(sim/real 공용).
@@ -382,9 +402,11 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'max_speed': max_speed,
             'min_speed': LaunchConfiguration('min_speed'),
             'max_lateral_accel': max_lateral_accel,
-            'curvature_lookahead_count': 20,
+            'curvature_lookahead_count': ParameterValue(
+                LaunchConfiguration('curvature_lookahead_count'), value_type=int),
             'base_max_accel': base_max_accel,
             'base_max_decel': LaunchConfiguration('base_max_decel'),
+            'prebrake_decel': LaunchConfiguration('prebrake_decel'),
             'stall_guard_enable': LaunchConfiguration('stall_guard_enable'),
             'stall_speed_threshold': LaunchConfiguration('stall_speed_threshold'),
             'stall_hold_speed': LaunchConfiguration('stall_hold_speed'),
