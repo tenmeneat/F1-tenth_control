@@ -8,7 +8,7 @@
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,'Segoe UI','Noto Sans KR',sans-serif}
-h1{font-size:18px;margin:0}h2{font-size:15px;margin:24px 0 10px;color:var(--dim);font-weight:600}
+h1{font-size:18px;margin:0}h2{font-size:15px;margin:26px 0 10px;color:var(--dim);font-weight:600}
 h3{font-size:14px;margin:16px 0 6px}
 header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .wrap{max-width:1200px;margin:0 auto;padding:0 20px 60px}
@@ -32,14 +32,24 @@ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-
 .ctl button:hover{border-color:var(--accent)}
 #seek{flex:1;min-width:180px}
 .tval{font-variant-numeric:tabular-nums;color:var(--dim);min-width:130px}
-.charts{display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px}
 .chart{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
-.chart canvas{width:100%;height:120px;display:block;cursor:crosshair}
+.chart canvas{width:100%;height:150px;display:block;cursor:crosshair}
 .chart .clab{font-size:12px;color:var(--dim);padding:2px 4px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-@media(max-width:760px){.grid2{grid-template-columns:1fr}}
+/* 그래프 + 해석패널 2단 레이아웃 */
+.chartrow{display:grid;grid-template-columns:1fr 300px;gap:10px;align-items:stretch;margin:9px 0}
+.chartrow>div:first-child{min-width:0}
+@media(max-width:820px){.chartrow{grid-template-columns:1fr}}
+.explain{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:12px;line-height:1.55}
+.explain .rl{color:var(--dim);font-weight:700;font-size:10px;letter-spacing:.05em;margin-top:8px}
+.explain .rl:first-child{margin-top:0}
+.explain .tx{color:var(--fg);margin:2px 0 0}
+/* 파트별 가이드 */
+.guide-part{margin:16px 0 0}
+.parthdr{font-size:14px;font-weight:700;color:var(--fg);padding:7px 0;border-bottom:1px solid var(--line);margin-bottom:8px}
 .finding{background:var(--panel);border-radius:8px;padding:10px 14px;margin:8px 0}
 .finding b{font-size:14px}.finding p{margin:4px 0 0;color:var(--dim);font-size:13px}
+.finding .fix{margin-top:7px;padding:7px 10px;background:#0a0d12;border:1px solid var(--line);border-radius:6px;color:#7ee787;font-size:12.5px;line-height:1.5}
+.finding .fix b{color:#7ee787}
 .badge{color:#fff;font-size:11px;padding:1px 7px;border-radius:10px;margin-right:8px;font-weight:600}
 pre.cmd{background:#0a0d12;border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;color:#7ee787;font-size:13px;white-space:pre-wrap}
 .note{color:#f5a623;font-size:13px}
@@ -91,33 +101,56 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
       <span><span class="dot" style="background:#bc8cff"></span>글로벌 경로</span>
     </div>
     <canvas id="modestrip" title="주행 모드 타임라인"></canvas>
-    <div class="charts">
+
+    <h2>핵심 주행 그래프 <span class="hint">— 각 그래프 오른쪽에 읽는 법·결론</span></h2>
+    <div class="chartrow">
       <div class="chart"><div class="clab" id="lab_v">속도 vx [m/s]</div><canvas id="c_v"></canvas></div>
+      <div class="explain" id="ex_v"></div>
+    </div>
+    <div class="chartrow">
       <div class="chart"><div class="clab" id="lab_a">횡가속도 a_lat = vx·wz [m/s²]</div><canvas id="c_a"></canvas></div>
+      <div class="explain" id="ex_a"></div>
+    </div>
+    <div class="chartrow">
       <div class="chart"><div class="clab">종가속도 dvx/dt [m/s²] (0 아래 = 감속)</div><canvas id="c_d"></canvas></div>
+      <div class="explain" id="ex_d"></div>
     </div>
     <div id="readout">그래프를 클릭·드래그하면 그 시점 수치가 여기에 표시됩니다.</div>
 
-    <h2>자동 튜닝 가이드</h2>
+    <h2>파트별 튜닝 가이드 <span class="hint">— 파트마다 무엇을 · 어떤 파라미터로 (🔧)</span></h2>
     <div id="guide"></div>
     <h3>권장 다음 셰이크다운</h3>
     <div id="reccmd"></div>
 
-    <h2>주행상태 분석 그래프</h2>
-    <div class="grid2">
+    <h2>궤적 · 요레이트</h2>
+    <div class="chartrow">
       <div><div class="clab hint" id="lab_traj">궤적 (map, 속도색 · 빨강=그립초과)</div><canvas id="traj" class="traj"></canvas></div>
+      <div class="explain" id="ex_traj"></div>
+    </div>
+    <div class="chartrow">
       <div>
         <div class="chart"><div class="clab">요레이트 [rad/s] (파랑 odom · 주황 IMU)</div><canvas id="c_y" style="height:150px"></canvas></div>
         <div class="chart" style="margin-top:8px"><div class="clab">IMU raw (gyro deg/s · acc g)</div><canvas id="c_i" style="height:150px"></canvas></div>
       </div>
+      <div class="explain" id="ex_y"></div>
     </div>
 
     <h2 id="h_extra" style="display:none">명령 · 경로 · VESC <span class="hint">— 해당 토픽이 있을 때만</span></h2>
-    <div class="charts">
-      <div class="chart" id="wrap_steer" style="display:none"><div class="clab">명령 조향각 [rad] <span class="hint">(±0.41 = 물리한계)</span></div><canvas id="c_steer" style="height:130px"></canvas></div>
-      <div class="chart" id="wrap_x" style="display:none"><div class="clab">크로스트랙 오차 [m] <span class="hint">(글로벌 경로 최근접 거리)</span></div><canvas id="c_x" style="height:130px"></canvas></div>
-      <div class="chart" id="wrap_vesc" style="display:none"><div class="clab">VESC — 모터전류 [A] · 입력전압 [V] <span class="hint">(best-effort, 미검증 레이아웃)</span></div><canvas id="c_vesc" style="height:130px"></canvas></div>
-      <div class="chart" id="wrap_cmd" style="display:none"><div class="clab">VESC 명령 — ERPM(파랑)·브레이크(빨강)·서보(초록)</div><canvas id="c_cmd" style="height:130px"></canvas></div>
+    <div class="chartrow" id="wrap_x" style="display:none">
+      <div class="chart"><div class="clab">크로스트랙 오차 [m] <span class="hint">(글로벌 경로 최근접 거리)</span></div><canvas id="c_x" style="height:140px"></canvas></div>
+      <div class="explain" id="ex_x"></div>
+    </div>
+    <div class="chartrow" id="wrap_steer" style="display:none">
+      <div class="chart"><div class="clab">명령 조향각 [rad] <span class="hint">(±0.41 = 물리한계)</span></div><canvas id="c_steer" style="height:140px"></canvas></div>
+      <div class="explain" id="ex_steer"></div>
+    </div>
+    <div class="chartrow" id="wrap_vesc" style="display:none">
+      <div class="chart"><div class="clab">VESC — 모터전류 [A] · 입력전압 [V] <span class="hint">(best-effort, 미검증 레이아웃)</span></div><canvas id="c_vesc" style="height:140px"></canvas></div>
+      <div class="explain">읽는 법: 빨강=모터전류[A], 초록=입력전압[V]. 결론: 전류가 반복 스파이크면 탈조/과부하, 전압이 부하 때 크게 새그하면 배터리 방전/내부저항.</div>
+    </div>
+    <div class="chartrow" id="wrap_cmd" style="display:none">
+      <div class="chart"><div class="clab">브레이크 명령 [A] <span class="hint">(0이면 브레이크 채널 미사용)</span></div><canvas id="c_cmd" style="height:140px"></canvas></div>
+      <div class="explain">읽는 법: 빨강=/commands/motor/brake. 결론: 주행 내내 0이면 감속을 속도명령 인하로만 함 → 저마찰서 회생제동이 약해 코너 사전감속이 무효. 감속 권한 복구의 근거.</div>
     </div>
   </div>
 </div>
@@ -367,7 +400,7 @@ function pVesc(c){hdr(c);const volt=c.f64();c.f64();const cm=c.f64(),ci=c.f64(),
 // ══ 상수 (control_map_node 기준) ══
 const WHEELBASE=0.33,MAX_STEER=0.41,CAR_W=0.31,CAR_L=0.58,DEG2RAD=Math.PI/180;
 const R_MIN=WHEELBASE/Math.tan(MAX_STEER);
-let GRIP=5.0;
+let GRIP=6.5;const GRIP_ASSUMED=6.5;
 
 // ══ bag 파싱: 한 .db3 → 원시 메시지(절대 타임스탬프). 토픽명 우선 분류(겹치는 타입 자동 구분) ══
 const RAW_KEYS=["odom_vesc","odom_pf","odom_gen","imu_raw","imu_data","imu_gen","scanRaw","tfRaw",
@@ -378,7 +411,7 @@ function parseDb(bytes,SQL){
   if(!tq)throw new Error("topics 테이블이 없습니다 (rosbag2 sqlite(.db3)가 맞나요?)");
   const TOPIC={};tq.values.forEach(r=>TOPIC[r[0]]={name:r[1],type:r[2]});
   const stmt=db.prepare("SELECT topic_id,timestamp,data FROM messages ORDER BY timestamp");
-  const R={};RAW_KEYS.forEach(k=>R[k]=[]);R.wpnts=null;
+  const R={};RAW_KEYS.forEach(k=>R[k]=[]);R.wpnts=null;R.lwpnts=null;
   while(stmt.step()){
     const row=stmt.get(),tid=row[0],ts=row[1],blob=row[2];
     const tp=TOPIC[tid];if(!tp)continue;const nm=tp.name,ty=tp.type;
@@ -396,6 +429,7 @@ function parseDb(bytes,SQL){
       else if(nm==="/drive_autonomous")R.drive_auto.push(P(pAckermann));
       else if(nm==="/drive_mppi")R.drive_mppi.push(P(pAckermann));
       else if(nm==="/global_waypoints")R.wpnts=pWpntArray(new CDR(u8));
+      else if(nm==="/local_waypoints")R.lwpnts=pWpntArray(new CDR(u8));
       else if(nm==="/sensors/core")R.vesc.push(P(pVesc));
       else if(nm==="/commands/motor/speed")R.cmd_erpm.push([ts,pFloat(new CDR(u8))]);
       else if(nm==="/commands/motor/brake")R.cmd_brake.push([ts,pFloat(new CDR(u8))]);
@@ -416,8 +450,8 @@ function parseDb(bytes,SQL){
 async function analyze(buffers){
   const SQL=await initSqlJs({wasmBinary:b64ToBytes(WASM_B64)});
   const parts=buffers.map(b=>parseDb(b,SQL));
-  const R={};RAW_KEYS.forEach(k=>R[k]=[]);let wpnts=null;
-  parts.forEach(p=>{RAW_KEYS.forEach(k=>{const s=p[k];if(s)for(let i=0;i<s.length;i++)R[k].push(s[i]);});if(p.wpnts)wpnts=p.wpnts;});
+  const R={};RAW_KEYS.forEach(k=>R[k]=[]);let wpnts=null,lwpnts=null;
+  parts.forEach(p=>{RAW_KEYS.forEach(k=>{const s=p[k];if(s)for(let i=0;i<s.length;i++)R[k].push(s[i]);});if(p.wpnts)wpnts=p.wpnts;if(p.lwpnts)lwpnts=p.lwpnts;});
   // 겹치는 토픽 자동 선택 (우선순위)
   const odom=R.odom_vesc.length?R.odom_vesc:(R.odom_pf.length?R.odom_pf:R.odom_gen);
   const odomLabel=R.odom_vesc.length?"/odom":(R.odom_pf.length?"/pf/pose/odom":"odom");
@@ -460,8 +494,9 @@ async function analyze(buffers){
     track.push([o.t,p.x,p.y,p.yaw,o.vx,o.vx*o.wz,0,o.wz]);}
   // dvx/dt (중앙차분 + 3-tap 평활)
   for(let i=0;i<N;i++){const im=Math.max(0,i-1),ip=Math.min(N-1,i+1);const dt=track[ip][0]-track[im][0];
-    track[i][6]=dt>1e-6?(track[ip][4]-track[im][4])/dt:0;}
+    let d=dt>0.005?(track[ip][4]-track[im][4])/dt:0;track[i][6]=Math.max(-25,Math.min(25,d));}  // dt 뭉침·E-stop 스파이크 클램프(물리 ±25)
   const dv=track.map(p=>p[6]);for(let i=0;i<N;i++){const a=dv[Math.max(0,i-1)],b=dv[i],c=dv[Math.min(N-1,i+1)];track[i][6]=(a+b+c)/3;}
+  const dur=track.length?track[N-1][0]:0;
 
   // LiDAR map 프레임 프레임들 (≤140)
   const LASER_FWD=0.27,MAXF=140,STRIDE=6;const step=Math.max(1,Math.floor(scanRaw.length/MAXF));
@@ -476,11 +511,11 @@ async function analyze(buffers){
   // IMU 시리즈
   const IMU={t:imu.map(m=>m.t),gz_raw:imu.map(m=>m.gz),gz_rad:imu.map(m=>m.gz*DEG2RAD),ax:imu.map(m=>m.ax),ay:imu.map(m=>m.ay)};
 
-  // ── 신규: 명령(조향/속도) ──
+  // ── 명령(조향/속도) ──
   const cmd=drive.length?{t:drive.map(d=>d.t),speed:drive.map(d=>d.speed),steer:drive.map(d=>d.steer),src:driveLabel}:null;
 
-  // ── 신규: 글로벌 경로 → 3D경로 + 크로스트랙 오차 + 계획속도 ──
-  let wp=[],plannedVx=null,xtrack=null;
+  // ── 글로벌 경로 → 3D경로 + 크로스트랙 오차 + 계획속도 ──
+  let wp=[],plannedVx=null,xtrack=null,plannedStats=null;
   if(wpnts&&wpnts.length){
     wp=wpnts.map(w=>[w.x,w.y]);
     const wt=[],wv=[],xv=[];
@@ -488,59 +523,208 @@ async function analyze(buffers){
       for(let j=0;j<wpnts.length;j++){const dx=wpnts[j].x-px,dy=wpnts[j].y-py,d=dx*dx+dy*dy;if(d<best){best=d;bvx=wpnts[j].vx;}}
       wt.push(track[i][0]);wv.push(bvx);xv.push(Math.sqrt(best));}
     plannedVx={t:wt,v:wv};xtrack={t:wt,v:xv};
+    const pvv=wpnts.map(w=>w.vx).filter(v=>v>0.01);plannedStats=pvv.length?{mx:Math.max(...pvv),mn:Math.min(...pvv)}:null;
   }
 
-  // ── 신규: VESC / 커맨드 / 모드 ──
+  // ── VESC / 커맨드 / 모드 ──
   const vescS=vesc.length?{t:vesc.map(v=>v.t),curr:vesc.map(v=>v.curr),volt:vesc.map(v=>v.volt),erpm:vesc.map(v=>v.erpm)}:null;
   const cmdErpm=R.cmd_erpm.length?{t:R.cmd_erpm.map(x=>x[0]),v:R.cmd_erpm.map(x=>x[1])}:null;
   const cmdBrake=R.cmd_brake.length?{t:R.cmd_brake.map(x=>x[0]),v:R.cmd_brake.map(x=>x[1])}:null;
   const cmdServo=R.cmd_servo.length?{t:R.cmd_servo.map(x=>x[0]),v:R.cmd_servo.map(x=>x[1])}:null;
   const modeStr=R.mode.map(x=>[x[0],x[1]]);
 
-  const S={track,scans,wp,imu:IMU,estop,mppi,hasMap,dur:track.length?track[N-1][0]:0,
-    cmd,plannedVx,xtrack,vesc:vescS,cmdErpm,cmdBrake,cmdServo,modeStr,odomLabel,poseSrc};
-  const D=diagnose(S,GRIP);
+  // ── 로컬라이제이션 진단 보조 ──
+  const rangeOf=(arr,fx,fy)=>{if(!arr.length)return null;let x0=1e18,x1=-1e18,y0=1e18,y1=-1e18;
+    arr.forEach(m=>{const x=fx(m),y=fy(m);if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;});return {x0,x1,y0,y1};};
+  const pfRange=rangeOf(pf,m=>m.x,m=>m.y);
+  const globalRange=(wpnts&&wpnts.length)?rangeOf(wpnts,w=>w.x,w=>w.y):null;
+  const boxOverlap=(a,b)=>!!(a&&b&&a.x0<=b.x1&&a.x1>=b.x0&&a.y0<=b.y1&&a.y1>=b.y0);
+  const overlap=boxOverlap(pfRange,globalRange);
+  let hasSim=false,hasMapOdom=false,moMax=0;
+  tfRaw.forEach(f=>f.tr.forEach(x=>{
+    if(/ego_racecar/.test(x.fid)||/ego_racecar/.test(x.child))hasSim=true;
+    if(x.fid==="map"&&x.child==="odom"){hasMapOdom=true;moMax=Math.max(moMax,Math.abs(x.x),Math.abs(x.y));}}));
+  let pfJump=0;for(let i=1;i<pf.length;i++){const a=pf[i-1],b=pf[i];const dt=b.t-a.t;
+    if(dt>0&&dt<0.2){const d=Math.hypot(b.x-a.x,b.y-a.y);if(d>pfJump)pfJump=d;}}
+  const loc={hasPf:pf.length>0,pfRange,globalRange,overlap,hasSim,hasMapOdom,mapOdomIdentity:hasMapOdom&&moMax<0.05,pfJump};
+  const scanRate=(scanRaw.length&&dur>0)?scanRaw.length/dur:0;
+
+  // ── 출발 탈조/데드존 감지: 명령속도>1인데 실측 vx≈0 최장구간 ──
+  let stallDur=0;
+  if(drive.length&&odom.length){
+    const ot=odom.map(o=>o.t),ov=odom.map(o=>Math.abs(o.vx));
+    const vxAt=t=>{let lo=0,hi=ot.length-1;if(t<=ot[0])return ov[0];if(t>=ot[hi])return ov[hi];while(lo+1<hi){const m=(lo+hi)>>1;if(ot[m]<=t)lo=m;else hi=m;}return ov[lo];};
+    let start=null;
+    for(let i=0;i<drive.length;i++){const d=drive[i];
+      if(d.speed>1.0&&vxAt(d.t)<0.3){if(start===null)start=d.t;const run=d.t-start;if(run>stallDur)stallDur=run;}
+      else start=null;}
+  }
+
+  const S={track,scans,wp,imu:IMU,estop,mppi,hasMap,dur,
+    cmd,plannedVx,xtrack,plannedStats,vesc:vescS,cmdErpm,cmdBrake,cmdServo,modeStr,odomLabel,poseSrc,
+    loc,scanRate,stallDur,hasLocal:!!(lwpnts&&lwpnts.length)};
+  const D=diagnose(S);
   return Object.assign(S,D);
 }
 
-// ══ 자동 진단 (analyze_bag.py diagnose 포팅) ══
-function diagnose(S,grip){
+// ══ 적응형 진단 보조: 실측 그립 · 코너 분할(주행 요레이트 기반, 맵 불일치와 무관) ══
+function estimateGrip(tr){
+  const N=tr.length,GCAP=11;   // 물리 상한 μ≈1.1 → 스핀 중 vx·wz 폭주(그립 아님) 차단
+  // 제어상실 onset: a_lat 비물리(>GCAP) 또는 조향 포화 + 큰 횡하중. 이 이전만 '제어된 그립'
+  let onset=N;
+  for(let i=0;i<N;i++){const v=tr[i][4],w=Math.abs(tr[i][7]),a=Math.abs(tr[i][5]);
+    if(v<1.5)continue;const rad=w>1e-3?v/w:1e9;
+    if(a>GCAP||(rad<1.2*R_MIN&&a>6)){onset=i;break;}}
+  const reached=onset<N;
+  const clean=[];for(let i=0;i<onset;i++){if(tr[i][4]>1.5)clean.push(Math.abs(tr[i][5]));}
+  clean.sort((x,y)=>x-y);
+  const peak=clean.length?clean[clean.length-1]:0;
+  const q=f=>clean.length?clean[Math.min(clean.length-1,Math.floor(f*(clean.length-1)))]:0;
+  // 한계 도달: onset 직전(제어된 구간) a_lat 상위값 = 실그립(전이 오버슈트 포함이라 상한 캡)
+  const measured=reached?Math.min(GCAP,Math.max(3,q(0.95))):peak;
+  return {reached,measured,peak,onset};
+}
+function segmentCorners(tr,grip){
+  const N=tr.length,KTHR=0.15,segs=[];let cur=null,lastT=-1e9;   // κ>0.15 (반경<6.7m) = 코너
+  for(let i=0;i<N;i++){const v=tr[i][4];const k=v>0.8?Math.abs(tr[i][7])/v:0;
+    if(k>KTHR&&v>1.0){if(!cur)cur={i0:i,i1:i};else cur.i1=i;lastT=tr[i][0];}
+    else if(cur&&tr[i][0]-lastT>0.4){segs.push(cur);cur=null;}}
+  if(cur)segs.push(cur);
+  return segs.filter(s=>s.i1-s.i0>=3).map(s=>{
+    let peakAl=0,minRad=1e9,sat=false;const entryV=tr[s.i0][4];
+    for(let i=s.i0;i<=s.i1;i++){const a=Math.abs(tr[i][5]);if(a>peakAl)peakAl=a;
+      const rad=Math.abs(tr[i][7])>1e-3?tr[i][4]/Math.abs(tr[i][7]):1e9;if(rad<minRad)minRad=rad;
+      if(rad<1.2*R_MIN&&tr[i][4]>1.5)sat=true;}
+    const vSafe=peakAl>grip?entryV*Math.sqrt(grip/peakAl):null;
+    return {i0:s.i0,i1:s.i1,t0:tr[s.i0][0],t1:tr[s.i1][0],entryV,peakAl,minRad,sat,vSafe};});
+}
+
+// ══ 자동 진단 — 파트별(퍼셉션/로컬라이제이션/글로벌/로컬/컨트롤) + 적응형 ══
+function diagnose(S){
   const tr=S.track,N=tr.length;const findings=[],rec={};
+  const F=(part,level,title,body,fix)=>findings.push({part,level,title,body,fix});
   const t=tr.map(p=>p[0]),vx=tr.map(p=>p[4]),wz=tr.map(p=>p[7]),alat=tr.map(p=>p[5]),dvx=tr.map(p=>p[6]);
   const absmax=a=>a.reduce((m,v)=>Math.max(m,Math.abs(v)),0);
   const driving=i=>{let st=false;for(const[et,ev]of S.estop){if(et<=t[i])st=!ev;}return st&&vx[i]>1.0;};
   const dm=tr.map((_,i)=>driving(i));
   const peakV=Math.max(...vx),peakAl=absmax(alat);
+  const gi=estimateGrip(tr);
+  const grip=gi.reached?gi.measured:GRIP_ASSUMED;   // ★ bag에서 실측한 그립. 한계 미도달이면 가정값
+  const corners=segmentCorners(tr,grip);
   const over=alat.filter(a=>Math.abs(a)>grip).length,overFrac=over/N;
-  // 사고 이전만: 감속권한
+
+  // ═══ 퍼셉션 (LiDAR) ═══
+  if(!S.scanRate)F('perc','info','LiDAR 스캔 없음',
+    '/scan이 기록되지 않았습니다. 랩탑 원격 녹화는 wifi로 /scan이 드롭될 수 있습니다. 퍼셉션·GapFollower 진단 불가.',
+    '<b>젯슨에서 직접</b> 녹화할 것. GapFollower·장애물 회피(opponent_detector)는 /scan이 있어야 동작.');
+  else if(S.scanRate<20)F('perc','warn',`스캔 레이트 낮음 ${S.scanRate.toFixed(0)}Hz`,
+    'LiDAR 발행이 정상(≈40Hz)보다 낮습니다 = 드롭. 원격 wifi 녹화이거나 urg_node 부하.',
+    '녹화를 <b>젯슨 로컬</b>에서 하고, <b>urg_node</b> 상태·USB 대역폭 확인.');
+  else F('perc','ok',`스캔 ${S.scanRate.toFixed(0)}Hz 정상`,'LiDAR가 정상 레이트로 발행 중.');
+
+  // ═══ 로컬라이제이션 (MCL) ═══
+  const L=S.loc;
+  if(!L.hasPf){
+    F('loc','warn','MCL 위치추정 없음 (/pf/pose/odom)',
+      '파티클필터가 map프레임 pose를 발행하지 않았습니다. MCL 미기동이거나 초기수렴 실패. 위치가 없으면 컨트롤러가 경로 최근접점을 못 찾습니다.',
+      '<b>monte_carlo_localization</b>(mcl_launch.py) 기동 확인 · RViz <b>2D Pose Estimate</b>로 /initialpose 설정.');
+  }else{
+    if(L.globalRange&&!L.overlap){
+      F('loc','critical','차와 경로가 서로 다른 지도',
+        `MCL 추정 차 위치 x[${L.pfRange.x0.toFixed(1)},${L.pfRange.x1.toFixed(1)}] · y[${L.pfRange.y0.toFixed(1)},${L.pfRange.y1.toFixed(1)}]와 글로벌 경로 x[${L.globalRange.x0.toFixed(1)},${L.globalRange.x1.toFixed(1)}]가 겹치지 않습니다. 두 스택이 다른 맵을 보고 있어 <b>어느 속도로도</b> 경로 추종이 불가능합니다. 출발 조향이 매번 왼/오 랜덤인 것도 이 때문(잘못된 위치로 최근접점을 찾음).`,
+        '<b>F1_MAP</b> 환경변수로 MCL·global·local 맵 통일(<code>export F1_MAP=&lt;맵&gt;</code>). 맵 파일은 <code>particle_filter_cpp/maps/&lt;F1_MAP&gt;.{png,yaml}</code>(src+install 둘 다). global은 raceline도 <code>offline_trajectory_generator/output/&lt;map&gt;/</code> 재생성 필요.');
+    }
+    if(L.hasSim&&L.hasMapOdom)
+      F('loc','warn','시뮬 gym_bridge 혼입',
+        'TF에 실차 <code>map→odom</code>과 시뮬 <code>map→ego_racecar/base_link</code>가 공존합니다. 실차 주행 중 gym_bridge가 같이 떠 있어 프레임/TF가 오염됩니다.',
+        '실차는 <b>f1tenth_stack(f110) 브링업만</b>. gym_bridge(control_sim.launch.py) 종료. <code>ego_racecar/*</code> 프레임이 보이면 시뮬 혼입 신호.');
+    if(L.pfJump>0.5)
+      F('loc','warn',`MCL pose 점프 ${L.pfJump.toFixed(2)}m`,
+        '파티클필터 추정 위치가 순간적으로 크게 튑니다. 초기포즈 부정확 · 파티클 수 부족 · 스캔매칭 실패 신호. 출발 위치가 매번 달라지면 조향도 매번 달라집니다.',
+        'RViz <b>2D Pose Estimate</b>로 /initialpose를 실제 출발점에 정확히 · MCL <b>max_particles↑</b> · 초기 분산↓.');
+    if(L.mapOdomIdentity)
+      F('loc','info','map→odom 보정 거의 0',
+        'map→odom 변환이 사실상 항등(0)입니다 — MCL이 odom을 map으로 교정하지 못하거나 아직 미수렴. (이 앱은 위치를 /pf/pose/odom에서 직접 읽어 우회함)',
+        'MCL 수렴 상태 확인. 지속되면 스캔매칭·맵 품질 점검.');
+    if(L.globalRange&&L.overlap&&!L.hasSim&&L.pfJump<=0.5)
+      F('loc','ok','로컬라이제이션 정합','MCL 위치와 글로벌 경로가 같은 지도에 있고 pose가 안정적입니다. 맵/프레임 정상.');
+  }
+
+  // ═══ 글로벌 플래닝 (경로) ═══
+  if(!S.wp||!S.wp.length){
+    F('global','warn','글로벌 경로 없음 (/global_waypoints)',
+      '경로가 발행되지 않았습니다. global_planning 미기동 시 컨트롤러가 GapFollower failsafe(기본: 정지)로 빠집니다.',
+      '<b>global_planning.launch.py</b> 기동 확인. F1_MAP에 맞는 raceline(<code>output/&lt;map&gt;/</code>)이 있어야 발행됨.');
+  }else if(S.plannedStats){
+    F('global','info',`계획 속도 프로파일 ${S.plannedStats.mn.toFixed(1)}~${S.plannedStats.mx.toFixed(1)} m/s`,
+      '글로벌 경로의 목표 속도 범위입니다. 컨트롤러는 이걸 max_speed/max_lateral_accel로 캡해 추종합니다. 코너에서 이 속도가 실그립(√(a_lat/κ))을 넘으면 오버스피드로 스핀합니다.',
+      '프로파일이 공격적이면 <b>offline_trajectory_generator</b>의 <code>gui_params.yaml</code>(최대횡가속·최대속도)을 낮춰 <b>raceline 재생성</b>. 컨트롤러측 즉시 캡은 <code>max_speed</code>/<code>max_lateral_accel</code>.');
+  }
+
+  // ═══ 로컬 플래닝 (회피) ═══
+  if(S.wp&&S.wp.length){
+    if(!S.hasLocal)F('local','info','로컬 경로 없음 (/local_waypoints)',
+      '로컬 플래너 경로가 없습니다. 정적 주행/회피 미사용이면 정상입니다. (MPPI 전환 시 로컬 추종은 아직 미지원)',
+      '장애물 회피가 필요하면 <b>local_planning.launch.py</b> + opponent_detector 기동. 정적 주행이면 무시.');
+    else F('local','ok','로컬 경로 있음','/local_waypoints 발행 중 — 로컬 플래너 동작.');
+  }
+
+  // ═══ 컨트롤 (조향·속도) ═══
+  // 감속 권한 (사고 이전만)
   let onset=N;for(let i=0;i<N;i++){if(Math.abs(alat[i])>1.6*grip||Math.abs(dvx[i])>15){onset=i;break;}}
   let minDecel=Infinity,accelFrac=0,nPre=0,sumAcc=0;
   for(let i=0;i<onset;i++){if(dm[i]&&vx[i]>1.5){nPre++;minDecel=Math.min(minDecel,dvx[i]);if(dvx[i]>0)sumAcc++;}}
   if(nPre)accelFrac=sumAcc/nPre;else minDecel=0;
   const onsetT=onset<N?t[onset]:(t[N-1]||0);
-  if(nPre>=10){
-    if(minDecel>-0.8)findings.push({level:"critical",title:"감속 권한 없음 (근본 원인)",
-      body:`그립 붕괴 이전(${onsetT.toFixed(1)}s)까지 최저 종가속도 ${minDecel>=0?'+':''}${minDecel.toFixed(2)} m/s² — 감속 국면이 사실상 없음(구간의 ${(accelFrac*100).toFixed(0)}%가 가속). 실제 감속은 벽/E-stop 이후에만 나타남. 속도명령을 낮춰도 차가 안 서므로 코너 사전감속(√(a_lat/κ) 캡)이 무효. → 브레이크 채널/VESC 회생제동 점검이 근본 해결. 그전까지는 max_speed를 코너 안전속도로 낮추는 게 유일한 레버.`});
-    else if(minDecel>-2.5)findings.push({level:"warn",title:"감속 권한 약함",
-      body:`그립 붕괴 이전 최저 종가속도 ${minDecel.toFixed(2)} m/s². 감속이 약해 코너 사전감속이 부족할 수 있음.`});
+  // 감속 권한은 차가 실제로 밀어붙였을 때만 의미(등속 순항서 minDecel≈0은 "안 밟은 것"이지 결함 아님)
+  if(nPre>=10&&(gi.reached||peakV>=3.5)){
+    if(minDecel>-0.8)F('control','critical','감속 권한 없음 (근본 원인)',
+      `그립 붕괴 이전(${onsetT.toFixed(1)}s)까지 최저 종가속도 ${minDecel>=0?'+':''}${minDecel.toFixed(2)} m/s² — 감속 국면이 사실상 없음(구간의 ${(accelFrac*100).toFixed(0)}%가 가속). 실제 감속은 벽/E-stop 이후에만 나타남. 속도명령을 낮춰도 차가 안 서므로 코너 사전감속(√(a_lat/κ) 캡)이 무효.`,
+      '근본: <b>VESC 브레이크 채널/회생제동</b> 점검(저마찰서 속도명령 인하만으론 감속 안 됨). 그전까진 <code>max_speed</code>를 코너 안전속도로 낮추는 게 유일한 레버.');
+    else if(minDecel>-2.5)F('control','warn','감속 권한 약함',
+      `그립 붕괴 이전 최저 종가속도 ${minDecel.toFixed(2)} m/s². 감속이 약해 코너 사전감속이 부족할 수 있음.`,
+      '<code>base_max_decel</code> 확인 + VESC 브레이크 경로 점검.');
   }
-  // 그립 초과 / 스핀
-  let nSpin=0;for(let i=0;i<N;i++){const R=Math.abs(wz[i])>1e-3?vx[i]/Math.abs(wz[i]):1e9;if(R<1.15*R_MIN&&vx[i]>2)nSpin++;}
-  if(peakAl>1.6*grip)findings.push({level:"critical",title:"그립 초과 → 스핀/조향 포화",
-    body:`최대 |a_lat| = ${peakAl.toFixed(1)} m/s² (목표 그립 ${grip.toFixed(1)}의 ${(peakAl/grip).toFixed(1)}배). 전체의 ${(overFrac*100).toFixed(0)}%가 그립 초과. 선회반경이 최소반경(${R_MIN.toFixed(2)}m)에 닿는 조향 포화 샘플 ${nSpin}개 = 풀락 스핀. 코너 진입속도가 그립 대비 과속.`});
-  else if(overFrac>0.05)findings.push({level:"warn",title:"간헐적 그립 초과",
-    body:`최대 |a_lat| = ${peakAl.toFixed(1)}, 그립 초과 ${(overFrac*100).toFixed(0)}%. 마진 부족.`});
-  else findings.push({level:"ok",title:"그립 마진 양호",
-    body:`최대 |a_lat| = ${peakAl.toFixed(1)} m/s² < 목표 ${grip.toFixed(1)}. 코너 그립 마진 확보.`});
-  // 권장 max_speed (사고 이전 그립초과 코너)
-  let vSafe=null;for(let i=0;i<onset;i++){if(Math.abs(alat[i])>grip&&vx[i]>0.5){const vs=vx[i]*Math.sqrt(grip/Math.abs(alat[i]));vSafe=vSafe===null?vs:Math.min(vSafe,vs);}}
-  if(vSafe!==null)rec.max_speed=Math.max(1.5,Math.floor(vSafe*2)/2);
-  if(peakAl>1.6*grip){rec.max_lateral_accel=5.0;rec.min_speed=1.5;rec.note=true;}
+  // 출발 탈조/데드존
+  if(S.stallDur>0.8)F('control','warn',`출발 탈조/데드존 ${S.stallDur.toFixed(1)}s`,
+    `명령 속도는 >1 m/s인데 실측 vx가 0 근처인 구간이 ${S.stallDur.toFixed(1)}초. VESC FOC 센서리스 저속 데드존(0.17~0.49 m/s)에서 커뮤테이션 실패로 차가 안 나가는 증상.`,
+    '제어 코드로는 못 고침(모터 저속 정류 문제). 임시=<b>푸시스타트</b>. 근본=VESC <b>오픈루프 전류 상향(~20A)</b> 또는 HFI. <code>stall_guard</code>는 급발진만 막는 안전망.');
+  // 실측 그립 (가정 대신 데이터에서)
+  if(gi.reached)F('control','info',`실측 그립 ≈ ${grip.toFixed(1)} m/s² (한계 관측됨)`,
+    `슬라이드/스핀 직전까지 타이어가 버틴 최대 제어 횡가속(스핀 중 vx·wz 폭주는 제외, 물리 상한 11로 캡). 가정값이 아니라 이 실측치로 코너 진단·권장속도를 계산했습니다. 전이 오버슈트가 섞여 다소 낙관적일 수 있어 마진을 크게 둡니다.`,
+    `<code>max_lateral_accel:=${(grip*0.8).toFixed(1)}</code> (실측×0.8 보수 마진)로 설정.`);
+  else F('control','info',`그립 한계 미도달 — 실측 ≥ ${gi.peak.toFixed(1)} m/s²`,
+    `차가 그립 한계까지 안 밀어붙였습니다(최대 |a_lat| ${gi.peak.toFixed(1)}, 조향 포화 없음). 이 bag만으로는 실그립을 못 정합니다 — 아래 코너 판정은 <b>가정 그립 ${GRIP_ASSUMED}</b> 기준(참고용).`,
+    `실그립을 재려면 안전한 곳에서 코너 속도를 서서히 올려 <b>슬라이드가 시작되는 지점</b>까지 밀고 다시 녹화.`);
+  // 코너별 오버스피드 (주행 요레이트로 분할 — 맵 불일치와 무관하게 동작)
+  const bad=corners.filter(c=>c.peakAl>grip||c.sat).sort((a,b)=>b.peakAl-a.peakAl);
+  const vSafeMin=bad.reduce((m,c)=>c.vSafe!=null?Math.min(m,c.vSafe):m,Infinity);
+  bad.slice(0,3).forEach(c=>{const ratio=c.peakAl/grip;
+    F('control',ratio>1.6?'critical':'warn',`코너 @ ${c.t0.toFixed(1)}s 오버스피드`,
+      `진입 ${c.entryV.toFixed(1)} m/s · 피크 |a_lat| ${c.peakAl.toFixed(1)} (${ratio.toFixed(1)}×그립)${c.sat?' · 조향 포화(풀락 스핀)':''} · 최소반경 ${c.minRad.toFixed(1)}m. 그립 대비 과속 진입.`,
+      c.vSafe!=null?`이 코너 안전 진입속도 <b>v_safe ${c.vSafe.toFixed(1)} m/s</b>. 이 구간만 프로파일 감속(offline_trajectory_generator)하거나, 여의치 않으면 전역 <code>max_speed</code>로 캡.`:'');});
+  if(!bad.length)F('control','ok','코너 그립 마진 양호',
+    `감지된 코너 ${corners.length}개 모두 그립(${grip.toFixed(1)}) 이내 — 오버스피드·조향 포화 없음.`);
+  // 코너 언더스티어 (odom 조향의도 vs IMU 실측 요레이트)
+  if(S.imu.t.length&&corners.length){const it=S.imu.t,ig=S.imu.gz_rad;
+    const nr=x=>{let lo=0,hi=it.length-1;if(x<=it[0])return 0;if(x>=it[hi])return hi;while(lo+1<hi){const m=(lo+hi)>>1;if(it[m]<=x)lo=m;else hi=m;}return lo;};
+    let sum=0,n=0;corners.forEach(c=>{for(let i=c.i0;i<=c.i1;i++){if(tr[i][4]<1.5)continue;sum+=Math.abs(tr[i][7])-Math.abs(ig[nr(tr[i][0])]);n++;}});
+    const u=n?sum/n:0;
+    if(n>=20&&u>0.3)F('control','warn',`코너 언더스티어 Δ${u.toFixed(2)} rad/s`,
+      `코너에서 조향이 지시한 요레이트(odom)보다 실측(IMU)이 평균 ${u.toFixed(2)} rad/s 작음 = 앞이 안 물려 바깥으로 밀림.`,
+      `<code>yaw_rate_gain</code> 0.08→0.10~0.12로 카운터스티어 보강(채터링 관찰). 근본은 프런트 그립/타이어·진입속도.`);}
+  // 권장 파라미터 (코너별 v_safe에서 도출)
+  if(bad.length&&isFinite(vSafeMin))rec.max_speed=Math.max(1.5,Math.floor(vSafeMin*2)/2);
+  if(gi.reached)rec.max_lateral_accel=+(grip*0.8).toFixed(1);
+  if(bad.some(c=>c.peakAl>1.6*grip))rec.note=true;
+  if(S.stallDur>0.8)rec.min_speed=1.0;
   // IMU deg/s
-  if(S.imu.gz_raw.length&&absmax(S.imu.gz_raw)>30)findings.push({level:"info",title:"IMU 자이로 = deg/s 확인",
-    body:`자이로 z 최대 ${absmax(S.imu.gz_raw).toFixed(0)} (deg/s 스케일). IMU_ANGULAR_SCALE(π/180) 보정 전제. 언더스티어 시 요레이트 카운터스티어가 조향을 더 밀어 포화를 앞당길 수 있으니 use_imu:=false A/B 권장.`});
-  const stats={dur:S.dur,peakV,peakAl,overFrac,minDecel,nSpin,grip};
-  return {findings,rec,stats};
+  if(S.imu.gz_raw.length&&absmax(S.imu.gz_raw)>30)F('control','info','IMU 자이로 = deg/s 확인',
+    `자이로 z 최대 ${absmax(S.imu.gz_raw).toFixed(0)} (deg/s 스케일). IMU_ANGULAR_SCALE(π/180) 보정 전제. 언더스티어 시 요레이트 카운터스티어가 조향을 더 밀어 포화를 앞당길 수 있음.`,
+    '조향 채터링 시 <code>use_imu:=false</code>로 순수 L1+LUT 회귀. IMU 재투입 시 낮은 <code>yaw_rate_gain</code>(0.05).');
+
+  const stats={dur:S.dur,peakV,peakAl,overFrac,minDecel,nCorners:corners.length,grip,gripReached:gi.reached,gripPeak:gi.peak};
+  return {findings,rec,stats,gripUsed:grip,corners};
 }
 
 // ══ 렌더/뷰어 (데스크톱 도구의 3D 뷰어 코드 기반) ══
@@ -592,20 +776,43 @@ function draw(){B=basis();const W=gl.clientWidth,H=gl.clientHeight;ctx.fillStyle
   const sc=scanAt(cur);if(sc){ctx.fillStyle='#58a6ff';for(let i=0;i<sc.pts.length;i+=2){const p=proj([sc.pts[i],sc.pts[i+1],0.03]);if(p){ctx.beginPath();ctx.arc(p[0],p[1],1.6,0,7);ctx.fill();}}}
   const ps=poseAt(cur);drawCar(ps.x,ps.y,ps.yaw);drawCharts();}
 
-// ── 차트 (다중 시리즈 + 선택적 playhead/grip) ──
+// ── 차트 (격자·축눈금 + 다중 시리즈 + 선택적 playhead/grip) ──
+function niceTicks(mn,mx,n){const span=mx-mn;if(!(span>0))return[mn];
+  const raw=span/n,mag=Math.pow(10,Math.floor(Math.log10(raw))),nm=raw/mag;
+  let st=nm<1.5?1:nm<3?2:nm<7?5:10;st*=mag;
+  const a=Math.ceil(mn/st-1e-9)*st,out=[];for(let v=a;v<=mx+1e-9;v+=st)out.push(Math.abs(v)<st/1e6?0:v);return {ticks:out,step:st};}
+function fmtNum(v,st){const d=st>=10?0:st>=1?1:st>=0.1?1:2;return v.toFixed(d);}
+const CHART_M={l:44,r:12,t:10,b:20};
 function drawChart(cv,series,opt){opt=opt||{};const c=cv.getContext('2d'),W=cv.clientWidth,Ht=cv.clientHeight;c.clearRect(0,0,W,Ht);
+  const M=CHART_M;
   let mn=Infinity,mx=-Infinity;series.forEach(s=>s.v.forEach(v=>{if(v<mn)mn=v;if(v>mx)mx=v;}));
   if(!isFinite(mn)){mn=-1;mx=1;}
-  if(opt.zeroCenter){const a=Math.max(Math.abs(mn),Math.abs(mx),opt.grip||1);mn=-a;mx=a;}
-  if(mx-mn<1e-6)mx=mn+1;const pad=6;
-  const X=t=>pad+(t-T0)/DUR*(W-2*pad),Y=v=>Ht-pad-(v-mn)/(mx-mn)*(Ht-2*pad);
-  c.strokeStyle='#2a313c';c.lineWidth=1;
-  if(opt.zeroCenter){c.beginPath();c.moveTo(pad,Y(0));c.lineTo(W-pad,Y(0));c.stroke();}
-  if(opt.grip){c.strokeStyle='#f5a623';c.setLineDash([4,3]);[opt.grip,-opt.grip].forEach(g=>{c.beginPath();c.moveTo(pad,Y(g));c.lineTo(W-pad,Y(g));c.stroke();});c.setLineDash([]);}
-  series.forEach(s=>{c.strokeStyle=s.color;c.lineWidth=s.w||1.3;c.setLineDash(s.dash||[]);c.beginPath();let started=false;
+  if(opt.zeroCenter){const a=Math.max(Math.abs(mn),Math.abs(mx));mn=-a;mx=a;}
+  // grip선은 데이터가 그립의 60% 이상 접근했을 때만 스케일을 확장(저속 bag서 신호가 눌리는 것 방지)
+  if(opt.grip&&Math.max(Math.abs(mn),Math.abs(mx))>=0.6*opt.grip){if(mx<opt.grip)mx=opt.grip*1.1;if(opt.zeroCenter&&mn>-opt.grip)mn=-opt.grip*1.1;}
+  if(mx-mn<1e-6)mx=mn+1;
+  const pad=(mx-mn)*0.06;mn-=pad;mx+=pad;
+  const PW=W-M.l-M.r,PH=Ht-M.t-M.b;
+  const X=t=>M.l+(t-T0)/DUR*PW,Y=v=>M.t+(mx-v)/(mx-mn)*PH;
+  // y 격자 + 눈금값
+  const yt=niceTicks(mn,mx,4);
+  c.font='10px system-ui';c.textBaseline='middle';c.textAlign='right';
+  yt.ticks.forEach(v=>{const y=Y(v);c.strokeStyle=(v===0)?'#39414f':'#1a212c';c.lineWidth=1;
+    c.beginPath();c.moveTo(M.l,y);c.lineTo(W-M.r,y);c.stroke();
+    c.fillStyle='#7d8795';c.fillText(fmtNum(v,yt.step),M.l-4,y);});
+  // x 격자 + 시간축
+  const xt=niceTicks(0,DUR,5);c.textAlign='center';c.textBaseline='top';
+  xt.ticks.forEach(dt=>{const x=X(T0+dt);if(x<M.l-1||x>W-M.r+1)return;c.strokeStyle='#1a212c';c.lineWidth=1;
+    c.beginPath();c.moveTo(x,M.t);c.lineTo(x,Ht-M.b);c.stroke();
+    c.fillStyle='#7d8795';c.fillText(dt.toFixed(0)+'s',x,Ht-M.b+3);});
+  // grip 한계선
+  if(opt.grip){c.strokeStyle='#f5a623';c.setLineDash([4,3]);[opt.grip,-opt.grip].forEach(g=>{if(g<mn||g>mx)return;c.beginPath();c.moveTo(M.l,Y(g));c.lineTo(W-M.r,Y(g));c.stroke();});c.setLineDash([]);}
+  // 시리즈 (플롯 영역 클립)
+  c.save();c.beginPath();c.rect(M.l,M.t,PW,PH);c.clip();
+  series.forEach(s=>{c.strokeStyle=s.color;c.lineWidth=s.w||1.4;c.setLineDash(s.dash||[]);c.beginPath();let started=false;
     for(let i=0;i<s.t.length;i++){const x=X(s.t[i]),y=Y(s.v[i]);if(!started){c.moveTo(x,y);started=true;}else c.lineTo(x,y);}c.stroke();});
-  c.setLineDash([]);
-  if(opt.playhead){const px=X(cur);c.strokeStyle='#e6edf3';c.lineWidth=1;c.beginPath();c.moveTo(px,pad);c.lineTo(px,Ht-pad);c.stroke();}}
+  c.setLineDash([]);c.restore();
+  if(opt.playhead){const px=X(cur);c.strokeStyle='#e6edf3';c.lineWidth=1;c.beginPath();c.moveTo(px,M.t);c.lineTo(px,Ht-M.b);c.stroke();}}
 function drawCharts(){const T=track.map(p=>p[0]);
   // 속도: 실측(초록) + 명령(흰 점선) + 계획(보라 점선) 오버레이
   const vs=[{t:T,v:track.map(p=>p[4]),color:'#39d353'}];
@@ -649,11 +856,26 @@ function drawModeStrip(){if(!modeStrip)return;const c=modeStrip.getContext('2d')
 
 // ── 궤적 탑다운 ──
 function drawTrajectory(){const cv=trajCv,c=cv.getContext('2d'),W=cv.clientWidth,H=cv.clientHeight;c.clearRect(0,0,W,H);
-  const xs=track.map(p=>p[1]),ys=track.map(p=>p[2]);const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
-  const pad=24,sx=(W-2*pad)/Math.max(0.1,x1-x0),sy=(H-2*pad)/Math.max(0.1,y1-y0),s=Math.min(sx,sy);
+  // 궤적 + 경로를 함께 담는 bbox (정합 확인용)
+  const xs=track.map(p=>p[1]),ys=track.map(p=>p[2]);
+  let x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+  if(wp.length){wp.forEach(p=>{if(p[0]<x0)x0=p[0];if(p[0]>x1)x1=p[0];if(p[1]<y0)y0=p[1];if(p[1]>y1)y1=p[1];});}
+  const pad=28,sx=(W-2*pad)/Math.max(0.1,x1-x0),sy=(H-2*pad)/Math.max(0.1,y1-y0),s=Math.min(sx,sy);
   const X=x=>pad+(x-x0)*s+(W-2*pad-(x1-x0)*s)/2,Y=y=>H-pad-(y-y0)*s-(H-2*pad-(y1-y0)*s)/2;
+  // 좌표 격자 (2·5·10 단위)
+  const gt=niceTicks(x0,x1,6);c.font='9px system-ui';
+  c.strokeStyle='#161d27';c.lineWidth=1;c.fillStyle='#5b6472';c.textBaseline='bottom';c.textAlign='left';
+  gt.ticks.forEach(gx=>{const px=X(gx);if(px<pad-1||px>W-pad+1)return;c.beginPath();c.moveTo(px,pad);c.lineTo(px,H-pad);c.stroke();c.fillText(gx.toFixed(0),px+2,H-pad-2);});
+  const gy=niceTicks(y0,y1,5);c.textBaseline='top';
+  gy.ticks.forEach(v=>{const py=Y(v);if(py<pad-1||py>H-pad+1)return;c.beginPath();c.moveTo(pad,py);c.lineTo(W-pad,py);c.stroke();c.fillText(v.toFixed(0),pad+2,py+2);});
+  // 글로벌 경로(보라)
+  if(wp.length){c.strokeStyle='#bc8cff';c.lineWidth=1.6;c.beginPath();for(let i=0;i<wp.length;i++){const x=X(wp[i][0]),y=Y(wp[i][1]);if(i)c.lineTo(x,y);else c.moveTo(x,y);}c.stroke();}
+  // 주행 궤적(속도색)
   for(let i=0;i+1<track.length;i++){c.strokeStyle=speedColor(track[i][4]);c.lineWidth=3;c.beginPath();c.moveTo(X(track[i][1]),Y(track[i][2]));c.lineTo(X(track[i+1][1]),Y(track[i+1][2]));c.stroke();}
-  c.fillStyle='#e5484d';for(let i=0;i<track.length;i++)if(Math.abs(track[i][5])>GRIP){c.beginPath();c.arc(X(track[i][1]),Y(track[i][2]),2.4,0,7);c.fill();}}
+  // 그립초과 지점(빨강점)
+  c.fillStyle='#e5484d';for(let i=0;i<track.length;i++)if(Math.abs(track[i][5])>GRIP){c.beginPath();c.arc(X(track[i][1]),Y(track[i][2]),2.4,0,7);c.fill();}
+  // 시작점
+  c.fillStyle='#7ee787';c.beginPath();c.arc(X(track[0][1]),Y(track[0][2]),4,0,7);c.fill();}
 
 // ── 캔버스 리사이즈 ──
 function fit(cv){const dpr=window.devicePixelRatio||1;cv.width=cv.clientWidth*dpr;cv.height=cv.clientHeight*dpr;cv.getContext('2d').setTransform(dpr,0,0,dpr,0,0);}
@@ -674,9 +896,11 @@ function wireControls(){
   playBtn.onclick=()=>{playing=!playing;playBtn.textContent=playing?'❚❚ 일시정지':'▶︎ 재생';lastTs=0;if(playing)requestAnimationFrame(loop);};
   document.getElementById('reset').onclick=()=>{defcam();draw();};
   const tip=document.getElementById('tip');
+  // 차트는 좌우 여백(축)을 제외한 플롯 영역 기준으로 시간 매핑(모드스트립은 전체폭)
+  const cw=cv=>cv===modeStrip?{l:0,w:cv.clientWidth}:{l:CHART_M.l,w:Math.max(1,cv.clientWidth-CHART_M.l-CHART_M.r)};
   [chV,chA,chD,chY,chI,chSteer,chX,chVesc,chCmd,modeStrip].filter(Boolean).forEach(cv=>{
-    cv.onclick=e=>{cur=T0+(e.offsetX/cv.clientWidth)*DUR;syncSeek();draw();};
-    cv.onmousemove=e=>{const t=T0+(e.offsetX/cv.clientWidth)*DUR,p=track[idxAt(t)];const md=modeInfo(t);
+    cv.onclick=e=>{const g=cw(cv);cur=T0+Math.min(1,Math.max(0,(e.offsetX-g.l)/g.w))*DUR;syncSeek();draw();};
+    cv.onmousemove=e=>{const g=cw(cv);const t=T0+Math.min(1,Math.max(0,(e.offsetX-g.l)/g.w))*DUR,p=track[idxAt(t)];const md=modeInfo(t);
       tip.style.display='block';tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';
       let s=`t=${(t-T0).toFixed(2)} s\nvx    ${p[4].toFixed(2)} m/s\na_lat ${p[5].toFixed(1)} m/s²\ndvx   ${p[6].toFixed(2)} m/s²\nwz    ${p[7].toFixed(2)} rad/s\n모드  ${md.label}${mppiOn(t)?' · MPPI':''}`;
       tip.textContent=s;};
@@ -694,22 +918,77 @@ function wireControls(){
   window.onresize=()=>{resizeAll();drawTrajectory();drawStaticCharts();draw();};
 }
 
+// ── 그래프별 해석·결론 패널 채우기 ──
+function setEx(id,read,conc,cc){const e=document.getElementById(id);if(!e)return;
+  e.innerHTML=`<div class="rl">읽는 법</div><div class="tx">${read}</div>`+
+    `<div class="rl">결론</div><div class="tx" style="color:${cc||'#7ee787'}">${conc}</div>`;}
+function fillExplain(D){const s=D.stats,L=D.loc;
+  // 속도
+  let vc,vcc;
+  if(D.stallDur>0.8){vc=`명령은 >1 m/s인데 실측 vx가 0 근처인 구간이 ${D.stallDur.toFixed(1)}s → <b>출발 데드존/탈조</b>. 손으로 밀어야 출발.`;vcc='#e5484d';}
+  else{vc=`최고 ${s.peakV.toFixed(1)} m/s. 실측(초록)이 계획(보라)을 잘 따라가면 추종 정상.`;vcc='#7ee787';}
+  setEx('ex_v','초록=실측 vx · 흰 점선=명령 · 보라 점선=글로벌 계획속도. 세 선이 겹칠수록 추종이 좋다.',vc,vcc);
+  // 횡가속도
+  let ac,acc;const rr=s.peakAl/s.grip;
+  if(rr>1.6){ac=`최대 |a_lat| ${s.peakAl.toFixed(1)} = 그립의 ${rr.toFixed(1)}배, ${(s.overFrac*100).toFixed(0)}% 구간 초과 → 코너 과속·스핀.`;acc='#e5484d';}
+  else if(s.overFrac>0.05){ac=`최대 ${s.peakAl.toFixed(1)}, 초과 ${(s.overFrac*100).toFixed(0)}% → 마진 부족.`;acc='#f5a623';}
+  else{ac=`최대 ${s.peakAl.toFixed(1)} < 그립 ${s.grip.toFixed(1)} → 마진 확보.`;acc='#7ee787';}
+  setEx('ex_a',`빨강=vx·wz(횡가속). 주황 점선=${s.gripReached?'실측':'가정'} 그립 ±${GRIP.toFixed(1)}. 이 선을 넘으면 타이어가 못 버틴다.`,ac,acc);
+  // 종가속도
+  let dc,dcc;
+  if(s.minDecel>-0.8){dc=`감속 국면 최저 ${s.minDecel>=0?'+':''}${s.minDecel.toFixed(2)} m/s² → 사실상 <b>감속 못 함</b>(브레이크/회생제동 미작동). 코너 사전감속 무효.`;dcc='#e5484d';}
+  else if(s.minDecel>-2.5){dc=`최저 ${s.minDecel.toFixed(2)} m/s² → 감속 약함.`;dcc='#f5a623';}
+  else{dc=`최저 ${s.minDecel.toFixed(2)} m/s² → 감속 정상.`;dcc='#7ee787';}
+  setEx('ex_d','민트=dvx/dt. 0 위=가속, 아래=감속. 코너 직전에 아래로 내려가야 정상.',dc,dcc);
+  // 궤적
+  let tc,tcc;
+  if(L&&L.globalRange&&!L.overlap){tc='차 위치와 경로가 <b>다른 지도</b>(겹침 없음) → 맵 불일치. 아무리 잘 몰아도 경로에 못 얹힌다.';tcc='#e5484d';}
+  else if(L&&L.pfJump>0.5){tc=`위치 점프 ${L.pfJump.toFixed(2)}m → MCL 미수렴/초기포즈 문제.`;tcc='#f5a623';}
+  else if(L&&L.overlap){tc='차 궤적이 경로(보라)와 같은 지도에 얹혀 있으면 정합 정상.';tcc='#7ee787';}
+  else tc='위치소스와 경로 겹침을 확인.';
+  setEx('ex_traj',`선=주행궤적(속도색) · 초록점=시작 · 빨강점=그립초과 · 보라=글로벌 경로. 위치소스=${D.poseSrc}.`,tc,tcc);
+  // 요레이트
+  setEx('ex_y','위: 파랑=odom 요레이트(조향이 의도한 값) · 주황=IMU 실측. 아래: IMU raw(진동/노이즈).',
+    '두 선이 벌어지면 슬립/언더스티어. 파형은 같은데 시간만 밀리면 IMU 지연. raw가 지저분하면 노이즈 → <code>use_imu:=false</code> 고려.','#9aa4b2');
+  // 크로스트랙
+  if(D.xtrack){const xv=D.xtrack.v,xm=xv.reduce((a,b)=>Math.max(a,b),0),xa=xv.reduce((a,b)=>a+b,0)/(xv.length||1);
+    let xc,xcc;
+    if(xm>3){xc=`최대 ${xm.toFixed(1)}m · 평균 ${xa.toFixed(1)}m → 경로 크게 이탈(맵 불일치 또는 추종 실패).`;xcc='#e5484d';}
+    else if(xm>0.8){xc=`최대 ${xm.toFixed(1)}m · 평균 ${xa.toFixed(2)}m → 다소 벗어남.`;xcc='#f5a623';}
+    else{xc=`최대 ${xm.toFixed(2)}m → 경로 잘 추종.`;xcc='#7ee787';}
+    setEx('ex_x','글로벌 경로 최근접 거리. 0에 가까울수록 라인 위, 커지면 이탈.',xc,xcc);}
+  // 조향
+  if(D.cmd){const st=D.cmd.steer,sat=st.filter(v=>Math.abs(v)>MAX_STEER*0.98).length/(st.length||1);
+    let sc,scc;
+    if(sat>0.05){sc=`±0.41 포화 ${(sat*100).toFixed(0)}% → 조향 한계 도달(과도 요구/스핀).`;scc='#e5484d';}
+    else{sc=`포화 ${(sat*100).toFixed(0)}% → 여유 있음.`;scc='#7ee787';}
+    setEx('ex_steer','명령 조향각 [rad]. 주황 점선 ±0.41=물리한계. 오래 붙어 있으면 포화.',sc,scc);}
+}
+
 function renderReport(D,name){
-  DATA=D;track=D.track;scans=D.scans;wp=D.wp||[];
+  DATA=D;track=D.track;scans=D.scans;wp=D.wp||[];GRIP=D.gripUsed;
   T0=track[0][0];T1=track[track.length-1][0];DUR=(T1-T0)||1;VMAX=Math.max(1,...track.map(p=>p[4]));
   const st=D.stats;
+  const gripTile=st.gripReached?`${st.grip.toFixed(1)} m/s²`:`≥ ${st.gripPeak.toFixed(1)}`;
   const tiles=[["주행 시간",`${st.dur.toFixed(1)} s`],["최고 속도",`${st.peakV.toFixed(2)} m/s`],["최대 |a_lat|",`${st.peakAl.toFixed(1)} m/s²`],
-    ["그립 초과",`${(st.overFrac*100).toFixed(0)} %`],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],["스핀 샘플",`${st.nSpin}`]];
+    ["실측 그립",gripTile],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],["코너 수",`${st.nCorners}`]];
   document.getElementById('tiles').innerHTML=tiles.map(([k,v])=>`<div class="tile"><div class="tv">${v}</div><div class="tl">${k}</div></div>`).join('');
-  // 가이드
+  // 파트별 가이드
   const col={critical:"#e5484d",warn:"#f5a623",info:"#4c8dff",ok:"#30a46c"},lab={critical:"치명",warn:"주의",info:"참고",ok:"양호"},ord={critical:0,warn:1,info:2,ok:3};
-  const fs=D.findings.slice().sort((a,b)=>ord[a.level]-ord[b.level]);
-  document.getElementById('guide').innerHTML=fs.map(f=>`<div class="finding" style="border-left:4px solid ${col[f.level]}"><span class="badge" style="background:${col[f.level]}">${lab[f.level]}</span><b>${f.title}</b><p>${f.body}</p></div>`).join('');
+  const PART={perc:{icon:'👁',name:'퍼셉션 (LiDAR·장애물)'},loc:{icon:'📍',name:'로컬라이제이션 (MCL)'},
+    global:{icon:'🗺️',name:'글로벌 플래닝 (경로)'},local:{icon:'🧭',name:'로컬 플래닝 (회피)'},control:{icon:'🎮',name:'컨트롤 (조향·속도)'}};
+  const PORDER=['perc','loc','global','local','control'];
+  const guideHtml=PORDER.filter(p=>D.findings.some(f=>f.part===p)).map(p=>{
+    const items=D.findings.filter(f=>f.part===p).sort((a,b)=>ord[a.level]-ord[b.level]);
+    return `<div class="guide-part"><div class="parthdr">${PART[p].icon} ${PART[p].name}</div>`+
+      items.map(f=>`<div class="finding" style="border-left:4px solid ${col[f.level]}"><span class="badge" style="background:${col[f.level]}">${lab[f.level]}</span><b>${f.title}</b><p>${f.body}</p>${f.fix?`<div class="fix">🔧 ${f.fix}</div>`:''}</div>`).join('')+
+      `</div>`;}).join('');
+  document.getElementById('guide').innerHTML=guideHtml;
   const r=D.rec,args=[];if('max_speed'in r)args.push(`max_speed:=${r.max_speed}`);if('max_lateral_accel'in r)args.push(`max_lateral_accel:=${r.max_lateral_accel}`);if('min_speed'in r)args.push(`min_speed:=${r.min_speed}`);
   let cmd="ros2 launch f1tenth_control control_real.launch.py";if(args.length)cmd+=" \\\n    "+args.join(" \\\n    ");
   let recHtml=`<pre class="cmd">${cmd}</pre>`;if(r.note)recHtml+=`<p class="note">＋ 코드 안전망 권장: 측정 a_lat이 그립 초과하거나 조향이 ±0.41에 포화되면 target_speed를 하드컷(스핀/limit-cycle 차단), recovery_lat_error 1.0→0.5.</p>`;
   document.getElementById('reccmd').innerHTML=recHtml;
-  document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] (주황선 = 그립 ±${GRIP})`;
+  document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] (주황선 = ${st.gripReached?'실측':'가정'} 그립 ±${GRIP.toFixed(1)})`;
   document.getElementById('lab_v').innerHTML='속도 vx [m/s] — 실측(초록)'+(D.cmd?` · 명령(흰 점선, ${D.cmd.src})`:'')+(D.plannedVx?' · 계획(보라 점선)':'');
   document.getElementById('lab_traj').textContent=`궤적 (map · 위치소스: ${D.poseSrc} · 속도색·빨강=그립초과)`;
   // 캔버스
@@ -718,11 +997,12 @@ function renderReport(D,name){
   chY=document.getElementById('c_y');chI=document.getElementById('c_i');trajCv=document.getElementById('traj');
   chSteer=document.getElementById('c_steer');chX=document.getElementById('c_x');chVesc=document.getElementById('c_vesc');chCmd=document.getElementById('c_cmd');modeStrip=document.getElementById('modestrip');
   // 신규 섹션 show/hide (해당 토픽 있을 때만)
-  const show=(id,on)=>{const e=document.getElementById(id);if(e)e.style.display=on?(id==='modestrip'||id.startsWith('h_')?'block':'block'):'none';};
+  const show=(id,on)=>{const e=document.getElementById(id);if(!e)return;e.style.display=on?(id==='modestrip'||id==='h_extra'?'block':''):'none';};
   const anyMode=(D.estop&&D.estop.length)||(D.modeStr&&D.modeStr.length)||(D.mppi&&D.mppi.length);
   show('modestrip',anyMode);
   show('wrap_steer',!!D.cmd);show('wrap_x',!!D.xtrack);show('wrap_vesc',!!D.vesc);show('wrap_cmd',!!D.cmdBrake);
   show('h_extra',!!(D.cmd||D.xtrack||D.vesc||D.cmdBrake));
+  fillExplain(D);
   computeBounds();defcam();cur=T0;playing=false;
   wireControls();
   const paint=()=>{resizeAll();drawTrajectory();drawStaticCharts();syncSeek();draw();};

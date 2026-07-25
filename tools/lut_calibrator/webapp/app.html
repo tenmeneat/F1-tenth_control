@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>F1TENTH Steering LUT Calibrator</title>
+<style>
+/* ── 토큰: 파랑 쪽으로 살짝 치우친 중성색(순회색 아님) + 검증된 sequential 파랑 램프 ── */
+:root{
+  color-scheme:light;
+  --page:#f6f8fb; --card:#ffffff; --sunk:#eef1f6; --line:#dde3ec; --line-soft:#e08;
+  --line-soft:#eaeef5;
+  --ink:#101620; --ink-2:#5a6474; --ink-3:#8b95a5;
+  --accent:#2a78d6; --accent-soft:#e8f0fc;
+  --good:#1baf7a; --warn:#eda100; --crit:#e34948;
+  /* sequential 파랑. '샘플 0'은 별도 상태(--cell-empty)로 빼 놓았으므로 데이터 램프는
+     가장 옅은 단계(step 100)에서 시작하지 않는다 — 1개짜리 셀도 확실히 파랗게 읽혀야
+     '측정 안 함'과 '조금 측정함'이 구분된다 */
+  --s1:#9ec5f4; --s2:#6da7ec; --s3:#3987e5; --s4:#2a78d6; --s5:#256abf; --s6:#184f95; --s7:#0d366b;
+  --cell-empty:#edf0f5;
+  --shadow:0 1px 2px rgba(16,22,32,.05),0 4px 16px rgba(16,22,32,.05);
+}
+@media (prefers-color-scheme:dark){
+  :root:where(:not([data-theme="light"])){
+    color-scheme:dark;
+    --page:#0e1218; --card:#161c25; --sunk:#11161e; --line:#28303c; --line-soft:#212936;
+    --ink:#e9eef6; --ink-2:#97a2b3; --ink-3:#6b7686;
+    --accent:#4c8dff; --accent-soft:#16233a;
+    --good:#199e70; --warn:#c98500; --crit:#e66767;
+    /* 어두운 표면에선 near-zero가 표면 쪽(어두움)으로 물러나야 하므로 램프를 뒤집는다 */
+    --s1:#184f95; --s2:#256abf; --s3:#2a78d6; --s4:#3987e5; --s5:#6da7ec; --s6:#9ec5f4; --s7:#cde2fb;
+    --cell-empty:#1b222c;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --page:#0e1218; --card:#161c25; --sunk:#11161e; --line:#28303c; --line-soft:#212936;
+  --ink:#e9eef6; --ink-2:#97a2b3; --ink-3:#6b7686;
+  --accent:#4c8dff; --accent-soft:#16233a;
+  --good:#199e70; --warn:#c98500; --crit:#e66767;
+  --s1:#184f95; --s2:#256abf; --s3:#2a78d6; --s4:#3987e5; --s5:#6da7ec; --s6:#9ec5f4; --s7:#cde2fb;
+  --cell-empty:#1b222c;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+}
+
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--page);color:var(--ink);
+  font:15px/1.6 ui-sans-serif,system-ui,-apple-system,'Segoe UI','Noto Sans KR',sans-serif;
+  -webkit-font-smoothing:antialiased}
+.mono{font-family:ui-monospace,'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums}
+
+/* ── 레이아웃 ── */
+.wrap{max-width:1080px;margin:0 auto;padding:0 22px 72px}
+header{border-bottom:1px solid var(--line);background:var(--card)}
+.hbar{max-width:1080px;margin:0 auto;padding:18px 22px;display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+h1{font-size:19px;margin:0;letter-spacing:-.01em;font-weight:650}
+.sub{font-size:13px;color:var(--ink-2)}
+h2{font-size:12px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--ink-3);margin:34px 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+
+/* ── 드롭존 ── */
+#drop{margin:34px 0 0;border:1.5px dashed var(--line);border-radius:14px;padding:46px 24px;
+  text-align:center;background:var(--card);cursor:pointer;transition:border-color .15s,background .15s}
+#drop:hover,#drop.hot{border-color:var(--accent);background:var(--accent-soft)}
+#drop:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+#drop .ic{font-size:30px;line-height:1}
+#drop .t{font-size:16px;margin-top:12px;font-weight:600}
+#drop .s{font-size:13px;color:var(--ink-2);margin-top:8px;max-width:60ch;margin-inline:auto}
+#status{margin:16px 0;color:var(--ink-2);min-height:22px;font-size:14px}
+.err{color:var(--crit)}
+
+/* ── 요약 타일: 상태를 숫자만이 아니라 형태(스트라이프)로도 인코딩 ── */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin:0}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:13px 15px;
+  position:relative;overflow:hidden;box-shadow:var(--shadow)}
+.tile::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent)}
+.tile.is-good::before{background:var(--good)}
+.tile.is-warn::before{background:var(--warn)}
+.tile.is-crit::before{background:var(--crit)}
+.tl{font-size:11.5px;color:var(--ink-2);letter-spacing:.02em}
+.tv{font-size:24px;font-weight:680;letter-spacing:-.02em;margin-top:3px}
+.tn{font-size:11.5px;color:var(--ink-3);margin-top:2px}
+
+/* ── 검증 배너: 색 단독이 아니라 아이콘+레이블 동반 ── */
+.verdict{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border-radius:11px;
+  border:1px solid var(--line);background:var(--card);margin:12px 0 0;box-shadow:var(--shadow)}
+.verdict .vi{font-size:17px;line-height:1.4}
+.verdict .vt{font-weight:650;font-size:14px}
+.verdict .vb{font-size:13px;color:var(--ink-2);margin-top:3px}
+.verdict.is-good{border-left:3px solid var(--good)}
+.verdict.is-crit{border-left:3px solid var(--crit)}
+.verdict.is-warn{border-left:3px solid var(--warn)}
+.verdict code{background:var(--sunk);padding:1px 6px;border-radius:4px;font-size:12.5px;
+  font-family:ui-monospace,Menlo,Consolas,monospace}
+
+/* ── 히트맵 ── */
+.hmwrap{padding:16px 18px 12px}
+.hmscroll{overflow-x:auto}
+#hm{display:block;cursor:crosshair;min-width:520px}
+.axlab{font-size:11.5px;color:var(--ink-3);letter-spacing:.04em}
+.legend{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:12px;font-size:11.5px;color:var(--ink-2)}
+.lgi{display:flex;align-items:center;gap:5px}
+.sw{width:15px;height:11px;border-radius:2.5px;border:1px solid rgba(128,128,128,.22)}
+#tip{position:fixed;pointer-events:none;z-index:60;display:none;background:var(--card);
+  border:1px solid var(--accent);border-radius:8px;padding:7px 10px;font-size:12.5px;
+  box-shadow:var(--shadow);white-space:pre;color:var(--ink);
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+
+/* ── 표 ── */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);
+  font-weight:650;padding:10px 12px;border-bottom:1px solid var(--line)}
+td{padding:9px 12px;border-bottom:1px solid var(--line-soft);color:var(--ink-2)}
+tr:last-child td{border-bottom:0}
+td.n{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;color:var(--ink)}
+td.name{color:var(--ink);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.tblscroll{overflow-x:auto}
+.pill{display:inline-block;font-size:11px;padding:1.5px 8px;border-radius:99px;font-weight:600;
+  border:1px solid transparent;white-space:nowrap}
+.pill.ok{background:color-mix(in srgb,var(--good) 14%,transparent);color:var(--good);
+  border-color:color-mix(in srgb,var(--good) 32%,transparent)}
+.pill.skip{background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn);
+  border-color:color-mix(in srgb,var(--warn) 32%,transparent)}
+.pill.no{background:color-mix(in srgb,var(--crit) 14%,transparent);color:var(--crit);
+  border-color:color-mix(in srgb,var(--crit) 32%,transparent)}
+
+/* ── 버튼 / 내보내기 ── */
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+button{font:inherit;font-size:14px;background:var(--card);color:var(--ink);border:1px solid var(--line);
+  border-radius:9px;padding:9px 15px;cursor:pointer;transition:border-color .13s,background .13s}
+button:hover{border-color:var(--accent)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600}
+button.primary:hover{filter:brightness(1.07)}
+button.ghost{background:transparent;color:var(--ink-2)}
+.exp{margin-top:12px}
+.exp summary{cursor:pointer;font-size:13px;color:var(--ink-2);padding:4px 0}
+.exp summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+textarea{width:100%;height:190px;margin-top:9px;background:var(--sunk);color:var(--ink);
+  border:1px solid var(--line);border-radius:9px;padding:11px;font-size:11.5px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;resize:vertical;white-space:pre}
+.note{font-size:12.5px;color:var(--ink-2);margin:9px 0 0;line-height:1.65}
+.note code,.s code{background:var(--sunk);padding:1px 5px;border-radius:4px;font-size:12px;
+  font-family:ui-monospace,Menlo,Consolas,monospace}
+#results{display:none}
+.acc{display:flex;align-items:center;gap:10px;padding:11px 15px;border-radius:10px;
+  background:var(--accent-soft);border:1px solid var(--line);font-size:13px;color:var(--ink-2);margin-top:12px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style></head>
+<body>
+<header><div class="hbar">
+  <h1>🏎️ Steering LUT Calibrator</h1>
+  <span class="sub">rosbag을 브라우저에서 바로 보정 — ROS·터미널 불필요</span>
+</div></header>
+
+<div class="wrap">
+  <div id="drop" tabindex="0" role="button" aria-label="rosbag 폴더 열기">
+    <div class="ic">📦⬇︎</div>
+    <div class="t">여기로 <b>rosbag 폴더</b>를 드래그 <span class="sub">(여러 개 한꺼번에 가능)</span></div>
+    <div class="s">폴더 안 <code>*.db3</code>를 자동으로 찾아 누적 보정합니다. 이전 <code>calibration_state.csv</code>를
+      같이 넣으면 그 위에 이어서 쌓습니다. 파일은 서버로 올라가지 않고 브라우저 안에서만 처리됩니다.</div>
+    <input id="file" type="file" accept=".db3,.csv,.yaml" multiple hidden>
+  </div>
+  <div id="status" role="status" aria-live="polite"></div>
+
+  <div id="results">
+    <h2>결과 요약</h2>
+    <div class="tiles" id="tiles"></div>
+    <div id="verdict"></div>
+
+    <h2>그리드 커버리지</h2>
+    <div class="card hmwrap">
+      <div class="hmscroll"><canvas id="hm"></canvas></div>
+      <div class="legend" id="legend"></div>
+      <p class="note" id="covnote"></p>
+    </div>
+
+    <h2>처리한 bag</h2>
+    <div class="card tblscroll"><table id="baglog"></table></div>
+
+    <h2>내보내기</h2>
+    <div class="card" style="padding:16px 18px">
+      <div class="row">
+        <button class="primary" id="dlLut">⬇ 보정된 LUT CSV</button>
+        <button id="dlState">⬇ 누적 상태 CSV</button>
+        <button class="ghost" id="reset">누적 초기화</button>
+        <button class="ghost" id="again">다른 bag 추가</button>
+      </div>
+      <p class="note">적용: <code>ros2 launch f1tenth_control control_real.launch.py lookup_table_file:=&lt;내려받은 경로&gt;</code><br>
+        누적 상태 CSV는 <code>lut_calibrator_node</code>(C++)와 포맷이 같아 서로 이어서 쌓을 수 있습니다.</p>
+      <details class="exp"><summary>다운로드가 막히면 — 텍스트로 열어 복사</summary>
+        <div class="row" style="margin-top:9px">
+          <button id="showLut">LUT CSV</button><button id="showState">상태 CSV</button>
+        </div>
+        <textarea id="csvbox" readonly spellcheck="false" aria-label="CSV 텍스트"></textarea>
+      </details>
+    </div>
+  </div>
+</div>
+<div id="tip" role="tooltip"></div>
+
+<!-- sql.js (SQLite WASM) 인라인 -->
+<script>/*__SQLJS_GLUE__*/</script>
+<script id="baselut" type="text/plain">__BASE_LUT__</script>
+<script>
+"use strict";
+const WASM_B64="__WASM_B64__";
+function b64ToBytes(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u;}
+
+// ══ 상수 (control_map_node / lut_calibrator_node 기준) ══
+const WHEELBASE=0.33, DEG2RAD=Math.PI/180;
+const MIN_SPEED=1.0, PRIOR_W=3.0, ALPHA=0.3, IMU_SCALE=DEG2RAD;
+const IMU_PREFS=["/imu/data","/sensors/imu/raw"];
+const ODOM_PREFS=["/pf/pose/odom","/odom"];
+const DRIVE_PREFS=["/drive","/drive_autonomous"];
+const SIM_MARKERS=["/ego_racecar/odom"];
+const LS_KEY="f1tenth_lut_calib_state_v1";
+
+// ══ CDR 리더 (bag_analyzer의 검증된 파서와 동일) ══
+class CDR{
+  constructor(u8){this.u8=u8;this.dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);
+    this.le=(u8[1]&1)===1;this.o=4;}
+  align(n){const p=(this.o-4)%n;if(p)this.o+=n-p;}
+  i32(){this.align(4);const v=this.dv.getInt32(this.o,this.le);this.o+=4;return v;}
+  u32(){this.align(4);const v=this.dv.getUint32(this.o,this.le);this.o+=4;return v;}
+  f32(){this.align(4);const v=this.dv.getFloat32(this.o,this.le);this.o+=4;return v;}
+  f64(){this.align(8);const v=this.dv.getFloat64(this.o,this.le);this.o+=8;return v;}
+  str(){const n=this.u32();let s='';for(let i=0;i<n-1;i++)s+=String.fromCharCode(this.u8[this.o+i]);
+    this.o+=n;return s;}
+}
+function hdr(c){c.i32();c.u32();return c.str();}
+// Odometry: twist.linear.x(속도)만 쓴다
+function pOdomVx(c){hdr(c);c.str();
+  for(let i=0;i<3;i++)c.f64(); for(let i=0;i<4;i++)c.f64(); for(let i=0;i<36;i++)c.f64();
+  return c.f64();}
+// Imu: angular_velocity.z(요레이트)만 쓴다
+function pImuGz(c){hdr(c);for(let i=0;i<4;i++)c.f64();for(let i=0;i<9;i++)c.f64();
+  c.f64();c.f64();return c.f64();}
+// AckermannDriveStamped: drive.steering_angle만 쓴다
+function pSteer(c){hdr(c);return c.f32();}
+
+// ══ 베이스 LUT (행=조향각축, 열=속도축) ══
+// 축(첫 행·첫 열)은 원본 CSV의 **문자열 그대로** 보존한다. 숫자로 파싱했다가 다시
+// 포맷하면 0.6015625 같은 정확한 half 값에서 반올림 규약 차이(C/Python은 half-to-even,
+// JS는 half-up)로 1e-6 어긋난 축이 출력된다 — 무해하지만 굳이 만들 이유가 없다.
+function parseLutCsv(text){
+  const rows=text.trim().split(/\r?\n/).filter(l=>l.trim()).map(l=>l.split(','));
+  const num=x=>{const v=parseFloat(x);return isNaN(v)?NaN:v;};
+  return {cornerRaw:rows[0][0], velRaw:rows[0].slice(1), steerRaw:rows.slice(1).map(r=>r[0]),
+          vel:rows[0].slice(1).map(num), steer:rows.slice(1).map(r=>num(r[0])),
+          grid:rows.slice(1).map(r=>r.slice(1).map(num))};
+}
+const LUT=parseLutCsv(document.getElementById('baselut').textContent);
+const NS=LUT.steer.length, NV=LUT.vel.length;
+
+// ══ 숫자 포맷: C++ ostream / Python '%g'와 동일하게 ══
+function fmtG(v){
+  if(v===null||v===undefined||Number.isNaN(v))return 'nan';
+  if(!isFinite(v))return v>0?'inf':'-inf';
+  if(v===0)return '0';
+  const e=Math.floor(Math.log10(Math.abs(v)));
+  if(e<-4||e>=6){let s=v.toExponential(5).replace(/\.?0+e/,'e');
+    return s.replace(/e([+-])(\d)$/,'e$10$2');}
+  let s=v.toPrecision(6);
+  if(s.indexOf('.')>=0)s=s.replace(/\.?0+$/,'');
+  return s;
+}
+function fmtE(v){return v.toExponential(15).replace(/e([+-])(\d)$/,'e$10$2');}
+
+// ══ 누적 상태 ══
+function blankState(){return {sum:Array.from({length:NS},()=>new Float64Array(NV)),
+                              cnt:Array.from({length:NS},()=>new Int32Array(NV))};}
+let STATE=blankState(), BAGLOG=[], IMU_SQ=0, KIN_SQ=0, UNIT_N=0;
+
+function stateToCsv(){
+  const L=["# lut_calibration_state v1"];
+  for(let i=0;i<NS;i++)L.push(Array.from(STATE.sum[i],fmtE).join(','));
+  L.push("#COUNT");
+  for(let i=0;i<NS;i++)L.push(Array.from(STATE.cnt[i]).join(','));
+  return L.join('\n')+'\n';
+}
+function stateFromCsv(text){
+  const sums=[],cnts=[];let inC=false;
+  for(const raw of text.split(/\r?\n/)){
+    const line=raw.trim();if(!line)continue;
+    if(line[0]==='#'){if(line.indexOf('COUNT')>=0)inC=true;continue;}
+    const v=line.split(',');
+    if(inC)cnts.push(v.map(x=>parseInt(parseFloat(x),10)));else sums.push(v.map(parseFloat));
+  }
+  if(sums.length!==NS||cnts.length!==NS||sums[0].length!==NV||cnts[0].length!==NV)return null;
+  const st=blankState();
+  for(let i=0;i<NS;i++){st.sum[i].set(sums[i]);st.cnt[i].set(cnts[i]);}
+  return st;
+}
+function totalSamples(){let t=0;for(let i=0;i<NS;i++)for(let j=0;j<NV;j++)t+=STATE.cnt[i][j];return t;}
+function saveLS(){try{localStorage.setItem(LS_KEY,stateToCsv());}catch(e){}}
+function loadLS(){try{const t=localStorage.getItem(LS_KEY);if(!t)return false;
+  const st=stateFromCsv(t);if(st){STATE=st;return true;}}catch(e){}return false;}
+
+// ══ 보정 코어 (lut_calibrator_node.cpp와 동일 수식) ══
+function nearestIdx(axis,val){let b=0,bd=Infinity;
+  for(let i=0;i<axis.length;i++){const d=Math.abs(axis[i]-val);if(d<bd){bd=d;b=i;}}return b;}
+
+function calibrateBag(msgs){
+  let speed=0,steer=0,yaw=0,init=false,n=0,isq=0,ksq=0;
+  for(const m of msgs){
+    if(m.k===1){speed=m.v;}
+    else if(m.k===2){steer=m.v;}
+    else{
+      const raw=m.v*IMU_SCALE;
+      yaw=init?(ALPHA*raw+(1-ALPHA)*yaw):(init=true,raw);
+      if(speed<MIN_SPEED)continue;
+      const si=nearestIdx(LUT.steer,Math.abs(steer)), vi=nearestIdx(LUT.vel,speed);
+      STATE.sum[si][vi]+=Math.abs(speed*yaw);
+      STATE.cnt[si][vi]+=1;
+      n++;
+      const kin=speed*Math.tan(steer)/WHEELBASE;
+      isq+=yaw*yaw; ksq+=kin*kin;
+    }
+  }
+  return {n:n,isq:isq,ksq:ksq};
+}
+
+function blendedLut(){
+  const out=[];
+  for(let i=0;i<NS;i++){const row=new Array(NV);
+    for(let j=0;j<NV;j++){const b=LUT.grid[i][j],c=STATE.cnt[i][j];
+      row[j]=(c<=0||Number.isNaN(b))?b:((b*PRIOR_W+STATE.sum[i][j])/(PRIOR_W+c));}
+    out.push(row);}
+  return out;
+}
+function lutToCsv(){
+  const g=blendedLut(),L=[[LUT.cornerRaw].concat(LUT.velRaw).join(',')];
+  for(let i=0;i<NS;i++)L.push([LUT.steerRaw[i]].concat(g[i].map(fmtG)).join(','));
+  return L.join('\n')+'\n';
+}
+
+// ══ bag(.db3) → 필요한 3토픽만 시간순 메시지 ══
+function readBag(buffers,SQL){
+  let avail={},picked=null,all=[];
+  for(const bytes of buffers){
+    const db=new SQL.Database(bytes);
+    const tq=db.exec("SELECT id,name,type FROM topics");
+    if(!tq.length){db.close();continue;}
+    const byId={};
+    for(const r of tq[0].values){avail[r[1]]=r[2];byId[r[0]]=r[1];}
+    if(!picked){
+      const pick=(prefs)=>{for(const p of prefs)if(avail[p]!==undefined)return p;return null;};
+      picked={imu:pick(IMU_PREFS),odom:pick(ODOM_PREFS),drive:pick(DRIVE_PREFS)};
+    }
+    const want={};
+    for(const id in byId){const nm=byId[id];
+      if(nm===picked.odom)want[id]=1;else if(nm===picked.drive)want[id]=2;else if(nm===picked.imu)want[id]=3;}
+    const ids=Object.keys(want);
+    if(ids.length){
+      const st=db.prepare(`SELECT topic_id,timestamp,data FROM messages WHERE topic_id IN (${ids.join(',')})`);
+      while(st.step()){const r=st.get();const k=want[r[0]],u8=new Uint8Array(r[2]);
+        let v;try{v=k===1?pOdomVx(new CDR(u8)):k===2?pSteer(new CDR(u8)):pImuGz(new CDR(u8));}catch(e){continue;}
+        all.push({t:r[1],k:k,v:v});}
+      st.free();
+    }
+    db.close();
+  }
+  all.sort((a,b)=>a.t-b.t);
+  return {msgs:all,avail:avail,picked:picked};
+}
+
+// ══ 히트맵 ══
+const RAMP=['--s1','--s2','--s3','--s4','--s5','--s6','--s7'];
+const BINS=[1,3,6,11,26,51,101];       // 하한값 (0은 '없음'으로 별도 처리)
+const BINLAB=['1–2','3–5','6–10','11–25','26–50','51–100','100+'];
+function binOf(c){let b=-1;for(let i=0;i<BINS.length;i++)if(c>=BINS[i])b=i;return b;}
+let HM_GEO=null;
+
+function drawHeatmap(){
+  const cv=document.getElementById('hm');if(!cv)return;
+  const cs=getComputedStyle(document.documentElement);
+  const col=RAMP.map(v=>cs.getPropertyValue(v).trim());
+  const empty=cs.getPropertyValue('--cell-empty').trim();
+  const ink3=cs.getPropertyValue('--ink-3').trim();
+  const PADL=52,PADB=34,PADT=10,PADR=10;
+  const cw=11, ch=8;
+  const W=PADL+NV*cw+PADR, H=PADT+NS*ch+PADB;
+  const dpr=window.devicePixelRatio||1;
+  cv.style.width=W+'px';cv.style.height=H+'px';
+  cv.width=W*dpr;cv.height=H*dpr;
+  const c=cv.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);
+  c.clearRect(0,0,W,H);
+
+  for(let i=0;i<NS;i++)for(let j=0;j<NV;j++){
+    const n=STATE.cnt[i][j],b=binOf(n);
+    c.fillStyle=(n<=0)?empty:col[b];
+    c.fillRect(PADL+j*cw, PADT+i*ch, cw-1.5, ch-1.5);   // 1.5px 표면 간격
+  }
+  // 축
+  c.fillStyle=ink3;c.font='10px ui-monospace,Menlo,Consolas,monospace';c.textAlign='right';
+  for(let i=0;i<NS;i+=6){c.fillText(LUT.steer[i].toFixed(2),PADL-7,PADT+i*ch+7);}
+  c.textAlign='center';
+  for(let j=0;j<NV;j+=8){c.fillText(LUT.vel[j].toFixed(1),PADL+j*cw+cw/2,PADT+NS*ch+14);}
+  c.fillStyle=ink3;c.font='10px ui-sans-serif,system-ui,sans-serif';
+  c.fillText('속도 [m/s]',PADL+NV*cw/2,PADT+NS*ch+29);
+  c.save();c.translate(13,PADT+NS*ch/2);c.rotate(-Math.PI/2);c.textAlign='center';
+  c.fillText('조향각 [rad]',0,0);c.restore();
+
+  HM_GEO={PADL:PADL,PADT:PADT,cw:cw,ch:ch};
+
+  const lg=document.getElementById('legend');
+  lg.innerHTML='<span class="lgi"><span class="sw" style="background:'+empty+'"></span>없음</span>'
+    +BINLAB.map((l,i)=>'<span class="lgi"><span class="sw" style="background:'+col[i]+'"></span>'+l+'</span>').join('')
+    +'<span style="margin-left:4px">샘플 수</span>';
+}
+
+function wireHeatmapHover(){
+  const cv=document.getElementById('hm'),tip=document.getElementById('tip');
+  cv.addEventListener('mousemove',e=>{
+    if(!HM_GEO){return;}
+    const r=cv.getBoundingClientRect();
+    const j=Math.floor((e.clientX-r.left-HM_GEO.PADL)/HM_GEO.cw);
+    const i=Math.floor((e.clientY-r.top-HM_GEO.PADT)/HM_GEO.ch);
+    if(i<0||i>=NS||j<0||j>=NV){tip.style.display='none';return;}
+    const n=STATE.cnt[i][j];
+    const base=LUT.grid[i][j], bl=blendedCell(i,j);
+    tip.textContent='조향 '+LUT.steer[i].toFixed(3)+' rad · 속도 '+LUT.vel[j].toFixed(2)+' m/s\n'
+      +'샘플 '+n+'개\n원본 a_lat '+(Number.isNaN(base)?'—':base.toFixed(3))
+      +(n>0?('\n보정 a_lat '+bl.toFixed(3)):'  (보정 없음)');
+    tip.style.display='block';
+    tip.style.left=Math.min(e.clientX+14,innerWidth-235)+'px';
+    tip.style.top=(e.clientY+16)+'px';
+  });
+  cv.addEventListener('mouseleave',()=>{document.getElementById('tip').style.display='none';});
+}
+function blendedCell(i,j){const b=LUT.grid[i][j],c=STATE.cnt[i][j];
+  return (c<=0||Number.isNaN(b))?b:((b*PRIOR_W+STATE.sum[i][j])/(PRIOR_W+c));}
+
+// ══ 리포트 ══
+function render(){
+  const total=totalSamples();
+  let filled=0;
+  const sIdx=[],vIdx=[];
+  for(let i=0;i<NS;i++)for(let j=0;j<NV;j++)if(STATE.cnt[i][j]>0){filled++;
+    if(sIdx.indexOf(i)<0)sIdx.push(i); if(vIdx.indexOf(j)<0)vIdx.push(j);}
+  const cov=100*filled/(NS*NV);
+  const sMin=sIdx.length?LUT.steer[Math.min.apply(null,sIdx)]:0;
+  const sMax=sIdx.length?LUT.steer[Math.max.apply(null,sIdx)]:0;
+  const vMin=vIdx.length?LUT.vel[Math.min.apply(null,vIdx)]:0;
+  const vMax=vIdx.length?LUT.vel[Math.max.apply(null,vIdx)]:0;
+
+  const covClass=cov>=40?'is-good':cov>=15?'is-warn':'is-crit';
+  document.getElementById('tiles').innerHTML=
+     tile('누적 샘플',total.toLocaleString(),BAGLOG.length+'개 bag 처리','')
+    +tile('그리드 커버리지',cov.toFixed(1)+'%',filled+' / '+(NS*NV)+' 셀',covClass)
+    +tile('샘플 조향각 범위',sMin.toFixed(2)+'–'+sMax.toFixed(2),'rad · 물리한계 0.41',
+          sMax>=0.35?'is-good':'is-warn')
+    +tile('샘플 속도 범위',vMin.toFixed(1)+'–'+vMax.toFixed(1),
+          'm/s · 축 최대 '+LUT.vel[NV-1].toFixed(1), vMax>=LUT.vel[NV-1]*0.6?'is-good':'is-warn');
+
+  // 단위 검증
+  const vd=document.getElementById('verdict');
+  if(UNIT_N>0){
+    const ir=Math.sqrt(IMU_SQ/UNIT_N), kr=Math.sqrt(KIN_SQ/UNIT_N);
+    if(kr<1e-6||ir<1e-6){
+      vd.innerHTML=banner('is-warn','⚠️','단위 검증 불가',
+        '한쪽 요레이트가 0에 가깝습니다 — IMU 스케일을 직접 확인하세요.');
+    }else{
+      const ratio=ir/kr;
+      const meas='실측 IMU RMS <code>'+ir.toFixed(3)+' rad/s</code> vs 조향 기구학 기대치 <code>'+kr.toFixed(3)+' rad/s</code>';
+      if(ratio>=0.1&&ratio<=10){
+        vd.innerHTML=banner('is-good','✅','IMU 단위 정상 — 비율 '+ratio.toFixed(2)+'배',
+          meas+'. 1.0에서 벗어난 몫은 실제 슬립·언더스티어입니다(조향 지시보다 덜 돎).');
+      }else{
+        const cand=[[1.0,'이미 rad/s인 데이터'],[DEG2RAD,'π/180 — VESC의 deg/s 발행분 보정']];
+        let best=cand[0];let bd=Infinity;
+        for(const c of cand){const d=Math.abs(Math.log(ratio*c[0]/IMU_SCALE));if(d<bd){bd=d;best=c;}}
+        vd.innerHTML=banner('is-crit','❌','IMU 단위 이상 — 비율 '+ratio.toFixed(1)+'배',
+          meas+'. a_lat이 그만큼 틀어져 이 결과는 폐기해야 합니다. 올바른 스케일은 <code>'
+          +best[0].toPrecision(7)+'</code> ('+best[1]+').');
+      }
+    }
+  }else vd.innerHTML='';
+
+  // bag 로그
+  const rows=BAGLOG.map(b=>'<tr><td class="name">'+esc(b.name)+'</td><td>'+b.pill
+    +'</td><td class="name" style="font-size:11.5px;color:var(--ink-3)">'+esc(b.topics)
+    +'</td><td class="n">'+(b.n===null?'—':b.n.toLocaleString())+'</td></tr>').join('');
+  document.getElementById('baglog').innerHTML=
+    '<thead><tr><th>bag</th><th>상태</th><th>사용 토픽</th><th style="text-align:right">샘플</th></tr></thead><tbody>'
+    +rows+'</tbody>';
+
+  document.getElementById('covnote').innerHTML=
+    '샘플이 0인 셀은 원본 LUT 값이 그대로 남습니다(베이지안 prior). 보정의 한계는 도구가 아니라 <b>그 주행이 실제로 밟은 영역</b>입니다 — '
+    +'빈 구간을 채우려면 그 속도·조향을 실제로 주행한 bag이 필요합니다.';
+
+  drawHeatmap();
+}
+function tile(l,v,n,cls){return '<div class="tile '+cls+'"><div class="tl">'+l+'</div><div class="tv mono">'
+  +v+'</div><div class="tn">'+n+'</div></div>';}
+function banner(cls,ic,t,b){return '<div class="verdict '+cls+'"><div class="vi">'+ic
+  +'</div><div><div class="vt">'+t+'</div><div class="vb">'+b+'</div></div></div>';}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+// ══ 파일 입력 ══
+const drop=document.getElementById('drop'),fileEl=document.getElementById('file'),
+      statusEl=document.getElementById('status'),results=document.getElementById('results');
+drop.addEventListener('click',()=>fileEl.click());
+drop.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();fileEl.click();}});
+fileEl.addEventListener('change',e=>handleFiles([...e.target.files]));
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('hot');}));
+drop.addEventListener('dragleave',e=>{e.preventDefault();drop.classList.remove('hot');});
+drop.addEventListener('drop',async e=>{e.preventDefault();drop.classList.remove('hot');
+  handleFiles(await filesFromDrop(e.dataTransfer));});
+
+async function filesFromDrop(dt){
+  const items=dt.items;
+  if(items&&items.length&&items[0].webkitGetAsEntry){
+    const ents=[...items].map(i=>i.webkitGetAsEntry()).filter(Boolean);
+    const out=[];for(const e of ents)await collectEntry(e,'',out);
+    if(out.length)return out;
+  }
+  return [...dt.files];
+}
+function collectEntry(entry,prefix,out){
+  return new Promise(res=>{
+    if(entry.isFile){entry.file(f=>{f._dir=prefix||'';out.push(f);res();},()=>res());}
+    else if(entry.isDirectory){const rd=entry.createReader();const p=prefix?prefix+'/'+entry.name:entry.name;
+      const step=()=>rd.readEntries(async ents=>{if(!ents.length){res();return;}
+        for(const e of ents)await collectEntry(e,p,out);step();},()=>res());step();}
+    else res();
+  });
+}
+function dirOf(f){
+  if(f._dir!==undefined&&f._dir!=='')return f._dir;
+  const rp=f.webkitRelativePath;
+  if(rp&&rp.indexOf('/')>=0)return rp.slice(0,rp.lastIndexOf('/'));
+  return '';
+}
+
+let SQLJS=null;
+async function handleFiles(files){
+  files=files||[];
+  // 1) 상태 CSV가 있으면 먼저 반영
+  const stateFile=files.find(f=>/calibration_state.*\.csv$/i.test(f.name));
+  if(stateFile){
+    try{const st=stateFromCsv(await stateFile.text());
+      if(st){STATE=st;statusEl.textContent='이전 누적 상태를 불러왔습니다 ('+totalSamples()+'개 샘플).';}
+      else statusEl.innerHTML='<span class="err">상태 CSV의 grid 크기가 베이스 LUT와 다릅니다 — 무시했습니다.</span>';
+    }catch(e){}
+  }
+  const db3=files.filter(f=>f.name.endsWith('.db3'));
+  if(!db3.length){
+    if(stateFile){finish();return;}
+    if(files.find(f=>f.name.endsWith('.mcap'))){
+      statusEl.innerHTML='<span class="err">MCAP(.mcap)은 아직 지원하지 않습니다 — sqlite3(.db3)로 기록된 bag을 넣어주세요.</span>';return;}
+    statusEl.innerHTML='<span class="err">.db3 파일을 찾지 못했습니다. rosbag 폴더 또는 .db3를 넣어주세요.</span>';return;
+  }
+  // 2) 폴더별로 묶어 bag 단위 처리
+  const groups={};
+  for(const f of db3){const d=dirOf(f)||'(단독)';(groups[d]=groups[d]||[]).push(f);}
+  statusEl.textContent='sql.js 준비 중 …';
+  try{
+    if(!SQLJS)SQLJS=await initSqlJs({wasmBinary:b64ToBytes(WASM_B64)});
+    const names=Object.keys(groups).sort();
+    let done=0;
+    for(const g of names){
+      const label=g.split('/').pop()||g;
+      statusEl.textContent='처리 중 ('+(++done)+'/'+names.length+'): '+label+' …';
+      await new Promise(r=>setTimeout(r,10));
+      const fs=groups[g].sort((a,b)=>a.name.localeCompare(b.name));
+      const bufs=[];for(const f of fs)bufs.push(new Uint8Array(await f.arrayBuffer()));
+      const R=readBag(bufs,SQLJS);
+      const sim=SIM_MARKERS.filter(t=>R.avail[t]!==undefined);
+      if(sim.length){
+        BAGLOG.push({name:label,pill:'<span class="pill no">시뮬 — 제외</span>',
+          topics:sim.join(' '),n:null});continue;}
+      const miss=['imu','odom','drive'].filter(k=>!R.picked||!R.picked[k]);
+      if(miss.length){
+        BAGLOG.push({name:label,pill:'<span class="pill skip">토픽 없음</span>',
+          topics:'누락: '+miss.join(', '),n:null});continue;}
+      if(!R.msgs.length){
+        BAGLOG.push({name:label,pill:'<span class="pill skip">메시지 0</span>',topics:'—',n:null});continue;}
+      const out=calibrateBag(R.msgs);
+      IMU_SQ+=out.isq;KIN_SQ+=out.ksq;UNIT_N+=out.n;
+      BAGLOG.push({name:label,
+        pill:out.n>0?'<span class="pill ok">완료</span>':'<span class="pill skip">샘플 0</span>',
+        topics:R.picked.imu+'  '+R.picked.odom+'  '+R.picked.drive, n:out.n});
+    }
+    finish();
+  }catch(err){statusEl.innerHTML='<span class="err">실패: '+esc(err.message)+'</span>';console.error(err);}
+}
+function finish(){
+  saveLS();
+  drop.style.display='none';results.style.display='block';statusEl.textContent='';
+  void results.offsetHeight;
+  render();
+}
+
+// ══ 내보내기 ══
+function download(name,text){
+  const b=new Blob([text],{type:'text/csv'});const u=URL.createObjectURL(b);
+  const a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(u);a.remove();},1500);
+}
+document.getElementById('dlLut').addEventListener('click',()=>
+  download('NUC6_glc_pacejka_lookup_table_calibrated.csv',lutToCsv()));
+document.getElementById('dlState').addEventListener('click',()=>
+  download('calibration_state.csv',stateToCsv()));
+document.getElementById('showLut').addEventListener('click',()=>{
+  document.getElementById('csvbox').value=lutToCsv();});
+document.getElementById('showState').addEventListener('click',()=>{
+  document.getElementById('csvbox').value=stateToCsv();});
+document.getElementById('again').addEventListener('click',()=>{
+  results.style.display='none';drop.style.display='';statusEl.textContent='';});
+document.getElementById('reset').addEventListener('click',()=>{
+  STATE=blankState();BAGLOG=[];IMU_SQ=KIN_SQ=UNIT_N=0;
+  try{localStorage.removeItem(LS_KEY);}catch(e){}
+  results.style.display='none';drop.style.display='';
+  statusEl.textContent='누적을 초기화했습니다.';});
+
+// 테마 전환 시 캔버스 다시 그림(색을 CSS 변수에서 읽으므로)
+matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{if(HM_GEO)drawHeatmap();});
+new MutationObserver(()=>{if(HM_GEO)drawHeatmap();})
+  .observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+wireHeatmapHover();
+
+// 이전 세션 누적이 있으면 알려준다(자동으로 결과를 열지는 않음)
+if(loadLS()&&totalSamples()>0){
+  const n=totalSamples();
+  statusEl.innerHTML='이 브라우저에 이전 누적 <b>'+n.toLocaleString()+'개 샘플</b>이 남아 있습니다 — '
+    +'bag을 추가하면 이어서 쌓입니다. <button class="ghost" style="padding:4px 10px;font-size:13px" id="openPrev">지금 결과 보기</button>';
+  const btn=document.getElementById('openPrev');
+  if(btn)btn.addEventListener('click',()=>{drop.style.display='none';results.style.display='block';
+    statusEl.textContent='';void results.offsetHeight;render();});
+}
+</script>
+</body></html>

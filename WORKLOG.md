@@ -4,6 +4,69 @@
 
 ---
 
+## 2026-07-25 — 🛠 rosbag → LUT 캘리브레이션 오프라인 도구 (`tools/lut_calibrator/`)
+
+"지나간 rosbag으로도 LUT 보정이 되나?"에서 출발. 된다는 걸 07-25 5랩 bag으로 확인한 뒤
+(노드 띄우고 bag 실시간 재생), 그 절차를 도구로 자동화했다.
+
+### 1. 먼저 수동으로 확인 — 됨
+`lut_calibration.launch.py` + `ros2 bag play`로 07-25 5랩 bag 처리 → 샘플 3364개.
+⚠️ 그 bag엔 `/imu/data`가 없고 `/sensors/imu/raw`만 있어(Madgwick 미기동) **리매핑 필수**:
+`ros2 bag play <bag> --remap /sensors/imu/raw:=/imu/data`. 노드는 `angular_velocity.z`만
+쓰고 orientation은 안 써서 raw로도 결과가 동일하다.
+
+### 2. 오프라인 도구 (`calibrate_lut_from_bag.py`)
+`lut_calibrator_node.cpp`와 **같은 수식·같은 파일 포맷**. `calibration_state.csv` 양방향
+호환이라 온라인/오프라인을 섞어 누적해도 된다(C++ 노드가 파이썬이 쓴 상태를 로드하는 것까지 검증).
+- 95초 bag: 95초(실시간 재생) → **1초 미만**. bag 12개: ~10분 → 수 초
+- bag 타임스탬프 순 **전량 결정론적** 처리(온라인은 DDS 큐 depth 10 드롭 가능)
+- IMU 토픽 자동 판별(`/imu/data` ↔ `/sensors/imu/raw`), 여러 bag 한 번에 누적
+
+### 3. 자동 안전장치 2가지 (이 도구의 핵심)
+- **IMU 단위 검증** — deg/s 미보정은 `a_lat`을 57배로 부풀려 LUT를 오염시키는데, 이 노드는
+  `/drive`를 발행하지 않아 **주행 중 증상이 전혀 없다.** 실측 IMU 요레이트를 조향 기구학
+  기대치(`v·tanδ/L`, 정의상 rad/s)와 RMS 대조해 어긋나면 올바른 스케일을 제시하고 폐기 권고.
+  (odom의 `angular.z`를 안 쓰는 이유: `/pf/pose/odom`엔 그 필드가 0으로 비어 있음)
+- **시뮬 데이터 차단** — `/ego_racecar/odom` 보이면 스킵. LUT는 실차 sysid 자산.
+  [[steering-lut-provenance]]
+
+### 4. 부수 확인 — 슬립 진단이 독립적으로 재현됨
+단위 검증 비율이 실측 **0.72배**(IMU가 기구학 기대치보다 덜 돎). 07-24 세션의 "조향 지시보다
+덜 돎(언더스티어/슬립)" 진단과 **독립 경로로 일치.** [[imu-noise-yaw-lag-tools]]
+
+### 5. 진짜 병목은 도구가 아니라 데이터 커버리지
+07-24·07-25 실차 bag **12개 전부**를 넣어도 그리드 커버리지 **9.1%**(356/3900셀),
+속도 범위 **1.0~2.4 m/s**. 조향은 0.40 rad(물리한계 0.41)까지 닿았으니 **부족한 건 속도축** —
+저속 셰이크다운만 있었기 때문. 샘플 0인 셀은 원본 LUT 그대로 남으므로(prior), **실그립 피크
+보정은 더 빠른 주행 bag이 나오기 전엔 불가능.** 터미널 ASCII 커버리지 맵으로 바로 보인다.
+
+### 검증
+같은 bag에서 C++ 온라인 노드와 대조: 샘플 3363 vs 3364, 커버리지 136/3900 **동일**,
+블렌딩 LUT는 3900셀 중 66셀만 미세차(최대 상대차 19%). 원인은 콜백 도착 순서 —
+온라인은 DDS 전달 순서에 따라 IMU 시점의 캐시 speed/steering이 달라져 샘플이 인접 셀로
+흩어진다. 오프라인이 결정론적·재현 가능.
+
+### 6. 무터미널 웹앱 (`tools/lut_calibrator/webapp/`)
+bag_analyzer 웹앱과 같은 방식(sql.js WASM 인라인 + 직접 짠 JS CDR 파서)으로, 브라우저에
+rosbag 폴더를 드래그하면 보정 LUT CSV를 내려받는 버전. sql.js는 bag_analyzer의 vendor를
+심볼릭 링크로 재사용하고, 베이스 LUT는 빌드 시 페이지에 인라인.
+- 배포 URL: https://claude.ai/code/artifact/0bd7693f-3c83-4f0b-bcad-630fbce98c49
+- 여러 bag 동시 드래그(폴더별 그룹핑), 커버리지 히트맵(셀 hover), 누적 브라우저 저장,
+  이전 `calibration_state.csv` 드래그로 이어쌓기
+- **CLI와 바이트 단위 동일** — 헤드리스 Chrome 엔드투엔드로 실차 bag 처리 후 SHA-256 대조:
+  보정 LUT `8f2d9ac5…`, 상태 CSV `7ef028ae…` 양쪽 일치(샘플 3363·커버리지 136/3900도 동일)
+- 그 과정에서 축 반올림 규약 차이를 발견 — C/Python은 half-to-even, JS는 half-up이라
+  `0.6015625` 같은 정확한 half 값에서 축이 1e-6 어긋났다. **축(첫 행·첫 열)은 재포맷하지 않고
+  원본 문자열을 보존**하도록 CLI·웹앱 양쪽 수정(값이 바뀔 이유가 없는 자리). C++ 노드는
+  여전히 축까지 `%g`로 쓰므로 축 표기만 다르고 파싱 결과는 동일.
+- ⚠️ sqlite3(.db3) bag만 지원 — Jazzy 기본은 mcap이라 `-s sqlite3` 필요
+  [[jetson-reinit-todo-2026-07-26]]
+
+관련 메모: [[steering-lut-provenance]] [[imu-noise-yaw-lag-tools]]
+[[jetson-reinit-todo-2026-07-26]]
+
+---
+
 ## 2026-07-25 — ✅ "경로 ≠ MCL / 출발 조향 랜덤" 근본원인 = 맵 불일치 규명 + F1_MAP 통일 origin/main 반영 + 5랩 라이브 검증 (데드존은 푸시스타트 회피)
 
 07-24 실차 rosbag(`~/rosbag_log/run_0724_*` 8개)을 웹앱/직접 CDR 파싱으로 분석해, 오래 끌던
