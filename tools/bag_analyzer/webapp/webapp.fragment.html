@@ -776,10 +776,49 @@ function diagnose(S){
   if(usRatio!=null&&usRatio<0.6)F('control','warn',`코너 언더스티어 (요레이트 추종률 ${(usRatio*100).toFixed(0)}%)`,
     `조향이 지시한 요레이트의 ${(usRatio*100).toFixed(0)}%만 실제로 나옵니다 = 앞이 안 물려 바깥으로 밀림. 더 꺾어도 안 돕니다.`,
     `<b>진입속도를 낮추는 것</b>이 유일한 레버(<code>max_speed</code>↓). ⚠️ <code>yaw_rate_gain</code>은 이 상황에서 조향을 <b>더</b> 밀어 슬립각 피크를 넘긴 앞타이어를 악화시키므로 <code>yaw_rate_gain:=0.0</code>으로 A/B할 것.`);
-  if(gainRatio!=null&&gainRatio<0.85&&S.alatSource!=='odom_kinematic')
-    F('control',gainRatio<0.75?'critical':'warn',`조향 게인 결손 ${(gainRatio*100).toFixed(0)}% (슬립 아님)`,
-      `슬립이 불가능한 저횡가속 구간(명령 |a_lat| < ${(0.5*grip).toFixed(1)})에서도 실측/명령 요레이트가 ${gainRatio.toFixed(2)}입니다(기대 1.0). 그립 문제 이전에 <b>차가 명령한 만큼 안 꺾입니다</b>.`,
-      `젯슨 <b>f1tenth_stack vesc.yaml</b>의 <code>steering_angle_to_servo_gain</code>/offset과 조향 링키지 실가동범위 확인. 이게 틀리면 LUT·L1 튜닝이 전부 그 위에서 놉니다.`);
+  // ── 조향 결손의 원인 분리: 서보 게인 오차 vs 언더스티어 그래디언트 ──
+  // ⚠️ "추종률이 낮다 → 서보 게인이 틀렸다"로 바로 결론내면 안 된다(2026-07-25 실제 오진).
+  //    정상상태 자전거모델 delta = A·(L·κ) + K_us·a_lat + offset 으로 분리한다.
+  //      A≈1 → 기하 게인 정상, 결손은 전부 타이어 언더스티어(물성) → LUT 재보정이 정답
+  //      A>1 → 진짜 서보 게인/링키지 문제
+  let gainA=null,kUs=null,steerOff=null;
+  if(S.cmd&&S.alatSource!=='odom_kinematic'&&N>30){
+    const ct=S.cmd.t,cs=S.cmd.steer;
+    const si=t.map(x=>{let lo=0,hi=ct.length-1;if(x<=ct[0])return cs[0];if(x>=ct[hi])return cs[hi];
+      while(lo+1<hi){const m2=(lo+hi)>>1;if(ct[m2]<=x)lo=m2;else hi=m2;}
+      const f=(x-ct[lo])/Math.max(ct[hi]-ct[lo],1e-9);return cs[lo]+(cs[hi]-cs[lo])*f;});
+    const rows=[];
+    for(let i=0;i<N;i++){
+      const im=Math.max(0,i-1),ip=Math.min(N-1,i+1),dt2=t[ip]-t[im];
+      const dst=dt2>0.005?Math.abs((si[ip]-si[im])/dt2):0;
+      const kAct=wz[i]/Math.max(vx[i],0.1);
+      if(vx[i]>1.2&&dst<1.5&&Math.abs(si[i])<0.40&&Math.abs(kAct)>0.08)
+        rows.push([WHEELBASE*kAct,alat[i],1,si[i]]);}
+    if(rows.length>=50){
+      // 3x3 정규방정식 직접 풀이 (외부 라이브러리 없음)
+      const A3=[[0,0,0],[0,0,0],[0,0,0]],b3=[0,0,0];
+      for(const r of rows)for(let i=0;i<3;i++){b3[i]+=r[i]*r[3];for(let j=0;j<3;j++)A3[i][j]+=r[i]*r[j];}
+      const M=A3.map((r,i)=>[...r,b3[i]]);
+      for(let c=0;c<3;c++){
+        let piv=c;for(let r2=c+1;r2<3;r2++)if(Math.abs(M[r2][c])>Math.abs(M[piv][c]))piv=r2;
+        [M[c],M[piv]]=[M[piv],M[c]];
+        if(Math.abs(M[c][c])<1e-12)continue;
+        for(let r2=0;r2<3;r2++){if(r2===c)continue;const f=M[r2][c]/M[c][c];for(let k2=c;k2<4;k2++)M[r2][k2]-=f*M[c][k2];}}
+      if(Math.abs(M[0][0])>1e-12&&Math.abs(M[1][1])>1e-12&&Math.abs(M[2][2])>1e-12){
+        gainA=M[0][3]/M[0][0];kUs=M[1][3]/M[1][1];steerOff=M[2][3]/M[2][2];}}}
+  if(gainA!=null&&gainA>1.25)
+    F('control','critical',`서보 조향 게인 부족 (A=${gainA.toFixed(2)})`,
+      `자전거모델 회귀: 기하학이 요구하는 조향의 <b>${gainA.toFixed(2)}배</b>를 명령해야 그 곡률이 나옵니다(정상 1.0). 실제 조향각이 명령의 ${(100/gainA).toFixed(0)}%뿐이라는 뜻입니다.`,
+      `젯슨 <b>f1tenth_stack vesc.yaml</b>의 <code>steering_angle_to_servo_gain</code>/offset과 조향 링키지 가동범위 확인.`);
+  else if(gainA!=null)
+    F('control','info',`조향 기하 게인 정상 (A=${gainA.toFixed(2)})`,
+      `자전거모델 회귀 A=${gainA.toFixed(2)}(정상 1.0), 중립 오프셋 ${steerOff>=0?'+':''}${steerOff.toFixed(4)} rad. <b>서보 게인은 원인이 아닙니다.</b> 요레이트 추종률이 낮은 건 언더스티어 그래디언트 <b>K_us=${kUs>=0?'+':''}${kUs.toFixed(4)}</b> rad/(m/s²) 때문 — 타이어·노면 물성이라 서보로는 못 고칩니다. a_lat ${grip.toFixed(1)}에서 추가로 먹는 조향 ${(kUs*grip).toFixed(3)} rad(한계 0.41의 ${(Math.abs(kUs*grip)/0.41*100).toFixed(0)}%).`,
+      `① 이 노면에서 <b>LUT 재보정</b>(<code>lut_calibration.launch.py</code>) ② <code>max_lateral_accel</code>을 실측 그립 이내로. 서보 게인은 건드리지 말 것.`);
+  if(kUs!=null&&kUs>0.008){
+    const vSt=Math.sqrt(Math.max(0,(0.41-WHEELBASE*0.7)/(kUs*0.7)));
+    F('control','info','조향 포화 한계 속도',
+      `K_us=${kUs.toFixed(4)}이면 κ=0.7(R=1.43m) 코너에서 필요 조향이 ±0.41에 닿는 속도가 <b>${vSt.toFixed(2)} m/s</b>입니다. 그립 한계 √(그립/κ)=${Math.sqrt(grip/0.7).toFixed(2)} m/s와 비교해 낮은 쪽이 실제 구속조건입니다.`,
+      `두 한계 중 낮은 쪽 아래로 <code>max_speed</code>를 잡을 것.`);}
   // 권장 파라미터 (코너별 v_safe에서 도출)
   if(bad.length&&isFinite(vSafeMin))rec.max_speed=Math.max(1.5,Math.floor(vSafeMin*2)/2);
   if(gi.reached)rec.max_lateral_accel=+(grip*0.8).toFixed(1);
@@ -796,7 +835,7 @@ function diagnose(S){
     '아래 그립 판정은 <b>상한</b>으로만 볼 것. 다음 녹화엔 <code>/sensors/imu/raw</code> 또는 <code>/tf</code>·<code>/pf/pose/odom</code>을 반드시 포함.');
 
   const stats={dur:S.dur,peakV,peakAl,overFrac,minDecel,nCorners:corners.length,grip,gripReached:gi.reached,gripPeak:gi.peak,
-               alatSource:S.alatSource,peakAlCmd:absmax(alatCmd),usRatio,gainRatio};
+               alatSource:S.alatSource,peakAlCmd:absmax(alatCmd),usRatio,gainA,kUs};
   return {findings,rec,stats,gripUsed:grip,corners};
 }
 
@@ -1050,7 +1089,8 @@ function renderReport(D,name){
   const tiles=[["주행 시간",`${st.dur.toFixed(1)} s`],["최고 속도",`${st.peakV.toFixed(2)} m/s`],
     [`최대 |a_lat| (${SRC_LABEL[st.alatSource]||'?'})`,`${st.peakAl.toFixed(1)} m/s²`],
     ["실측 그립",gripTile],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],
-    ["요레이트 추종률",st.usRatio!=null?`${(st.usRatio*100).toFixed(0)} %`:"—"],["코너 수",`${st.nCorners}`]];
+    ["요레이트 추종률",st.usRatio!=null?`${(st.usRatio*100).toFixed(0)} %`:"—"],
+    ["언더스티어 K_us",st.kUs!=null?`${st.kUs>=0?'+':''}${st.kUs.toFixed(3)}`:"—"],["코너 수",`${st.nCorners}`]];
   document.getElementById('tiles').innerHTML=tiles.map(([k,v])=>`<div class="tile"><div class="tv">${v}</div><div class="tl">${k}</div></div>`).join('');
   // 파트별 가이드
   const col={critical:"#e5484d",warn:"#f5a623",info:"#4c8dff",ok:"#30a46c"},lab={critical:"치명",warn:"주의",info:"참고",ok:"양호"},ord={critical:0,warn:1,info:2,ok:3};

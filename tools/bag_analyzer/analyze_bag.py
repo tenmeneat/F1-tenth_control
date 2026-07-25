@@ -407,25 +407,43 @@ def diagnose(S, grip_target):
         rec["min_speed"] = 1.5
         rec["note_recovery"] = True
 
-    # ── 4-b) 조향 게인 캘리브레이션 (슬립과 분리) ──
-    # 그립 한참 아래(|a_lat| < 그립의 40%)에서는 타이어가 미끄러질 수 없다. 그런데도 실측
-    # 요레이트가 명령보다 한참 낮으면 원인은 슬립이 아니라 **차가 명령한 만큼 안 꺾이는 것** —
-    # 서보 게인/트림(vesc.yaml steering_angle_to_servo_gain) 또는 조향 링키지 가동범위 문제.
-    # ⚠️ 저슬립 구간을 **실측** a_lat으로 고르면 안 된다 — |vx·wz_meas|가 작은 샘플을 고르는 건
-    #    곧 wz_meas가 작은 샘플만 고르는 것이라 비율이 구조적으로 낮게 나온다(순환 선택 편향:
-    #    이 필터로 0.16, 명령 기준으로 0.69). 명령 기준(alat_cmd)으로 골라야 편향이 없다.
-    #    추가로 조향 과도구간(위상지연)을 빼려고 명령 요레이트가 안정된 샘플만 쓴다.
-    dwz_cmd = np.abs(np.gradient(wz_cmd) / np.maximum(np.gradient(t), 1e-3)) if len(t) > 2 else np.zeros(len(t))
-    steady = dwz_cmd < 3.0
-    lowg = (np.abs(S["alat_cmd"]) < 0.5 * grip_target) & (np.abs(wz_cmd) > 0.5) & (vx > 1.0) & steady
-    gain_ratio = float(np.median(np.abs(wz[lowg]) / np.abs(wz_cmd[lowg]))) if np.sum(lowg) >= 20 else None
-    if gain_ratio is not None and gain_ratio < 0.85 and S.get("alat_source") != "odom_kinematic":
-        findings.append(dict(level="critical" if gain_ratio < 0.75 else "warn",
-            title="조향 게인 결손 (슬립 아님)",
-            body=(f"슬립이 불가능한 저횡가속 구간(명령 |a_lat| < {0.5*grip_target:.1f})에서도 실측/명령 "
-                  f"요레이트 = {gain_ratio:.2f} (기대 1.0). 그립 이전에 **차가 명령한 만큼 안 꺾인다**. "
-                  f"젯슨 f1tenth_stack vesc.yaml의 steering_angle_to_servo_gain/offset과 조향 링키지 "
-                  f"실가동범위를 확인할 것 — 이게 틀리면 LUT·L1 튜닝이 전부 그 위에서 논다.")))
+    # ── 4-b) 조향 결손의 원인 분리: 서보 게인 오차 vs 언더스티어 그래디언트 ──
+    # ⚠️ "요레이트 추종률이 낮다 → 서보 게인이 틀렸다"로 바로 결론내면 안 된다(2026-07-25에
+    #    실제로 그렇게 오진했다). 정상상태 자전거 모델로 두 원인은 분리된다:
+    #        delta = A·(L·κ) + K_us·a_lat + offset
+    #      A ≈ 1  → 기하 게인 정상. 결손은 전부 타이어 언더스티어 그래디언트(K_us) = **물성**.
+    #               서보를 건드리면 안 되고, 그 노면에서 LUT를 재보정하는 게 정답.
+    #      A > 1  → 명령 대비 실제 조향각이 작다 = 진짜 서보 게인/링키지 문제.
+    #    포화 샘플은 δ-κ 관계가 성립하지 않으므로 회귀에서 제외한다.
+    gain_A = k_us = steer_offset = None
+    if len(S["cmd_t"]) and S.get("alat_source") != "odom_kinematic" and len(t) > 30:
+        st_i = np.interp(t, S["cmd_t"], S["cmd_steer"])
+        dst = np.abs(np.gradient(st_i) / np.maximum(np.gradient(t), 1e-3))
+        k_act = wz / np.maximum(vx, 0.1)
+        m = (vx > 1.2) & (dst < 1.5) & (np.abs(st_i) < 0.40) & (np.abs(k_act) > 0.08)
+        if m.sum() >= 50:
+            X = np.column_stack([WHEELBASE * k_act[m], alat[m], np.ones(int(m.sum()))])
+            coef, *_ = np.linalg.lstsq(X, st_i[m], rcond=None)
+            gain_A, k_us, steer_offset = (float(c) for c in coef)
+    if gain_A is not None and gain_A > 1.25:
+        findings.append(dict(level="critical", title="서보 조향 게인 부족",
+            body=(f"자전거모델 회귀: 기하학이 요구하는 조향의 {gain_A:.2f}배를 명령해야 그 곡률이 나온다"
+                  f"(정상 1.0). 실제 조향각이 명령의 {1/gain_A*100:.0f}%뿐이라는 뜻 — 젯슨 f1tenth_stack "
+                  f"vesc.yaml의 steering_angle_to_servo_gain/offset과 조향 링키지 가동범위 확인.")))
+    elif gain_A is not None:
+        findings.append(dict(level="info", title=f"조향 기하 게인 정상 (A={gain_A:.2f})",
+            body=(f"자전거모델 회귀 A={gain_A:.2f}(정상 1.0), 중립 오프셋 {steer_offset:+.4f} rad. "
+                  f"**서보 게인은 원인이 아니다.** 요레이트 추종률이 낮은 건 언더스티어 그래디언트 "
+                  f"K_us={k_us:+.4f} rad/(m/s²) 때문 — 타이어·노면 물성이라 서보로 못 고친다. "
+                  f"a_lat {grip_target:.1f}에서 추가로 먹는 조향 {k_us*grip_target:+.3f} rad"
+                  f"(한계 0.41의 {abs(k_us*grip_target)/0.41*100:.0f}%). 대응은 ① 이 노면에서 LUT 재보정"
+                  f"(lut_calibration.launch.py) ② max_lateral_accel을 실측 그립 이내로.")))
+    if k_us is not None and k_us > 0.008:
+        v_st = math.sqrt(max(0.0, (0.41 - WHEELBASE * 0.7) / (k_us * 0.7)))
+        findings.append(dict(level="info", title="조향 포화 한계 속도",
+            body=(f"K_us={k_us:.4f}이면 κ=0.7(R=1.43m) 코너에서 필요 조향이 ±0.41에 닿는 속도가 "
+                  f"**{v_st:.2f} m/s**. 그립 한계 √(그립/κ)={math.sqrt(grip_target/0.7):.2f} m/s와 비교해 "
+                  f"낮은 쪽이 실제 구속조건이다.")))
 
     # ── 5) IMU 카운터스티어 유의 ──
     if len(S["gyro_z_raw"]) and np.max(np.abs(S["gyro_z_raw"])) > 30:
@@ -438,7 +456,7 @@ def diagnose(S, grip_target):
                  min_decel=min_decel, accel_frac=accel_frac, n_spin=n_spin,
                  peak_alat_cmd=float(np.max(np.abs(S["alat_cmd"]))) if len(S["alat_cmd"]) else 0.0,
                  alat_source=S.get("alat_source", "none"),
-                 us_ratio=us_ratio, gain_ratio=gain_ratio,
+                 us_ratio=us_ratio, gain_A=gain_A, k_us=k_us,
                  duration=float(t[-1]) if len(t) else 0.0, grip_target=grip_target)
     return findings, {"rec": rec, "stats": stats}
 
@@ -568,6 +586,8 @@ def write_html(path, data_json, png_b64, guide_cards, rec_html, stats, meta, fra
         ("최저 종가속도", f'{st.get("min_decel",0):+.2f} m/s²'),
         ("요레이트 추종률",
          "—" if st.get("us_ratio") is None else f'{st["us_ratio"]*100:.0f} %'),
+        ("언더스티어 K_us",
+         "—" if st.get("k_us") is None else f'{st["k_us"]:+.3f}'),
         ("스핀 샘플", f'{st.get("n_spin",0)}'),
     ]
     tiles_html = "".join(f'<div class="tile"><div class="tv">{v}</div><div class="tl">{k}</div></div>' for k, v in tiles)
