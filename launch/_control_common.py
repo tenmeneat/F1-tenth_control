@@ -215,7 +215,7 @@ def declare_common_args():
         # 0건이었다. 예전처럼 8.0을 쓰면 4 m/s에서 제동거리를 1.0m로 착각(실제 필요 ~8m)해
         # 사전감속이 0.5초 앞만 보고 시작 → 시케인 언더스티어 크래시. 0.6은 실측 타력감속 반영.
         DeclareLaunchArgument(
-            'prebrake_decel', default_value='1.5',
+            'prebrake_decel', default_value='1.0',
             description='곡률 사전감속 제동거리 산출용 실측 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
         ),
         # ── 조향 권한 속도 캡 (2026-07-26 신설) ──
