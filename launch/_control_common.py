@@ -257,6 +257,31 @@ def declare_common_args():
             description='이 시간[s] 이상 안 움직이면 가드 발동. 4초 탈조는 잡고 정상 기동 지연(~0.3s)은 안 잡히게'
         ),
 
+        # ── 런치 킥(자율 정지출발 시 VESC 센서리스 데드존 관통) ──
+        # 매뉴얼은 초반 스로틀 펀치로 데드존을 때려 관통하는데 자율은 살살 램프해 걸터앉아 탈조한다.
+        # 정지 상태에서 짧게 높은 속도를 명령해 VESC 속도 PID가 큰 전류를 뽑게 만든다(매뉴얼 펀치 재현).
+        # 오픈루프 전류↑·HFI·Coupled HFI 모두 저돌극성 때문에 부하서 실패 확인(2026-07-25) → 유일한 자율 해법.
+        DeclareLaunchArgument(
+            'launch_boost_enable', default_value='true',
+            description='런치 킥 on/off (자율 정지출발 데드존 관통 펀치)'
+        ),
+        DeclareLaunchArgument(
+            'launch_boost_speed', default_value='3.0',
+            description='데드존 관통용 펀치 속도 명령 [m/s]. 매뉴얼 스로틀 세기 감각으로 조정(세게=5.0/약하게=2.0)'
+        ),
+        DeclareLaunchArgument(
+            'launch_boost_time', default_value='0.6',
+            description='관통 실패 시 포기까지 최대 펀치 시간 [s]. stall_hold_delay(1.0)보다 작아야 stall_guard와 안 싸움'
+        ),
+        DeclareLaunchArgument(
+            'launch_exit_speed', default_value='0.8',
+            description='실측이 이 속도[m/s] 넘으면 관통 성공 판정 → 킥 종료(데드존 상단 0.59보다 위)'
+        ),
+        DeclareLaunchArgument(
+            'launch_standstill_speed', default_value='0.3',
+            description='실측이 이 속도[m/s] 미만이면 정지 판정 → 킥 시작(exit보다 낮아 히스테리시스)'
+        ),
+
         # ── IMU 기반 보정 전체 on/off (요레이트 카운터스티어 + 롤 인지 ESC) ──
         # 실차에서 조향 채터링이 보이면 즉시 끌 수 있도록 런치 인자로 노출. 끄면 순수
         # L1+LUT(시뮬 검증 상태)로 돌아간다. 단위 문제는 imu_angular_scale로 해결됐으므로
@@ -411,6 +436,11 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'stall_speed_threshold': LaunchConfiguration('stall_speed_threshold'),
             'stall_hold_speed': LaunchConfiguration('stall_hold_speed'),
             'stall_hold_delay': LaunchConfiguration('stall_hold_delay'),
+            'launch_boost_enable': ParameterValue(LaunchConfiguration('launch_boost_enable'), value_type=bool),
+            'launch_boost_speed': LaunchConfiguration('launch_boost_speed'),
+            'launch_boost_time': LaunchConfiguration('launch_boost_time'),
+            'launch_exit_speed': LaunchConfiguration('launch_exit_speed'),
+            'launch_standstill_speed': LaunchConfiguration('launch_standstill_speed'),
             'wall_safety_margin': 0.6,
             'recovery_lat_error': LaunchConfiguration('recovery_lat_error'),
             'recovery_speed': LaunchConfiguration('recovery_speed'),

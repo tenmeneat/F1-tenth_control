@@ -178,6 +178,12 @@ public:
         this->declare_parameter<double>("stall_speed_threshold", 0.7);
         this->declare_parameter<double>("stall_hold_speed", 1.5);
         this->declare_parameter<double>("stall_hold_delay", 1.0);
+        // 런치 킥(자율 정지출발 시 VESC 센서리스 데드존 관통) — 아래 8-c 참고
+        this->declare_parameter<bool>("launch_boost_enable", true);
+        this->declare_parameter<double>("launch_boost_speed", 3.0);       // 데드존 관통용 펀치 속도 명령 [m/s]
+        this->declare_parameter<double>("launch_boost_time", 0.6);        // 관통 실패 시 포기까지 최대 펀치 시간 [s] (< stall_hold_delay)
+        this->declare_parameter<double>("launch_exit_speed", 0.8);        // 실측이 이 속도 넘으면 관통 성공 → 킥 종료 [m/s]
+        this->declare_parameter<double>("launch_standstill_speed", 0.3);  // 실측이 이 속도 미만이면 정지 판정 → 킥 시작 [m/s]
 
         // IMU 센서 안전 토글 및 횡슬립 방지
         this->declare_parameter<bool>("use_imu", true);
@@ -233,6 +239,11 @@ public:
         this->get_parameter("stall_speed_threshold", stall_speed_threshold_);
         this->get_parameter("stall_hold_speed", stall_hold_speed_);
         this->get_parameter("stall_hold_delay", stall_hold_delay_);
+        this->get_parameter("launch_boost_enable", launch_boost_enable_);
+        this->get_parameter("launch_boost_speed", launch_boost_speed_);
+        this->get_parameter("launch_boost_time", launch_boost_time_);
+        this->get_parameter("launch_exit_speed", launch_exit_speed_);
+        this->get_parameter("launch_standstill_speed", launch_standstill_speed_);
         this->get_parameter("base_max_decel", base_max_decel_);
         this->get_parameter("prebrake_decel", prebrake_decel_);
         this->get_parameter("use_imu", use_imu_);
@@ -1131,13 +1142,55 @@ private:
             }
         }
 
+        // 8-c. 런치 킥(Launch Kick) — 자율 정지출발 시 VESC 센서리스 데드존 관통 (2026-07-25)
+        //   매뉴얼은 초반 스로틀을 세게 넣어 큰 전류 펀치로 데드존(~0.5 m/s)을 때려 관통하는데,
+        //   자율은 프로파일을 살살 램프해 명령이 데드존에 걸터앉아 토칭·탈조한다. VESC 속도 PID는
+        //   ERPM 오차에 비례해 전류를 뽑으므로(s_pid_kp), 정지 상태에서 짧게 높은 속도를 명령하면
+        //   매뉴얼 펀치와 동일하게 큰 전류가 흘러 데드존을 관통한다. 오픈루프 전류 상향·기본 HFI·
+        //   Coupled HFI 모두 이 모터의 저돌극성(Lq-Ld 0.39µH) 때문에 부하서 실패 확인(2026-07-25 실차)
+        //   → 컨트롤 측 관통이 유일한 자율 해법.
+        //   ⚠️ final_speed(램프 상태)는 건드리지 않고 발행값(publish_speed)만 오버라이드 → 킥 종료 후
+        //      램프가 부드럽게 이어짐. 히스테리시스: 정지(<standstill) 진입, 관통(>exit) 이탈.
+        //   ⚠️ launch_boost_time(0.6s) < stall_hold_delay(1.0s)라 stall_guard와 안 싸움:
+        //      킥 성공 시 차가 나가 stall_guard 미발동, 킥 실패(0.6s 초과) 시 포기하고 stall_guard가
+        //      급발진 안전망으로 인계(과열 방지 위해 차가 실제 움직일 때까지 재시도 안 함).
+        double publish_speed = final_speed;
+        if (launch_boost_enable_) {
+            bool moving = std::abs(current_speed_) > launch_exit_speed_;
+            bool standstill = std::abs(current_speed_) < launch_standstill_speed_;
+            if (moving) launch_latched_off_ = false;                    // 움직였으면 다음 정지서 다시 킥
+            if (target_speed > 0.1) {                                   // 갈 의도가 있을 때만
+                if (!launch_active_ && standstill && !launch_latched_off_) {
+                    launch_active_ = true; launch_time_ = 0.0;          // 킥 시작
+                }
+                if (launch_active_) {
+                    launch_time_ += dt;
+                    if (moving) {                                       // 관통 성공
+                        launch_active_ = false;
+                    } else if (launch_time_ > launch_boost_time_) {     // 관통 실패 → 포기(stall_guard 인계)
+                        launch_active_ = false; launch_latched_off_ = true;
+                        RCLCPP_WARN(this->get_logger(),
+                            "런치 킥 %.2fs 관통 실패 → 포기(stall_guard 인계). 데드존 심함 — 푸시스타트 필요",
+                            launch_time_);
+                    } else {
+                        if (publish_speed < launch_boost_speed_) publish_speed = launch_boost_speed_;
+                        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 200,
+                            "런치 킥: 실측 %.2f → 발행 %.2f m/s (t=%.2fs)",
+                            current_speed_, publish_speed, launch_time_);
+                    }
+                }
+            } else {
+                launch_active_ = false;                                // 정지 명령 중엔 킥 안 함
+            }
+        }
+
         auto drive_msg = ackermann_msgs::msg::AckermannDriveStamped();
         drive_msg.header.stamp = this->now();
         drive_msg.header.frame_id = "base_link";
 
         drive_msg.drive.steering_angle = steering_angle;
-        drive_msg.drive.speed = final_speed;
-        drive_msg.drive.acceleration = (final_speed - current_speed_) / dt;
+        drive_msg.drive.speed = publish_speed;
+        drive_msg.drive.acceleration = (publish_speed - current_speed_) / dt;
 
         // roll_max/limit%: 롤 ESC 실효성 계측(3(a)). 한 랩 돌고 이 %가 계속 낮게(예: 30% 미만)
         // 머무르면 max_roll_limit이 1/10 차량에 비해 과대하다는 뜻 — 롤각 대신 횡가속도
@@ -1254,6 +1307,15 @@ private:
     double stall_hold_speed_ = 1.5;
     double stall_hold_delay_ = 1.0;
     double stall_time_ = 0.0;   // 실측이 멈춰 있는데 명령만 커진 상태의 누적 시간 [s]
+    // 런치 킥 상태(8-c)
+    bool launch_boost_enable_ = true;
+    double launch_boost_speed_ = 3.0;
+    double launch_boost_time_ = 0.6;
+    double launch_exit_speed_ = 0.8;
+    double launch_standstill_speed_ = 0.3;
+    bool launch_active_ = false;       // 현재 펀치 중
+    double launch_time_ = 0.0;         // 현재 펀치 누적 시간 [s]
+    bool launch_latched_off_ = false;  // 관통 실패로 포기 상태(차가 실제로 움직일 때까지 재시도 안 함)
     double base_max_decel_;                    // 명령 속도 하강 rate limit [m/s²]
     double prebrake_decel_ = 1.5;              // 곡률 사전감속 계산용 실측 감속 권한 [m/s²]
     bool use_imu_;
