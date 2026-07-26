@@ -390,7 +390,15 @@ function pWpntArray(c){hdr(c);const n=c.u32();const out=[];for(let i=0;i<n;i++){
   out.push({x:x,y:y,dr:dr,dl:dl,psi:psi,kap:kap,vx:vx});}return out;}
 function pString(c){return c.str();}
 // vesc_msgs/VescStateStamped — 표준 f1tenth 레이아웃(best-effort, 이 랩탑에 vesc_msgs 없어 미검증)
-function pVesc(c){hdr(c);const volt=c.f64();c.f64();const cm=c.f64(),ci=c.f64(),erpm=c.f64(),duty=c.f64();
+function pVesc(c){
+  // vesc_msgs/VescState 실제 필드 순서(2026-07-26 젯슨 `ros2 topic echo /sensors/core`로 확인):
+  //   temp_fet, temp_motor, current_motor, current_input, avg_id, avg_iq, duty_cycle, speed, voltage_input
+  // ⚠️ voltage_input이 선두라고 가정했던 이전 코드는 volt/erpm/duty가 전부 엉뚱한 필드를 읽었다.
+  hdr(c);
+  c.f64(); c.f64();                       // temp_fet, temp_motor
+  const cm=c.f64(), ci=c.f64();           // current_motor, current_input
+  c.f64(); c.f64();                       // avg_id, avg_iq
+  const duty=c.f64(), erpm=c.f64(), volt=c.f64();
   return {volt:volt,curr:cm,curr_in:ci,erpm:erpm,duty:duty};}
 
 // ══ 상수 (control_map_node 기준) ══
