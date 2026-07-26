@@ -425,6 +425,16 @@ def diagnose(S, grip_target):
             X = np.column_stack([WHEELBASE * k_act[m], alat[m], np.ones(int(m.sum()))])
             coef, *_ = np.linalg.lstsq(X, st_i[m], rcond=None)
             gain_A, k_us, steer_offset = (float(c) for c in coef)
+    # ⚠️ 회귀가 물리적으로 말이 되는 범위 안에 있을 때만 해석한다. 짧은 런·단일 코너·조향
+    #    포화가 많은 런에서는 L·κ와 a_lat이 공선성을 띠어 A가 음수까지 나온다(2026-07-26
+    #    run_0726_181747에서 A=-1.10, K_us=0.103). 그걸 "게인 정상"으로 보고하면 오진이다.
+    if gain_A is not None and not (0.5 <= gain_A <= 2.0 and 0.0 <= k_us <= 0.08):
+        findings.append(dict(level="info", title="조향 게인/언더스티어 회귀 신뢰 불가",
+            body=(f"자전거모델 회귀가 비물리적 해로 수렴했다(A={gain_A:.2f}, K_us={k_us:+.4f}). "
+                  f"코너가 하나뿐이거나 조향 포화 구간이 많아 L·κ와 a_lat이 공선성을 띤 경우다. "
+                  f"게인/언더스티어 판정은 이 bag으로 할 수 없다 — 여러 코너를 포화 없이 도는 "
+                  f"주행으로 재측정할 것.")))
+        gain_A = k_us = None
     if gain_A is not None and gain_A > 1.25:
         findings.append(dict(level="critical", title="서보 조향 게인 부족",
             body=(f"자전거모델 회귀: 기하학이 요구하는 조향의 {gain_A:.2f}배를 명령해야 그 곡률이 나온다"

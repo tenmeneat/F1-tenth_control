@@ -626,6 +626,13 @@ function diagnose(S){
         for(let r2=0;r2<3;r2++){if(r2===c)continue;const f=M[r2][c]/M[c][c];for(let k2=c;k2<4;k2++)M[r2][k2]-=f*M[c][k2];}}
       if(Math.abs(M[0][0])>1e-12&&Math.abs(M[1][1])>1e-12&&Math.abs(M[2][2])>1e-12){
         gainA=M[0][3]/M[0][0];kUs=M[1][3]/M[1][1];steerOff=M[2][3]/M[2][2];}}}
+  // ⚠️ 비물리적 해 걸러내기: 코너가 하나뿐이거나 포화가 많으면 L·κ와 a_lat이 공선성을 띠어
+  //    A가 음수까지 나온다(2026-07-26 run_0726_181747: A=-1.10, K_us=0.103). "정상"으로 보고하면 오진.
+  if(gainA!=null&&!(gainA>=0.5&&gainA<=2.0&&kUs>=0&&kUs<=0.08)){
+    F('control','info','조향 게인/언더스티어 회귀 신뢰 불가',
+      `자전거모델 회귀가 비물리적 해로 수렴했습니다(A=${gainA.toFixed(2)}, K_us=${kUs.toFixed(4)}). 코너가 하나뿐이거나 조향 포화 구간이 많아 L·κ와 a_lat이 공선성을 띤 경우입니다.`,
+      '게인/언더스티어 판정은 이 bag으로 불가 — 여러 코너를 <b>포화 없이</b> 도는 주행으로 재측정.');
+    gainA=null; kUs=null;}
   if(gainA!=null&&gainA>1.25)
     F('control','critical',`서보 조향 게인 부족 (A=${gainA.toFixed(2)})`,
       `자전거모델 회귀: 기하학이 요구하는 조향의 <b>${gainA.toFixed(2)}배</b>를 명령해야 그 곡률이 나옵니다(정상 1.0). 실제 조향각이 명령의 ${(100/gainA).toFixed(0)}%뿐이라는 뜻입니다.`,

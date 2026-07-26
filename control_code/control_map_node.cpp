@@ -29,6 +29,10 @@ using namespace f1tenth_control;
 
 namespace {
 
+// 조향각 물리 한계 [rad] — 하드웨어 기준값(±23.5°). rate limit/클리핑과 조향 권한 속도 캡이
+// 같은 값을 봐야 하므로 상수 한 곳에서 정의한다.
+constexpr double MAX_STEERING_ANGLE = 0.41;
+
 // 전 구간 최근접 웨이포인트 스캔. 반환 {최단거리, 인덱스}.
 // (경로 최초 수신 초기화 / 윈도우 이탈 fail-safe 재탐색 / 로컬 짧은 경로 — 3곳 공용)
 std::pair<double, size_t> scan_closest(const std::vector<Waypoint>& wps, double x, double y) {
@@ -198,6 +202,19 @@ public:
         // 곡률 룩어헤드 감속 파라미터
         this->declare_parameter<int>("curvature_lookahead_count", 60);
         this->declare_parameter<double>("max_lateral_accel", 6.0);
+        // 조향 권한 캡 (2026-07-26 추가) — 곡률 캡이 **그립만** 보던 구멍을 메운다.
+        //   정상상태 자전거 모델: δ = L·κ + K_us·a_lat = L·κ + K_us·κ·v²
+        //   δ ≤ δ_avail 로 풀면  v ≤ √( (δ_avail − L·κ) / (K_us·κ) )
+        //   ⚠️ 이건 그립 캡과 **다른 물리**다. 그립은 "타이어가 그 횡가속을 낼 수 있나",
+        //      조향은 "바퀴가 그만큼 꺾일 수 있나"다. 07-26 실차 bag의 κ=1.190(R=0.84m)
+        //      헤어핀에서 그립 한계는 2.11 m/s인데 조향 한계는 0.87 m/s — 조향이 먼저 걸린다.
+        //      그립만 보면 컨트롤러가 2배 빠르게 진입해 풀락(0.410)에도 안 돌아가고
+        //      크로스트랙이 0.11 → 2.07m로 발산했다(실제 이탈).
+        //   understeer_gradient=0 이면 이 항 전체 비활성(구 거동).
+        this->declare_parameter<double>("understeer_gradient", 0.019); // K_us [rad/(m/s²)] — 07-25 bag 회귀 실측
+        // δ_max 중 곡률 추종에 배정할 비율. 나머지는 횡오차 보정·요레이트 피드백·노면 외란용
+        // 여유로 남긴다. 1.0으로 두면 정상 곡률에서 이미 풀락이라 보정 여력이 0이 된다.
+        this->declare_parameter<double>("steer_authority_ratio", 0.85);
         this->declare_parameter<double>("curvature_ff_blend", 0.0); // 곡률 FF 비활성: 검증된 순수 L1 격리 (원본 MAP 컨트롤러 미보유 항목)
         this->declare_parameter<std::string>("odom_topic", "/ego_racecar/odom");
 
@@ -261,6 +278,8 @@ public:
         this->get_parameter("curvature_lookahead_count", cl_count);
         curvature_lookahead_count_ = static_cast<size_t>(cl_count);
         this->get_parameter("max_lateral_accel", max_lateral_accel_);
+        this->get_parameter("understeer_gradient", understeer_gradient_);
+        this->get_parameter("steer_authority_ratio", steer_authority_ratio_);
         this->get_parameter("curvature_ff_blend", curvature_ff_blend_);
 
         acc_now_ = std::vector<double>(10, 0.0);
@@ -726,7 +745,7 @@ private:
         speed_ratio = std::max(0.0, std::min(1.0, speed_ratio));
         double final_speed = target_min_speed + speed_ratio * (max_speed - target_min_speed);
 
-        double steer_ratio = std::abs(final_steering_angle) / 0.41;
+        double steer_ratio = std::abs(final_steering_angle) / MAX_STEERING_ANGLE;
         final_speed *= (1.0 - 0.50 * steer_ratio);
 
         double speed_error = final_speed - current_speed_;
@@ -896,12 +915,35 @@ private:
         // 정확히 그립속도로 선제동된다. (구 방식인 "창 내 최대 κ로 √(a_lat/κ) 블랭킷 재캡"은
         // 프로파일보다 낮은 속도로 전 구간을 과잉감속시켜 폐기 — 상세 비교는 CLAUDE.md 참고.)
         double curvature_speed_limit = std::numeric_limits<double>::max();
+        // 진단용: 조향 권한이 그립보다 먼저 걸린 최악 지점(튜닝 로그에만 쓰임)
+        double steer_bound_k = 0.0, steer_bound_v = 0.0;
         walk_forward(wps, closest_idx, curv_lookahead_dist, path_closed,
                      [&](size_t i, double accum) {
             double v_cap_i = wps[i].speed;
             double k_i = std::abs(wps[i].smoothed_curvature);
             if (k_i > 0.01) {
-                v_cap_i = std::min(v_cap_i, std::sqrt(max_lateral_accel_ / k_i));
+                // (a) 그립 한계: a_lat = κ·v² ≤ a_lat_max
+                double v_grip = std::sqrt(max_lateral_accel_ / k_i);
+                v_cap_i = std::min(v_cap_i, v_grip);
+
+                // (b) 조향 권한 한계 (2026-07-26) — δ = L·κ + K_us·κ·v² ≤ δ_avail
+                if (understeer_gradient_ > 1e-6) {
+                    double steer_budget = steer_authority_ratio_ * MAX_STEERING_ANGLE
+                                          - wheelbase_ * k_i;
+                    // budget ≤ 0 → 기구학적으로도 못 도는 곡률(R < L/tanδ_avail).
+                    // 여기서 0으로 두면 아래 backward-pass가 "가능한 한 늦게까지 감속"으로
+                    // 자연히 처리하고, 최종 min_speed_ 하한이 정지는 막는다.
+                    double v_steer = (steer_budget > 0.0)
+                        ? std::sqrt(steer_budget / (understeer_gradient_ * k_i))
+                        : 0.0;
+                    if (v_steer < v_cap_i) {
+                        v_cap_i = v_steer;
+                        if (k_i > steer_bound_k) {   // 창 안에서 가장 조인 곡률만 기록
+                            steer_bound_k = k_i;
+                            steer_bound_v = v_steer;
+                        }
+                    }
+                }
             }
             double v_reach = std::sqrt(v_cap_i * v_cap_i + 2.0 * prebrake_decel_ * accum);
             if (v_reach < curvature_speed_limit) {
@@ -909,6 +951,14 @@ private:
             }
             return true;
         });
+        // ⚠️ min_speed_ 하한이 조향 캡보다 높으면 캡이 무력화된다. 07-26 실차의 κ=1.190은
+        //    조향 한계가 0.87 m/s라 min_speed_=2.5로는 여전히 못 돈다 — 고곡률 트랙에선
+        //    min_speed를 함께 낮춰야 이 캡이 실제로 일을 한다(런치 인자).
+        if (steer_bound_k > 0.0 && steer_bound_v < min_speed_) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "조향 권한 한계 %.2f m/s (κ=%.3f, R=%.2fm) < min_speed %.2f — 하한이 캡을 무력화 중",
+                steer_bound_v, steer_bound_k, 1.0 / steer_bound_k, min_speed_);
+        }
         curvature_speed_limit = std::max(min_speed_, curvature_speed_limit);
 
         // 2. L1 Guidance Distance 계산 및 L1 Point 스캔
@@ -1065,7 +1115,7 @@ private:
         steering_angle = std::max(last_steering_angle_ - threshold, std::min(steering_angle, last_steering_angle_ + threshold));
 
         // 5) 물리 한계 적용
-        steering_angle = std::max(-0.41, std::min(steering_angle, 0.41));
+        steering_angle = std::max(-MAX_STEERING_ANGLE, std::min(steering_angle, MAX_STEERING_ANGLE));
         last_steering_angle_ = steering_angle;
 
         // 7. 종방향 제어 명령 (Target Speed) 산출
@@ -1348,6 +1398,8 @@ private:
     // 곡률 룩어헤드 감속
     size_t curvature_lookahead_count_;
     double max_lateral_accel_;
+    double understeer_gradient_ = 0.019;    // K_us [rad/(m/s²)] — 조향 권한 캡용, 0이면 비활성
+    double steer_authority_ratio_ = 0.85;   // δ_max 중 곡률 추종 배정 비율
     double curvature_ff_blend_;
 
     // IMU Rolling Buffer

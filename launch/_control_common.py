@@ -43,7 +43,7 @@ def declare_common_args():
         # 랩타임/속도는 게인 무관, 0.15부터 조향 채터링이 뚜렷(부호전환 0→3.32/s) → 보수값 0.08.
         DeclareLaunchArgument(
             'yaw_rate_gain',
-            default_value='0.05',
+            default_value='0.00',
             description='요레이트 카운터스티어 게인 (낮게 시작해 채터링 보며 상향)'
         ),
 
@@ -218,6 +218,24 @@ def declare_common_args():
             'prebrake_decel', default_value='1.5',
             description='곡률 사전감속 제동거리 산출용 실측 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
         ),
+        # ── 조향 권한 속도 캡 (2026-07-26 신설) ──
+        # 곡률 캡이 그동안 **그립만** 봤다(√(a_lat/κ)). 그립과 조향은 다른 물리다:
+        #   그립 = 타이어가 그 횡가속을 낼 수 있나 / 조향 = 바퀴가 그만큼 꺾일 수 있나.
+        # 정상상태 자전거 모델 δ = L·κ + K_us·κ·v² 을 δ_avail로 풀면
+        #   v ≤ √( (ratio·0.41 − L·κ) / (K_us·κ) )
+        # 2026-07-26 실차 bag(run_0726_181747)의 κ=1.190(R=0.84m) 헤어핀에서
+        #   그립 한계 2.11 m/s  vs  조향 한계 0.87 m/s  ← 조향이 먼저 걸린다.
+        # 그립만 보고 2배 빠르게 진입한 결과 풀락(0.410)에도 안 돌아가고 크로스트랙이
+        # 0.11 → 2.07m로 발산했다. understeer_gradient=0 이면 이 항 전체 비활성(구 거동).
+        DeclareLaunchArgument(
+            'understeer_gradient', default_value='0.019',
+            description='언더스티어 그래디언트 K_us [rad/(m/s^2)]. 0이면 조향 권한 캡 비활성'
+        ),
+        # ⚠️ 1.0으로 두면 곡률 추종에 δ_max를 다 써버려 횡오차 보정·요레이트 피드백 여력이 0이 된다.
+        DeclareLaunchArgument(
+            'steer_authority_ratio', default_value='0.85',
+            description='조향 한계(0.41rad) 중 곡률 추종에 배정할 비율. 나머지는 보정 여유'
+        ),
         # ── 곡률 사전감속 스캔 거리 하한 ──
         # 전방 곡률 스캔 거리 = max(count*0.1, v²/(2·prebrake_decel)). count는 저속에서 제동거리가
         # 짧아질 때의 하한. 80 = 8m 스캔.
@@ -229,7 +247,7 @@ def declare_common_args():
         # 곡률 사전감속·헤어핀에서 목표속도가 이 값 밑으로 안 내려가게 하는 하한(sim/real 공용).
         # ⚠️ 장애물 정지 경로는 이 하한을 무시하고 0까지 내려간다(안전 우선) — 순수 순항 프로파일에만 적용.
         DeclareLaunchArgument(
-            'min_speed', default_value='2.0',
+            'min_speed', default_value='1.0',
             description='최저 순항 속도 [m/s] (곡률 감속 하한). 장애물 정지엔 미적용(0까지 허용)'
         ),
 
@@ -426,6 +444,8 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'max_speed': max_speed,
             'min_speed': LaunchConfiguration('min_speed'),
             'max_lateral_accel': max_lateral_accel,
+            'understeer_gradient': LaunchConfiguration('understeer_gradient'),
+            'steer_authority_ratio': LaunchConfiguration('steer_authority_ratio'),
             'curvature_lookahead_count': ParameterValue(
                 LaunchConfiguration('curvature_lookahead_count'), value_type=int),
             'base_max_accel': base_max_accel,
