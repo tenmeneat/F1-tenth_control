@@ -867,14 +867,25 @@ private:
         double lateral_error = min_dist;
 
         // 1.5 곡률 룩어헤드 사전 감속 (Curvature Lookahead Pre-deceleration)
+        // 1.5 곡률 룩어헤드 사전 감속 (Curvature Lookahead Pre-deceleration)
         // 속도비례 룩어헤드: 현재속도 제동거리(v^2/2a)만큼 전방 곡률을 미리 스캔.
-        // 고정 2m는 고속 진입 시 감속 개시가 늦어 헤어핀 오버스피드 → 제동거리만큼 확장.
-        // ⚠️ 여기 a는 base_max_decel(명령 하강 rate limit)이 아니라 prebrake_decel(실측 감속
-        //    권한)이다 — 2026-07-25 분리. 둘을 한 값으로 쓰면 "명령을 빨리 떨어뜨리고 싶다"와
-        //    "차가 실제로 못 서니 멀리 봐야 한다"가 정반대 방향으로 충돌한다.
+        // 추가: 글로벌 경로 형상 Adaptive 룩어헤드 (전방 12m 스캔하여 시케인/헤어핀 등 고곡률 코너 감지 시 룩어헤드 확장)
         double brake_dist = (current_speed_ * current_speed_) / (2.0 * std::max(0.1, prebrake_decel_));
         double min_lookahead_dist = static_cast<double>(curvature_lookahead_count_) * 0.1; // 기존 고정값을 하한으로 유지
-        double curv_lookahead_dist = std::max(min_lookahead_dist, brake_dist);
+
+        // 경로 형상 Adaptive 룩어헤드: 전방 12m 내 고곡률 피크 지점 감지
+        double adaptive_lookahead_dist = min_lookahead_dist;
+        const double path_scan_horizon = 12.0;
+        walk_forward(wps, closest_idx, path_scan_horizon, path_closed,
+                     [&](size_t i, double accum) {
+            double k_i = std::abs(wps[i].smoothed_curvature);
+            if (k_i > 0.4) { // 고곡률 코너 감지 시 코너 피크 지점까지 룩어헤드 확장
+                adaptive_lookahead_dist = std::max(adaptive_lookahead_dist, accum + 1.0);
+            }
+            return true;
+        });
+
+        double curv_lookahead_dist = std::max({min_lookahead_dist, brake_dist, adaptive_lookahead_dist});
 
         // 프로파일 신뢰형 사전감속 (backward-pass): 오프라인 최적화된 프로파일 vx_mps는 이미
         // 각 지점의 최적 속도(코너 감속 램프 포함)를 담고 있다는 전제로, 전방 각 지점의 그립
@@ -901,7 +912,13 @@ private:
         curvature_speed_limit = std::max(min_speed_, curvature_speed_limit);
 
         // 2. L1 Guidance Distance 계산 및 L1 Point 스캔
+        // 코너(시케인/헤어핀) 구간에서는 L1 룩어헤드를 적절히 축소하여 조향 반응성을 높이고 외벽 침범 억제
+        double curv_closest = std::abs(wps[closest_idx].smoothed_curvature);
         double L1_distance = l1_gain_ + current_speed_ * l1_distance_;
+        if (curv_closest > 0.3) {
+            double curv_factor = std::min(1.0, (curv_closest - 0.3) / 1.0);
+            L1_distance *= (1.0 - 0.25 * curv_factor); // 고곡률 진입 시 L1 최대 25% 축소
+        }
         double lower_bound = std::max(t_clip_min_, std::sqrt(2.0) * lateral_error);
         L1_distance = std::max(lower_bound, std::min(L1_distance, t_clip_max_));
 

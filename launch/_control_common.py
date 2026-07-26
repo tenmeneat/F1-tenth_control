@@ -185,11 +185,11 @@ def declare_common_args():
             description='L1 룩어헤드 거리 베이스 오프셋 [m] (공식: l1_gain + v*l1_distance)'
         ),
         DeclareLaunchArgument(
-            'l1_distance', default_value='0.3',
+            'l1_distance', default_value='0.22',
             description='L1 룩어헤드 거리 속도 게인 [s] (공식: l1_gain + v*l1_distance)'
         ),
         DeclareLaunchArgument(
-            't_clip_min', default_value='0.8',
+            't_clip_min', default_value='0.6',
             description='L1 룩어헤드 거리 하한 [m] (낮을수록 저속/시케인 구간에서 국소 지그재그를 '
                         '쫓아 고주파 조향 유발 가능)'
         ),
@@ -213,24 +213,23 @@ def declare_common_args():
         # (rosbag2_2026_07_25-22_08_50): 명령을 4.00→3.11로 내렸는데 실속은 4.03→3.80(-0.4 m/s²).
         # VESC 속도모드는 회생제동이 거의 없어 사실상 coast고, 주행 중 /commands/motor/brake는
         # 0건이었다. 예전처럼 8.0을 쓰면 4 m/s에서 제동거리를 1.0m로 착각(실제 필요 ~8m)해
-        # 사전감속이 0.5초 앞만 보고 시작 → 시케인 언더스티어 크래시. 1.5는 실측(0.4)과 8.0
-        # 사이의 잠정 보수값 — 감속 스텝 테스트로 실측 확정되면 그 값으로 교체할 것.
+        # 사전감속이 0.5초 앞만 보고 시작 → 시케인 언더스티어 크래시. 0.6은 실측 타력감속 반영.
         DeclareLaunchArgument(
-            'prebrake_decel', default_value='1.5',
+            'prebrake_decel', default_value='0.6',
             description='곡률 사전감속 제동거리 산출용 실측 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
         ),
         # ── 곡률 사전감속 스캔 거리 하한 ──
         # 전방 곡률 스캔 거리 = max(count*0.1, v²/(2·prebrake_decel)). count는 저속에서 제동거리가
-        # 짧아질 때의 하한. 20(=2m)은 4 m/s에서 0.5초 앞밖에 못 보게 만들던 값이라 60(=6m)로 상향.
+        # 짧아질 때의 하한. 80 = 8m 스캔.
         DeclareLaunchArgument(
-            'curvature_lookahead_count', default_value='60',
-            description='곡률 룩어헤드 스캔 거리 하한 (×0.1m). 60 = 6m'
+            'curvature_lookahead_count', default_value='80',
+            description='곡률 룩어헤드 스캔 거리 하한 (×0.1m). 80 = 8m'
         ),
         # ── 최저 순항 속도 하한 ──
         # 곡률 사전감속·헤어핀에서 목표속도가 이 값 밑으로 안 내려가게 하는 하한(sim/real 공용).
         # ⚠️ 장애물 정지 경로는 이 하한을 무시하고 0까지 내려간다(안전 우선) — 순수 순항 프로파일에만 적용.
         DeclareLaunchArgument(
-            'min_speed', default_value='2.5',
+            'min_speed', default_value='2.0',
             description='최저 순항 속도 [m/s] (곡률 감속 하한). 장애물 정지엔 미적용(0까지 허용)'
         ),
 
