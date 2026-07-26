@@ -21,6 +21,9 @@ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-
 .tiles{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}
 .tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 16px;min-width:108px}
 .tv{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}.tl{font-size:12px;color:var(--dim)}
+.tsub{font-size:11px;color:#6e7783;font-variant-numeric:tabular-nums;margin-top:2px}
+/* 계기판 클러스터 (리플레이 하단) */
+#cluster{width:100%;height:190px;display:block;background:#07090d;border-top:1px solid var(--line)}
 .viewer{background:#0a0d12;border:1px solid var(--line);border-radius:10px;overflow:hidden}
 #gl{width:100%;height:460px;display:block;cursor:grab}#gl:active{cursor:grabbing}
 .ctl{display:flex;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
@@ -59,6 +62,17 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
 #tip{position:fixed;pointer-events:none;z-index:50;display:none;background:#0a0d12ee;border:1px solid var(--accent);
   border-radius:6px;padding:6px 9px;font-size:12px;font-variant-numeric:tabular-nums;color:var(--fg);white-space:pre}
 #modestrip{width:100%;height:22px;display:none;border:1px solid var(--line);border-radius:6px;margin:8px 0 2px;cursor:crosshair}
+/* 속도 구간별 가감속 표 */
+.tblscroll{overflow-x:auto;margin-top:9px}
+.bintbl{width:100%;border-collapse:collapse;font-size:12.5px}
+.bintbl th{text-align:right;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);
+  font-weight:600;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.bintbl th:first-child{text-align:left}
+.bintbl td{padding:6px 10px;border-bottom:1px solid #191f28;text-align:right;
+  font-variant-numeric:tabular-nums;color:var(--fg);white-space:nowrap}
+.bintbl td:first-child{text-align:left;color:var(--dim)}
+.bintbl tr.thin td{color:#6e7783}
+.bintbl tr:last-child td{border-bottom:0}
 </style>
 
 <header>
@@ -81,6 +95,7 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
     <h2>3D 주행 리플레이 <span class="hint">— 드래그: 회전 · 휠: 줌 · Shift+드래그: 이동</span></h2>
     <div class="viewer">
       <canvas id="gl"></canvas>
+      <canvas id="cluster" title="재생 시점의 속도·종가속도·횡g"></canvas>
       <div class="ctl">
         <button id="play">▶︎ 재생</button>
         <input id="seek" type="range" min="0" max="1000" value="0">
@@ -112,6 +127,13 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
       <div class="explain" id="ex_d"></div>
     </div>
     <div id="readout">그래프를 클릭·드래그하면 그 시점 수치가 여기에 표시됩니다.</div>
+
+    <h2>속도 구간별 가감속 <span class="hint">— 그 속도에서 실제로 낸 가속·감속 권한</span></h2>
+    <div class="chartrow">
+      <div class="chart"><div class="clab" id="lab_bins">구간별 종가속도 [m/s²] — 위 가속 · 아래 감속 · E-stop 구간 제외</div><canvas id="c_bins" style="height:210px"></canvas></div>
+      <div class="explain" id="ex_bins"></div>
+    </div>
+    <div class="tblscroll"><table id="bintbl" class="bintbl"></table></div>
 
     <h2>파트별 튜닝 가이드 <span class="hint">— 파트마다 무엇을 · 어떤 파라미터로 (🔧)</span></h2>
     <div id="guide"></div>
@@ -607,6 +629,52 @@ async function analyze(buffers){
 }
 
 // ══ 적응형 진단 보조: 실측 그립 · 코너 분할(주행 요레이트 기반, 맵 불일치와 무관) ══
+// ══ 속도 구간별 가감속 권한 ══════════════════════════════════════════════════
+// 팀 요청: "속도 구간별로 가감속이 얼마나 되었나". 속도를 구간으로 나눠 그 구간에
+// 머무는 동안의 종가속도(dvx/dt)를 가속쪽/감속쪽으로 갈라 집계한다.
+//   - |dvx| < DEAD 는 순항으로 보고 양쪽 다 제외 — 안 넣으면 등속 구간의 0들이
+//     평균을 0쪽으로 끌어내려 "가속 권한이 없다"는 착시가 생긴다.
+//   - 대표값은 평균(전형적 권한)과 90퍼센타일(최대로 낸 권한)을 같이 낸다. 생 max는
+//     dt 뭉침 스파이크 하나에 좌우돼서 안 쓴다.
+//   - 표본이 적은 구간은 그대로 두되 n을 같이 실어 보내 화면에서 흐리게 처리한다.
+//   - ⚠️ E-stop 구간은 제외한다. 비상제동의 -15 m/s²를 넣으면 "감속 권한이 충분하다"는
+//     정반대 결론이 나온다 — 알고 싶은 건 컨트롤러가 주행 중 낼 수 있는 권한이지
+//     사람이 E-stop을 눌렀을 때 나오는 값이 아니다.
+const MOVING_MIN=0.3;                 // 이 속도 위를 '주행 중'으로 본다 [m/s]
+const BIN_DEAD=0.15;                  // 순항 데드밴드 [m/s²]
+const BIN_MIN_N=8;                    // 이 미만 표본이면 '참고용'으로 흐리게
+function pct(sorted,q){if(!sorted.length)return 0;
+  const i=(sorted.length-1)*q,lo=Math.floor(i),hi=Math.ceil(i);
+  return lo===hi?sorted[lo]:sorted[lo]+(sorted[hi]-sorted[lo])*(i-lo);}
+function computeSpeedBins(t,vx,dvx,peakV,ok){
+  const top=Math.max(1,Math.ceil(peakV));
+  const w=top<=4?0.5:top<=9?1.0:1.5;                 // 구간 6~9개가 되도록
+  const nb=Math.ceil(top/w);
+  const bins=[];
+  for(let b=0;b<nb;b++)bins.push({lo:b*w,hi:(b+1)*w,acc:[],dec:[],time:0,n:0});
+  for(let i=0;i<vx.length;i++){
+    if(vx[i]<=MOVING_MIN)continue;                    // 정지·데드존 제외
+    if(ok&&!ok[i])continue;                           // E-stop 급제동 제외 (아래 주석)
+    const b=Math.min(nb-1,Math.floor(vx[i]/w));
+    if(b<0)continue;
+    const B=bins[b];
+    const im=Math.max(0,i-1),ip=Math.min(t.length-1,i+1);
+    B.time+=Math.max(0,(t[ip]-t[im])/2);              // 이 표본이 대표하는 시간
+    B.n++;
+    if(dvx[i]>BIN_DEAD)B.acc.push(dvx[i]);
+    else if(dvx[i]<-BIN_DEAD)B.dec.push(dvx[i]);
+  }
+  return bins.map(B=>{
+    const a=B.acc.slice().sort((x,y)=>x-y),d=B.dec.slice().sort((x,y)=>x-y);
+    return {lo:B.lo,hi:B.hi,n:B.n,time:B.time,
+            nAcc:a.length,nDec:d.length,
+            meanAcc:a.length?a.reduce((s,v)=>s+v,0)/a.length:0,
+            meanDec:d.length?d.reduce((s,v)=>s+v,0)/d.length:0,
+            pkAcc:a.length?pct(a,0.90):0,             // 90p = 실제로 낸 최대 가속 권한
+            pkDec:d.length?pct(d,0.10):0};            // 10p = 실제로 낸 최대 감속 권한
+  }).filter(B=>B.n>0);
+}
+
 function estimateGrip(tr){
   const N=tr.length,GCAP=11;   // 물리 상한 μ≈1.1 → 스핀 중 vx·wz 폭주(그립 아님) 차단
   // 제어상실 onset: a_lat 비물리(>GCAP) 또는 조향 포화 + 큰 횡하중. 이 이전만 '제어된 그립'
@@ -849,15 +917,24 @@ function diagnose(S){
     'bag에 IMU도 map pose도 없어 a_lat을 /odom의 angular.z로 계산했습니다. 실차 vesc_to_odom의 angular.z는 조향 명령의 기구학 합성값(v·tanδ/L)이라 언더스티어 구간에서 최대 3배 과장됩니다.',
     '아래 그립 판정은 <b>상한</b>으로만 볼 것. 다음 녹화엔 <code>/sensors/imu/raw</code> 또는 <code>/tf</code>·<code>/pf/pose/odom</code>을 반드시 포함.');
 
-  const stats={dur:S.dur,peakV,peakAl,overFrac,minDecel,nCorners:corners.length,grip,gripReached:gi.reached,gripPeak:gi.peak,
-               alatSource:S.alatSource,peakAlCmd:absmax(alatCmd),usRatio,gainA,kUs};
+  // ── 속도 범위: 생 최저는 정지 포함이라 거의 항상 0 → "주행 중 최저"를 따로 낸다 ──
+  const minV=Math.min(...vx);
+  const movingV=vx.filter(v=>v>MOVING_MIN);
+  const minVMoving=movingV.length?Math.min(...movingV):null;
+
+  // E-stop이 걸린 표본은 제외(비상제동을 '감속 권한'으로 착각하지 않도록)
+  const notEstop=tr.map((_,i)=>{let es=false;for(const[et,ev]of S.estop){if(et<=t[i])es=ev;}return !es;});
+  const speedBins=computeSpeedBins(t,vx,dvx,peakV,notEstop);
+
+  const stats={dur:S.dur,peakV,minV,minVMoving,peakAl,overFrac,minDecel,nCorners:corners.length,grip,gripReached:gi.reached,gripPeak:gi.peak,
+               alatSource:S.alatSource,peakAlCmd:absmax(alatCmd),usRatio,gainA,kUs,speedBins};
   return {findings,rec,stats,gripUsed:grip,corners};
 }
 
 // ══ 렌더/뷰어 (데스크톱 도구의 3D 뷰어 코드 기반) ══
 let DATA,track,T0,T1,DUR,scans,wp,VMAX;
 let cam,bounds,cur=0,playing=false,rate=1,lastTs=0;
-let gl,ctx,B,chV,chA,chD,chY,chI,trajCv,chSteer,chX,chVesc,chCmd,modeStrip;
+let gl,ctx,B,chV,chA,chD,chY,chI,trajCv,chSteer,chX,chVesc,chCmd,modeStrip,chBins,clusterCv;
 
 function speedColor(v){const x=Math.min(1,Math.max(0,v/VMAX));
   const r=Math.round(57+x*(229-57)),g=Math.round(211-x*(211-72)),b=Math.round(83-x*(83-77));return `rgb(${r},${g},${b})`;}
@@ -901,7 +978,7 @@ function draw(){B=basis();const W=gl.clientWidth,H=gl.clientHeight;ctx.fillStyle
   if(wp.length)for(let i=0;i+1<wp.length;i++)line3([wp[i][0],wp[i][1],0.01],[wp[i+1][0],wp[i+1][1],0.01],'#bc8cff',1.2);
   for(let i=0;i+1<track.length;i++)line3([track[i][1],track[i][2],0.02],[track[i+1][1],track[i+1][2],0.02],speedColor(track[i][4]),2);
   const sc=scanAt(cur);if(sc){ctx.fillStyle='#58a6ff';for(let i=0;i<sc.pts.length;i+=2){const p=proj([sc.pts[i],sc.pts[i+1],0.03]);if(p){ctx.beginPath();ctx.arc(p[0],p[1],1.6,0,7);ctx.fill();}}}
-  const ps=poseAt(cur);drawCar(ps.x,ps.y,ps.yaw);drawCharts();}
+  const ps=poseAt(cur);drawCar(ps.x,ps.y,ps.yaw);drawCharts();drawCluster();}
 
 // ── 차트 (격자·축눈금 + 다중 시리즈 + 선택적 playhead/grip) ──
 function niceTicks(mn,mx,n){const span=mx-mn;if(!(span>0))return[mn];
@@ -940,6 +1017,206 @@ function drawChart(cv,series,opt){opt=opt||{};const c=cv.getContext('2d'),W=cv.c
     for(let i=0;i<s.t.length;i++){const x=X(s.t[i]),y=Y(s.v[i]);if(!started){c.moveTo(x,y);started=true;}else c.lineTo(x,y);}c.stroke();});
   c.setLineDash([]);c.restore();
   if(opt.playhead){const px=X(cur);c.strokeStyle='#e6edf3';c.lineWidth=1;c.beginPath();c.moveTo(px,M.t);c.lineTo(px,Ht-M.b);c.stroke();}}
+// ── 속도 구간별 가감속 (0을 기준으로 위=가속 / 아래=감속) ──
+// 색은 앱 기존 팔레트에서 파랑/주황(색각이상에서도 구분되는 쌍). 위/아래 위치가 이미
+// 가속·감속을 말해주므로 색은 보조 인코딩이고, 값은 막대 끝에 직접 라벨링한다.
+const BIN_ACC='#4c8dff', BIN_DEC='#f5a623';
+function drawSpeedBins(){
+  if(!chBins||!DATA.stats.speedBins)return;
+  const B=DATA.stats.speedBins,c=chBins.getContext('2d');
+  const W=chBins.clientWidth,Ht=chBins.clientHeight;c.clearRect(0,0,W,Ht);
+  if(!B.length)return;
+  const M={l:46,r:12,t:16,b:34},PW=W-M.l-M.r,PH=Ht-M.t-M.b;
+  let mx=0,mn=0;
+  B.forEach(b=>{mx=Math.max(mx,b.pkAcc,b.meanAcc);mn=Math.min(mn,b.pkDec,b.meanDec);});
+  if(mx-mn<0.5){mx=Math.max(mx,0.25);mn=Math.min(mn,-0.25);}
+  const pad=(mx-mn)*0.12;mx+=pad;mn-=pad;
+  const Y=v=>M.t+(mx-v)/(mx-mn)*PH;
+  // y 격자
+  const yt=niceTicks(mn,mx,4);
+  c.font='10px system-ui';c.textBaseline='middle';c.textAlign='right';
+  yt.ticks.forEach(v=>{const y=Y(v);c.strokeStyle=(Math.abs(v)<1e-9)?'#39414f':'#1a212c';c.lineWidth=1;
+    c.beginPath();c.moveTo(M.l,y);c.lineTo(W-M.r,y);c.stroke();
+    c.fillStyle='#7d8795';c.fillText(fmtNum(v,yt.step),M.l-4,y);});
+  const zy=Y(0),gw=PW/B.length,bw=Math.min(30,gw*0.42);
+  // 직접 라벨은 최대 가속·최대 감속 구간만(모든 막대에 숫자를 붙이면 90p 눈금과 겹쳐 못 읽는다.
+  // 정확한 값은 바로 아래 표에 전부 있다)
+  let iA=-1,iD=-1;
+  B.forEach((b,i)=>{if(b.nAcc&&(iA<0||b.pkAcc>B[iA].pkAcc))iA=i;
+                    if(b.nDec&&(iD<0||b.pkDec<B[iD].pkDec))iD=i;});
+  B.forEach((b,i)=>{
+    const cx=M.l+gw*(i+0.5),thin=b.n<BIN_MIN_N;
+    c.globalAlpha=thin?0.42:1;                       // 표본 적은 구간은 흐리게(참고용)
+    // 가속(위) / 감속(아래) 막대
+    [[b.meanAcc,b.pkAcc,BIN_ACC,1,i===iA],[b.meanDec,b.pkDec,BIN_DEC,-1,i===iD]].forEach(([mean,pk,col,dir,lab])=>{
+      if(!mean)return;
+      const y0=zy,y1=Y(mean);
+      c.fillStyle=col;c.fillRect(cx-bw/2,Math.min(y0,y1),bw,Math.abs(y1-y0));
+      // 90퍼센타일 = 그 구간에서 최대로 낸 권한
+      let py=null;
+      if(pk&&Math.abs(pk)>Math.abs(mean)){py=Y(pk);
+        c.strokeStyle=col;c.lineWidth=1.5;c.setLineDash([3,2]);
+        c.beginPath();c.moveTo(cx-bw/2,py);c.lineTo(cx+bw/2,py);c.stroke();c.setLineDash([]);}
+      if(lab){                                       // 최댓값 구간만 라벨 — 90p 눈금 바깥에 붙인다
+        const ay=py!=null?py:y1;
+        c.fillStyle=col;c.font='600 10px ui-monospace,Menlo,monospace';c.textAlign='center';
+        c.textBaseline=dir>0?'bottom':'top';
+        c.fillText((pk>=0?'+':'')+pk.toFixed(2),cx,ay+(dir>0?-4:4));
+      }
+    });
+    c.globalAlpha=1;
+    // x축: 속도 구간
+    c.fillStyle=thin?'#59616e':'#7d8795';c.font='10px system-ui';
+    c.textAlign='center';c.textBaseline='top';
+    c.fillText(`${b.lo}–${b.hi}`,cx,Ht-M.b+4);
+  });
+  c.fillStyle='#7d8795';c.textAlign='center';c.fillText('속도 구간 [m/s]',M.l+PW/2,Ht-M.b+18);
+  // 범례 (2개 시리즈 → 항상 표시)
+  c.textAlign='left';c.textBaseline='middle';c.font='10px system-ui';
+  let lx=M.l+2;
+  [['가속 평균',BIN_ACC],['감속 평균',BIN_DEC]].forEach(([lab,col])=>{
+    c.fillStyle=col;c.fillRect(lx,M.t-9,9,7);c.fillStyle='#9aa4b2';c.fillText(lab,lx+13,M.t-6);
+    lx+=c.measureText(lab).width+34;});
+  c.strokeStyle='#9aa4b2';c.setLineDash([3,2]);c.lineWidth=1.5;
+  c.beginPath();c.moveTo(lx,M.t-6);c.lineTo(lx+9,M.t-6);c.stroke();c.setLineDash([]);
+  c.fillStyle='#9aa4b2';c.fillText('90퍼센타일(최대 권한)',lx+13,M.t-6);
+}
+
+function drawSpeedBinTable(){
+  const el=document.getElementById('bintbl');if(!el)return;
+  const B=DATA.stats.speedBins||[];
+  el.innerHTML='<thead><tr><th>속도 구간 [m/s]</th><th>체류 시간</th><th>가속 평균</th><th>가속 최대(90p)</th>'
+    +'<th>감속 평균</th><th>감속 최대(10p)</th><th>표본</th></tr></thead><tbody>'
+    +B.map(b=>`<tr class="${b.n<BIN_MIN_N?'thin':''}"><td>${b.lo}–${b.hi}</td><td>${b.time.toFixed(1)} s</td>`
+      +`<td>${b.nAcc?'+'+b.meanAcc.toFixed(2):'—'}</td><td>${b.nAcc?'+'+b.pkAcc.toFixed(2):'—'}</td>`
+      +`<td>${b.nDec?b.meanDec.toFixed(2):'—'}</td><td>${b.nDec?b.pkDec.toFixed(2):'—'}</td>`
+      +`<td>${b.n}${b.n<BIN_MIN_N?' ⚠':''}</td></tr>`).join('')
+    +'</tbody>';
+}
+
+// ── 계기판 클러스터 (재생 시점 실시간) ──────────────────────────────────────
+// 왼쪽 종가속도(±) · 가운데 속도 · 오른쪽 횡g. 횡g에는 실측 그립을 레드라인으로 그려
+// "지금 한계를 넘었나"가 바로 보이게 한다.
+const G=9.80665;
+// 시각 t에서의 시계열 선형보간 (조향 명령처럼 odom과 타임스탬프가 다른 토픽용)
+function interpAt(ts,vs,t){
+  if(!ts||!ts.length)return null;
+  if(t<=ts[0])return vs[0];
+  if(t>=ts[ts.length-1])return vs[vs.length-1];
+  let lo=0,hi=ts.length-1;
+  while(lo+1<hi){const m=(lo+hi)>>1;if(ts[m]<=t)lo=m;else hi=m;}
+  const f=(t-ts[lo])/Math.max(ts[hi]-ts[lo],1e-9);
+  return vs[lo]+(vs[hi]-vs[lo])*f;
+}
+let CLUSTER_LON_MAX=2, CLUSTER_LAT_MAX=1;   // renderReport에서 bag마다 1회 산출(매 프레임 재계산 방지)
+function computeClusterScales(){
+  const lon=track.map(q=>Math.abs(q[6])).sort((a,b)=>a-b);
+  const lat=track.map(q=>Math.abs(q[5])).sort((a,b)=>a-b);
+  CLUSTER_LON_MAX=Math.max(1.5,Math.ceil(pct(lon,0.98)*2)/2);
+  CLUSTER_LAT_MAX=Math.max(0.5,Math.ceil(Math.max(pct(lat,0.98),GRIP)/G*10)/10);
+}
+function gauge(c,cx,cy,r,opt){
+  const A0=Math.PI*0.75,A1=Math.PI*2.25,SPAN=A1-A0;   // 아래가 트인 270° 스윕
+  const val=Math.max(opt.min,Math.min(opt.max,opt.value));
+  const frac=v=>(v-opt.min)/(opt.max-opt.min||1);
+  const ang=v=>A0+SPAN*frac(v);
+  // 베이스 아크
+  c.lineCap='butt';
+  c.strokeStyle='#1b2230';c.lineWidth=r*0.13;
+  c.beginPath();c.arc(cx,cy,r,A0,A1);c.stroke();
+  // 레드라인 영역
+  if(opt.redline!=null&&opt.redline<opt.max){
+    c.strokeStyle='rgba(229,72,77,.30)';
+    c.beginPath();c.arc(cx,cy,r,ang(opt.redline),A1);c.stroke();}
+  // 값 아크 (0 기준 양방향이면 0에서 뻗어나감)
+  const base=opt.bidir?0:opt.min;
+  if(Math.abs(frac(val)-frac(base))>0.001){
+    c.strokeStyle=opt.color;c.lineCap='round';
+    c.beginPath();c.arc(cx,cy,r,Math.min(ang(base),ang(val)),Math.max(ang(base),ang(val)));c.stroke();
+    c.lineCap='butt';}
+  // 눈금
+  c.strokeStyle='#39414f';c.lineWidth=1;
+  const nt=opt.ticks||5;
+  for(let i=0;i<=nt;i++){const v=opt.min+(opt.max-opt.min)*i/nt,a=ang(v);
+    const r0=r-r*0.10,r1=r+r*0.10;
+    c.beginPath();c.moveTo(cx+Math.cos(a)*r0,cy+Math.sin(a)*r0);
+    c.lineTo(cx+Math.cos(a)*r1,cy+Math.sin(a)*r1);c.stroke();}
+  // 바늘 — 중심에서 시작하지 않고 바깥쪽만 뜨는 형태. 중앙 수치를 가로지르지 않게 하려는 것
+  // (중심에서 뽑으면 큰 값에서 바늘이 숫자를 관통해 판독 불가가 된다)
+  const a=ang(val);
+  c.strokeStyle=opt.color;c.lineWidth=2.6;c.lineCap='round';
+  c.beginPath();c.moveTo(cx+Math.cos(a)*r*0.54,cy+Math.sin(a)*r*0.54);
+  c.lineTo(cx+Math.cos(a)*r*0.88,cy+Math.sin(a)*r*0.88);c.stroke();
+  c.lineCap='butt';
+  // 스케일 초과(바늘이 끝에 물림) 표시 — 숫자는 실값이라 바늘만 보면 오독할 수 있으므로
+  if(opt.value>opt.max+1e-9||opt.value<opt.min-1e-9){
+    const ea=ang(val),er=r*1.16;
+    c.fillStyle=opt.color;c.save();c.translate(cx+Math.cos(ea)*er,cy+Math.sin(ea)*er);c.rotate(ea);
+    c.beginPath();c.moveTo(4,0);c.lineTo(-3,-3.4);c.lineTo(-3,3.4);c.closePath();c.fill();c.restore();}
+  // 수치
+  c.textAlign='center';c.fillStyle='#e6edf3';
+  c.font=`700 ${Math.round(r*(opt.big?0.52:0.40))}px ui-monospace,Menlo,Consolas,monospace`;
+  c.textBaseline='alphabetic';
+  c.fillText(opt.text,cx,cy+r*(opt.big?0.16:0.13));
+  c.font='10px system-ui';c.fillStyle='#7d8795';c.textBaseline='top';
+  c.fillText(opt.unit,cx,cy+r*(opt.big?0.30:0.28));
+  c.font='11px system-ui';c.fillStyle='#9aa4b2';c.textBaseline='alphabetic';
+  c.fillText(opt.label,cx,cy+r*1.34);
+}
+function drawCluster(){
+  if(!clusterCv||!track||!track.length)return;
+  const c=clusterCv.getContext('2d');
+  const W=clusterCv.clientWidth,H=clusterCv.clientHeight;
+  c.clearRect(0,0,W,H);
+  const p=track[idxAt(cur)];if(!p)return;
+  const vx=p[4],dvx=p[6],alat=p[5];
+  const gLat=alat/G,gLon=dvx/G;
+  const cy=H*0.46,rBig=Math.min(H*0.36,W*0.13),rSm=rBig*0.76;
+  const cxC=W/2,gap=Math.max(rBig+rSm+26,W*0.20);
+  // 종가속도 스케일: 생 max를 쓰면 E-stop 급제동 스파이크 하나(-16 m/s²)가 스케일을 먹어
+  // 나머지 구간 내내 바늘이 죽는다 → 98퍼센타일로 잡고 초과분은 게이지에서 클램프(수치는 실값 표시).
+  const lonMax=CLUSTER_LON_MAX||2;
+  gauge(c,cxC-gap,cy,rSm,{min:-lonMax,max:lonMax,value:dvx,bidir:true,ticks:4,
+    color:dvx<-0.05?BIN_DEC:BIN_ACC,text:(dvx>=0?'+':'')+dvx.toFixed(2),unit:'m/s²',
+    label:`종가속도 ${(gLon>=0?'+':'')+gLon.toFixed(2)} g`});
+  gauge(c,cxC,cy,rBig,{min:0,max:Math.max(1,Math.ceil(VMAX)),value:vx,ticks:Math.min(8,Math.max(2,Math.ceil(VMAX))),
+    color:'#39d353',text:vx.toFixed(2),unit:'m/s',label:'속도',big:true});
+  // 횡g: 실측 그립을 레드라인으로 — 지금 한계를 넘었는지 즉시 보임
+  const latMax=CLUSTER_LAT_MAX;
+  gauge(c,cxC+gap,cy,rSm,{min:-latMax,max:latMax,value:gLat,bidir:true,ticks:4,
+    redline:GRIP/G,color:Math.abs(alat)>GRIP?'#e5484d':'#bc8cff',
+    text:(gLat>=0?'+':'')+gLat.toFixed(2),unit:'g',
+    label:`횡가속 ${alat.toFixed(1)} m/s² · 그립 ${(GRIP/G).toFixed(2)}g`});
+  // 좌우 방향 표시 (횡g 부호)
+  c.font='10px system-ui';c.fillStyle='#59616e';c.textAlign='center';c.textBaseline='alphabetic';
+  c.fillText(gLat>0.03?'◀ 좌선회':gLat<-0.03?'우선회 ▶':'직진',cxC+gap,cy-rSm*1.30);
+
+  // ── 양옆 정보 패널 (실차 클러스터의 사이드 표시부) ──
+  const md=modeInfo(cur);
+  const panel=(x,align,rows)=>{
+    c.textAlign=align;let y=cy-rSm*0.86;
+    rows.forEach(([lab,val,col])=>{
+      c.font='9.5px system-ui';c.fillStyle='#59616e';c.textBaseline='alphabetic';
+      c.fillText(lab,x,y);
+      c.font='600 14px ui-monospace,Menlo,Consolas,monospace';c.fillStyle=col||'#c9d1d9';
+      c.fillText(val,x,y+18);
+      y+=42;});
+  };
+  const wzNow=p[7];
+  panel(26,'left',[
+    ['주행 모드',md.label,md.c],
+    ['알고리즘',(DATA.mppi&&DATA.mppi.length)?(mppiOn(cur)?'MPPI':'MAP'):'—','#c9d1d9'],
+    ['그립 사용률',`${(Math.abs(alat)/GRIP*100).toFixed(0)} %`,Math.abs(alat)>GRIP?'#e5484d':'#c9d1d9'],
+  ]);
+  const steerNow=DATA.cmd?interpAt(DATA.cmd.t,DATA.cmd.steer,cur):null;
+  panel(W-26,'right',[
+    ['요레이트',`${wzNow>=0?'+':''}${wzNow.toFixed(2)} rad/s`],
+    ['조향각',steerNow==null?'—':`${steerNow>=0?'+':''}${steerNow.toFixed(3)} rad`,
+      steerNow!=null&&Math.abs(steerNow)>MAX_STEER*0.98?'#e5484d':'#c9d1d9'],
+    ['경과 시간',`${(cur-T0).toFixed(2)} s`],
+  ]);
+}
+
 function drawCharts(){const T=track.map(p=>p[0]);
   // 속도: 실측(초록) + 명령(흰 점선) + 계획(보라 점선) 오버레이
   const vs=[{t:T,v:track.map(p=>p[4]),color:'#39d353'}];
@@ -948,7 +1225,7 @@ function drawCharts(){const T=track.map(p=>p[0]);
   drawChart(chV,vs,{playhead:true});
   drawChart(chA,[{t:T,v:track.map(p=>p[9]),color:'#6b7280'},{t:T,v:track.map(p=>p[5]),color:'#e5484d'}],{zeroCenter:true,grip:GRIP,playhead:true});
   drawChart(chD,[{t:T,v:track.map(p=>p[6]),color:'#2dd4bf'}],{zeroCenter:true,playhead:true});}
-function drawStaticCharts(){const T=track.map(p=>p[0]);
+function drawStaticCharts(){drawSpeedBins();const T=track.map(p=>p[0]);
   drawChart(chY,[{t:T,v:track.map(p=>p[8]),color:'#6b7280'},{t:T,v:track.map(p=>p[7]),color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.gz_rad,color:'#f5a623'}],{zeroCenter:true});
   drawChart(chI,[{t:DATA.imu.t,v:DATA.imu.gz_raw,color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.ax,color:'#e5484d'},{t:DATA.imu.t,v:DATA.imu.ay,color:'#39d353'}],{zeroCenter:true});
   if(DATA.cmd)drawChart(chSteer,[{t:DATA.cmd.t,v:DATA.cmd.steer,color:'#e3b341'}],{zeroCenter:true,grip:MAX_STEER});
@@ -1006,7 +1283,7 @@ function drawTrajectory(){const cv=trajCv,c=cv.getContext('2d'),W=cv.clientWidth
 
 // ── 캔버스 리사이즈 ──
 function fit(cv){const dpr=window.devicePixelRatio||1;cv.width=cv.clientWidth*dpr;cv.height=cv.clientHeight*dpr;cv.getContext('2d').setTransform(dpr,0,0,dpr,0,0);}
-function resizeAll(){fit(gl);[chV,chA,chD,chY,chI,trajCv,chSteer,chX,chVesc,chCmd,modeStrip].filter(Boolean).forEach(fit);}
+function resizeAll(){fit(gl);[chV,chA,chD,chY,chI,trajCv,chSteer,chX,chVesc,chCmd,modeStrip,chBins,clusterCv].filter(Boolean).forEach(fit);}
 
 function updateReadout(){const p=track[idxAt(cur)],ro=document.getElementById('readout');if(!ro||!p)return;
   ro.innerHTML=`<b>t=${(cur-T0).toFixed(2)} s</b>    vx <b>${p[4].toFixed(2)}</b> m/s    `+
@@ -1049,7 +1326,33 @@ function wireControls(){
 function setEx(id,read,conc,cc){const e=document.getElementById(id);if(!e)return;
   e.innerHTML=`<div class="rl">읽는 법</div><div class="tx">${read}</div>`+
     `<div class="rl">결론</div><div class="tx" style="color:${cc||'#7ee787'}">${conc}</div>`;}
+// 속도 구간별 가감속 해설 — "고속에서 가속 권한이 죽는가"와 "감속 권한이 있는가"를 본다.
+function explainSpeedBins(s){
+  const B=(s.speedBins||[]).filter(b=>b.n>=BIN_MIN_N);
+  const read='막대 위쪽=그 속도에서의 평균 <b>가속</b>, 아래쪽=평균 <b>감속</b> [m/s²]. '
+    +'점선은 90퍼센타일(그 구간에서 실제로 낸 최대 권한). 흐린 구간은 표본이 적어 참고용. <b>E-stop 구간은 제외</b>했다 — 비상제동을 넣으면 감속 권한이 있다고 잘못 읽힌다.';
+  if(B.length<2){setEx('ex_bins',read,'표본이 있는 속도 구간이 부족해 구간별 비교 불가 — 더 긴 주행 bag이 필요합니다.','#f5a623');return;}
+  const withAcc=B.filter(b=>b.nAcc>=4);
+  const lo=withAcc[0],hi=withAcc[withAcc.length-1];
+  const anyDec=B.some(b=>b.nDec>=4);
+  const bestDec=Math.min(0,...B.map(b=>b.pkDec));
+  let conc,cc;
+  if(!anyDec||bestDec>-0.8){
+    conc=`감속 국면이 사실상 없음(최대 감속 ${bestDec.toFixed(2)} m/s²). 속도를 <b>내리는 권한</b>이 없어 `
+      +`코너 사전감속이 무효 — VESC 브레이크 경로/회생제동을 먼저 확인할 것.`;cc='#e5484d';
+  }else if(withAcc.length>=2&&lo.pkAcc>0.2&&hi.pkAcc<lo.pkAcc*0.5){
+    conc=`가속 권한이 속도에 따라 붕괴: ${lo.lo}–${lo.hi} m/s에서 +${lo.pkAcc.toFixed(2)} → `
+      +`${hi.lo}–${hi.hi} m/s에서 +${hi.pkAcc.toFixed(2)} m/s² (${(100*hi.pkAcc/lo.pkAcc).toFixed(0)}%). `
+      +`고속에서 못 밀어붙이는 상태 — VESC <code>s_pid_ramp_erpms_s</code>·전류 한계를 볼 것.`;cc='#f5a623';
+  }else{
+    conc=`가속 최대 +${Math.max(...B.map(b=>b.pkAcc)).toFixed(2)} · 감속 최대 ${bestDec.toFixed(2)} m/s². `
+      +`구간별로 큰 붕괴 없이 가감속 권한이 유지됩니다.`;cc='#7ee787';
+  }
+  setEx('ex_bins',read,conc,cc);
+}
+
 function fillExplain(D){const s=D.stats,L=D.loc;
+  explainSpeedBins(s);
   // 속도
   let vc,vcc;
   if(D.stallDur>0.8){vc=`명령은 >1 m/s인데 실측 vx가 0 근처인 구간이 ${D.stallDur.toFixed(1)}s → <b>출발 데드존/탈조</b>. 손으로 밀어야 출발.`;vcc='#e5484d';}
@@ -1101,12 +1404,16 @@ function renderReport(D,name){
   T0=track[0][0];T1=track[track.length-1][0];DUR=(T1-T0)||1;VMAX=Math.max(1,...track.map(p=>p[4]));
   const st=D.stats;
   const gripTile=st.gripReached?`${st.grip.toFixed(1)} m/s²`:`≥ ${st.gripPeak.toFixed(1)}`;
-  const tiles=[["주행 시간",`${st.dur.toFixed(1)} s`],["최고 속도",`${st.peakV.toFixed(2)} m/s`],
+  // 속도는 최저~최고 범위로. 생 최저는 정지 포함이라 거의 0이므로 '주행 중 최저'를 부기한다.
+  const vRange=`${st.minV.toFixed(2)}–${st.peakV.toFixed(2)}`;
+  const vNote=st.minVMoving!=null?`주행 중 최저 ${st.minVMoving.toFixed(2)}`:null;
+  const tiles=[["주행 시간",`${st.dur.toFixed(1)} s`],["속도 범위 [m/s]",vRange,vNote],
     [`최대 |a_lat| (${SRC_LABEL[st.alatSource]||'?'})`,`${st.peakAl.toFixed(1)} m/s²`],
     ["실측 그립",gripTile],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],
     ["요레이트 추종률",st.usRatio!=null?`${(st.usRatio*100).toFixed(0)} %`:"—"],
     ["언더스티어 K_us",st.kUs!=null?`${st.kUs>=0?'+':''}${st.kUs.toFixed(3)}`:"—"],["코너 수",`${st.nCorners}`]];
-  document.getElementById('tiles').innerHTML=tiles.map(([k,v])=>`<div class="tile"><div class="tv">${v}</div><div class="tl">${k}</div></div>`).join('');
+  document.getElementById('tiles').innerHTML=tiles.map(([k,v,note])=>
+    `<div class="tile"><div class="tv">${v}</div><div class="tl">${k}</div>${note?`<div class="tsub">${note}</div>`:''}</div>`).join('');
   // 파트별 가이드
   const col={critical:"#e5484d",warn:"#f5a623",info:"#4c8dff",ok:"#30a46c"},lab={critical:"치명",warn:"주의",info:"참고",ok:"양호"},ord={critical:0,warn:1,info:2,ok:3};
   const PART={perc:{icon:'👁',name:'퍼셉션 (LiDAR·장애물)'},loc:{icon:'📍',name:'로컬라이제이션 (MCL)'},
@@ -1129,6 +1436,7 @@ function renderReport(D,name){
   gl=document.getElementById('gl');ctx=gl.getContext('2d');
   chV=document.getElementById('c_v');chA=document.getElementById('c_a');chD=document.getElementById('c_d');
   chY=document.getElementById('c_y');chI=document.getElementById('c_i');trajCv=document.getElementById('traj');
+  chBins=document.getElementById('c_bins');clusterCv=document.getElementById('cluster');
   chSteer=document.getElementById('c_steer');chX=document.getElementById('c_x');chVesc=document.getElementById('c_vesc');chCmd=document.getElementById('c_cmd');modeStrip=document.getElementById('modestrip');
   // 신규 섹션 show/hide (해당 토픽 있을 때만)
   const show=(id,on)=>{const e=document.getElementById(id);if(!e)return;e.style.display=on?(id==='modestrip'||id==='h_extra'?'block':''):'none';};
@@ -1136,7 +1444,7 @@ function renderReport(D,name){
   show('modestrip',anyMode);
   show('wrap_steer',!!D.cmd);show('wrap_x',!!D.xtrack);show('wrap_vesc',!!D.vesc);show('wrap_cmd',!!D.cmdBrake);
   show('h_extra',!!(D.cmd||D.xtrack||D.vesc||D.cmdBrake));
-  fillExplain(D);
+  fillExplain(D);drawSpeedBinTable();computeClusterScales();
   computeBounds();defcam();cur=T0;playing=false;
   wireControls();
   const paint=()=>{resizeAll();drawTrajectory();drawStaticCharts();syncSeek();draw();};

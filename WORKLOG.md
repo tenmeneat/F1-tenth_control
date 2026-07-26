@@ -4,6 +4,213 @@
 
 ---
 
+## 2026-07-27 — bag analyzer 3종 추가: 속도 구간별 가감속 · 속도 범위 타일 · 계기판 클러스터
+
+팀원 요청(속도 구간별 가감속)과 대시보드 요청을 반영. 배포 URL 동일:
+https://claude.ai/code/artifact/d23764b8-3c84-4372-aa35-ba1ea39e52f2
+
+### 1. 속도 구간별 가감속 (신규 섹션 + 표)
+속도를 0.5~1.5 m/s 폭으로 나눠 각 구간의 종가속도를 가속/감속으로 갈라 집계(평균 + 90퍼센타일).
+- **⚠️ E-stop 구간은 제외한다** — 이게 핵심. 비상제동의 -15 m/s²를 넣으면 "감속 권한이 충분하다"는
+  **정반대 결론**이 나온다. 실제로 07-25 bag에서 제외 전 2–3 m/s 구간 감속 최대 -16.17 → 제외 후
+  해당 구간은 감속 표본 자체가 **0**("—")이었다. 알고 싶은 건 컨트롤러 권한이지 사람이 E-stop을
+  눌렀을 때 나오는 값이 아니다. [[chicane-crash-no-decel]] [[vesc-longitudinal-authority]]
+- `|dvx|<0.15`는 순항 데드밴드로 양쪽 다 제외(등속의 0이 평균을 눌러 "가속 권한 없음" 착시 방지).
+- 대표값에 생 max가 아니라 90/10퍼센타일을 쓴다(dt 뭉침 스파이크 1개에 좌우되는 것 방지).
+- 자동 해설이 가속 권한 붕괴를 잡아낸다: 07-25 bag에서 `0–1 m/s +6.19 → 4–5 m/s +0.40 (6%)`.
+  [[vesc-speed-pid-ramp-accel-cap]]의 램프 하드캡과 일치.
+- 표본 <8 구간은 흐리게 + `⚠`. 직접 라벨은 최대 가속·감속 구간만(전부 붙이면 90p 눈금과 겹쳐 못 읽음).
+
+### 2. 속도 타일을 범위로
+`최고 속도 3.74` → `속도 범위 0.00–4.05` + 부기 `주행 중 최저 0.44`. 생 최저는 정지 포함이라
+거의 항상 0이라서, 실제로 쓸모 있는 "주행 중 최저"(>0.3 m/s)를 함께 낸다.
+
+### 3. 리플레이 하단 계기판 클러스터
+재생 시점을 따라가는 실차 대시보드형 게이지 3개(종가속도 · 속도 · 횡g) + 양옆 정보 패널.
+- 횡g에 **실측 그립을 레드라인**으로 그림 → 지금 한계를 넘었는지 즉시 보임(초과 시 빨강).
+- 사이드 패널: 주행모드/알고리즘/그립 사용률 · 요레이트/조향각/경과시간. 조향 포화 시 빨강.
+  피크 a_lat 시점을 찍으면 `조향 +0.410(풀락) · 그립 178% · E-STOP`이 한눈에 나온다.
+- 바늘은 중심에서 안 뽑고 바깥쪽만(r 0.54→0.88) — 중심에서 뽑으면 큰 값에서 숫자를 관통해 못 읽음.
+- 종/횡 스케일은 98퍼센타일 기준(생 max는 E-stop 스파이크가 먹어 나머지 구간 바늘이 죽음),
+  초과분은 게이지에서 클램프하고 끝에 ▲ 표시(수치는 실값).
+
+### 검증 (헤드리스 Chrome)
+실차 bag 4개 + 변경 전 빌드 대조. 정상 bag은 3기능 전부 렌더(clusterPx>13k, binRows 5),
+극소 bag은 binRows=0으로 무탈, odom 없는 40MB bag은 기존 에러 경로로 깨끗이 실패
+(`odom 메시지가 없습니다`). 변경 전/후 파이프라인 동일하게 완주(4.5s, 대부분 sql.js WASM 컴파일).
+⚠️ 헤드리스 `--dump-dom`이 처리 도중 스냅샷을 떠 `PENDING`으로 보이는 경우가 있는데 제품 행이
+아니다 — 하트비트로 각 단계 완주를 확인할 것.
+
+---
+
+## 2026-07-26 — ✅ 종방향 감속 권한 복구(서비스 브레이크 신설, 실차 검증) + 조향 권한 속도 캡 신설
+
+07-25 시케인 크래시의 두 축 — "감속을 못 한다"와 "코너를 못 돈다" — 를 각각 젯슨(VESC 경로)과
+컨트롤러(속도 캡)에서 해결했다. 둘 다 실차 bag으로 원인을 확정한 뒤 고쳤다.
+
+### 1. 젯슨 조사 — 감속 권한이 0인 진짜 이유는 "명령 경로의 부재"
+
+07-25 bag에서 주행 중 실측 감속이 **−0.4 ~ −0.88 m/s²**(사실상 coast)였는데,
+같은 bag에서 E-stop은 **−11.9 m/s²**를 냈다. 하드웨어는 제동할 수 있다는 뜻이다.
+
+젯슨 `~/f1tenth_ws/src/f1tenth_system` 조사 결과 원인 3가지:
+
+| 발견 | 내용 |
+|---|---|
+| **brake 경로 자체가 없음** | `vesc_ackermann/src/ackermann_to_vesc.cpp`는 `commands/motor/speed`와 `commands/servo/position` **둘만** 발행. `brake`라는 단어가 패키지 전체에 없다. 감속은 VESC 내부 속도 PID의 회생에만 의존 |
+| `s_pid_kp = 0.002` | 전류 = 0.002 × ERPM오차. 명령을 1 m/s(4232 ERPM) 낮춰도 8.5A뿐 → 가속도 같이 죽는다 |
+| `speed_max = 23250` | = **5.49 m/s 클램프**. `max_speed`를 그 위로 올려도 VESC가 자른다 |
+| 우조향 −0.379 클리핑 | 서보 범위 한계로 좌우 비대칭. 서보 범위 실측 필요(미해결) |
+
+주행 중 `/commands/motor/brake`는 **0건**이었다 — 명령이 없으니 제동도 없었다.
+
+### 2. 서비스 브레이크 패치 (`ackermann_to_vesc`) — 실차 작동 확인 ✅
+
+**왜 이 파일인가:** VESC는 speed 모드와 brake 모드가 **배타적**이다(`setSpeed()`/`setBrake()`는
+나중 명령이 이김). 별도 노드로 빼면 두 노드가 50Hz로 서로를 덮어써 둘 다 망가진다.
+**VESC로 무엇을 보낼지 정하는 단일 지점**이 유일하게 올바른 중재 위치다.
+
+```
+erpm_over = dir × (erpm_실측 − erpm_명령)      // dir = 진행방향 부호
+조건: brake_enabled ∧ sensors/core 신선 ∧ |erpm| > min ∧ erpm_over > deadband
+  → commands/motor/brake 에 min(gain × erpm_over, max_current) 발행, speed는 **미발행**
+  → servo는 두 경우 모두 항상 발행
+```
+
+- 신규 파라미터 6개, `brake_enabled` 기본 **false**(옵트인) — 켜기 전까지 팀 기존 거동 100% 동일.
+- **E-stop 무영향**: `estop_lock` 시 `ackermann_mux`가 모든 입력을 마스킹해 **아무것도 발행하지
+  않는다**(침묵이지 0이 아님) → 이 콜백 자체가 안 돌아 E-stop의 20A는 무경쟁 유지.
+- `brake=0`을 **절대 발행하지 않는다** → 남의 브레이크를 해제할 일이 없다.
+- 자율 제동 상한 8.0A로 E-stop(20A)보다 항상 약하게.
+
+**개발 중 잡은 버그 2건:**
+- 🔴 **후진 부호 반전**(사용자 지적) — 단순 `실측 − 명령`은 후진 중 부호가 뒤집혀,
+  스틱을 더 내려(=더 세게 후진) **가속을 요구하는데 제동이 걸렸다**. `dir` 투영으로 수정,
+  네 경우(전진/후진 × 가속/감속) 10/10 테스트 통과.
+- 🔴 **`ros2 param set`이 안 먹음** — `declare_parameter`는 생성자에서 1회만 읽는데
+  `param get`은 새 값을 돌려줘서 "켰는데 왜 안 되지"로 한참 헤맸다.
+  `add_on_set_parameters_callback` 추가로 해결(벤치 튜닝에 어차피 필요).
+
+**실차 검증 (`run_0726_181747`) ✅**
+```
+/commands/motor/brake  26건, t=10.69~11.31s, 값 0.7~5.1 A (상한 8.0)
+estop_lock 전 구간 False       ← E-stop 아님, 서비스 브레이크
+그 구간 dvx/dt: 중앙 −1.63, 최소 −2.66 m/s²   (패치 전 −0.88)
+```
+6.0 m/s 목표에 필요한 2.23 m/s²를 최소값 기준으로 이미 넘겼다. 최대 전류가 5.1A로 상한 8.0에
+여유가 있어 `brake_gain`(0.0012)을 더 올릴 수 있다.
+
+### 3. 🔴 조향 권한 속도 캡 — 곡률 캡이 그동안 **그립 한 축만** 보고 있었다
+
+같은 bag에서 시케인 이후가 여전히 터졌다. 원인은 감속이 아니라 **애초에 못 도는 코너**였다.
+
+곡률 사전감속의 지점별 상한 `v_cap[i]`는 `√(a_lat_max/κ)` — 그립만 본다. 그런데 코너에서
+걸리는 물리 제약은 둘이고, 서로 다르다:
+
+| 축 | 질문 | 상한 |
+|---|---|---|
+| 그립 | 타이어가 그 횡가속을 **낼 수 있나** | `v ≤ √(a_lat_max/κ)` |
+| **조향** | 바퀴가 그만큼 **꺾일 수 있나** | `v ≤ √((r·δ_max − L·κ)/(K_us·κ))` |
+
+정상상태 자전거 모델 `δ = L·κ + K_us·a_lat = L·κ + K_us·κ·v²` 를 `δ ≤ r·δ_max`로 푼 것.
+
+**실차 증거 (`run_0726_181747`, t=10.5~13.8s):**
+
+| t | vx | cmd | κ | R[m] | 그립한계 | **조향한계** | 크로스트랙 | steer |
+|---|---|---|---|---|---|---|---|---|
+| 10.51 | 3.80 | 4.00 | 0.136 | 7.4 | 6.25 | 11.90 | 0.09 | +0.213 |
+| **11.01** | 3.43 | 2.50 | **1.190** | **0.84** | 2.11 | **0.87** | 0.11 | **+0.410** |
+| 11.25 | 2.93 | 2.55 | 1.147 | 0.87 | 2.15 | 1.20 | 0.31 | **+0.410** |
+| 11.51 | 2.43 | 3.64 | 0.693 | 1.4 | 2.77 | 3.71 | **0.52** | +0.360 |
+| 13.75 | **0.00** | 3.23 | 0.090 | 11 | — | — | **2.07** | +0.203 |
+
+κ=1.190(R=0.84m) 헤어핀에서 그립은 2.11 m/s를 허용하는데 **조향은 0.87 m/s**다. 그립만 보고
+2배 빠르게 진입 → 조향이 풀락(0.410)에 붙고도 안 돌아감 → 크로스트랙 0.11 → 2.07m 발산 →
+명령 3.23인데 vx=0(이탈·정지). 그 트랙 127점 중 **9점(7%)에서 조향이 구속**한다.
+
+**구현 (`control_map_node.cpp`)** — 신규 런치 인자 2개:
+- `understeer_gradient`(K_us, 기본 0.019 = 07-25 bag 자전거모델 회귀 실측치).
+  **0이면 이 항 전체 비활성 = 구 거동**(즉시 롤백 가능).
+- `steer_authority_ratio`(기본 0.85) — δ_max 중 곡률 추종 배정 비율. 1.0이면 횡오차 보정·
+  요레이트 피드백 여력이 0이 된다.
+- 흩어져 있던 `0.41` 하드코딩을 `MAX_STEERING_ANGLE` 상수로 통합(클리핑·steer_ratio·새 캡 공용).
+
+**⚠️ 함정 — `min_speed`가 캡을 무력화한다.** 최종적으로 `max(min_speed, cap)`을 하므로
+`min_speed`가 조향 한계보다 높으면 캡이 아무 일도 안 한다(위 헤어핀 0.87 vs `min_speed` 2.5).
+이 경우 노드가 2초 throttle로 경고를 띄우게 했다:
+```
+조향 권한 한계 0.87 m/s (κ=1.190, R=0.84m) < min_speed 2.50 — 하한이 캡을 무력화 중
+```
+**⚠️ `r·δ_max/L`보다 큰 κ는 기구학적으로 불가능**(r=0.85면 κ>1.06, R<0.94m). 이때 `v_cap=0`이
+되고 backward-pass가 최대한 감속시킨 뒤 `min_speed`가 정지를 막는다. 근본 해결은 플래너가
+그 코너의 반경을 키우는 것 — 컨트롤러는 감속밖에 못 한다.
+
+**검증**: 07-26 실제 웨이포인트 127점에 적용 — ratio 0.85에서 조향 구속 9점(7%), 가장 조인
+8개 지점이 전부 조향 구속. 시뮬 노드 기동 정상, 젯슨 빌드 정상.
+
+### 4. 종방향 감속 파라미터 분리 (`base_max_decel` / `prebrake_decel`)
+
+하나가 두 역할을 겸했는데 **튜닝 방향이 정반대**라 반드시 한쪽이 손해를 봤다.
+
+| 파라미터 | 의미 | 방향 |
+|---|---|---|
+| `base_max_decel`(8.0) | 명령 속도 램프 rate limit | **높게** — 낮추면 감속 명령이 늦게 도달 |
+| `prebrake_decel`(1.5→1.0) | 차가 **실제로 낼 수 있는** 감속도(제동거리 `v²/2a`) | **실측값**에 맞춤 — 낮을수록 코너를 일찍 봄 |
+
+8.0을 제동거리에 쓰면 4 m/s에서 1.0m로 착각한다(실제 필요 ~8m). `curvature_lookahead_count`도
+20(=2m) → 80(=8m)으로 상향 — 2m는 4 m/s에서 0.5초 앞밖에 못 본다.
+⚠️ `obstacle_brake_decel`(6.0)은 같은 성격인데 아직 낙관치다 — 별도 실차 검증 필요.
+
+### 5. bag 분석도구 정정 — a_lat이 3배 과장돼 있었다
+
+`/odom`의 `angular.z`는 **측정값이 아니라 기구학 합성값** `v·tan(δ)/L`이다. 이걸로 `a_lat`을
+계산하면 실제의 ~3배가 나온다. 07-23 "시케인 스핀" 진단이 이 아티팩트였다(스핀이 아니라
+언더스티어였음).
+- `derive_measured_yaw_rate()` — IMU → MCL pose yaw 미분 → odom(경고 동반) 폴백 체인.
+- **자전거모델 회귀**로 서보 게인 오차(A)와 언더스티어 그래디언트(K_us)를 분리
+  (`δ = A·L·κ + K_us·a_lat + offset`). 이전의 "게인 결손 70%" 휴리스틱은 폐기 — 회귀 결과
+  A=0.974, offset≈0으로 **서보 게인은 정상**이고 결손의 정체는 타이어 언더스티어였다.
+- **비물리 해 거부 가드** — 07-26 런은 코너가 하나뿐이라 공선성으로 `A=−1.10`이 나왔는데
+  도구가 "게인 정상"이라고 보고했다. 이제 `0.5 ≤ A ≤ 2.0 ∧ 0 ≤ K_us ≤ 0.08` 밖이면 거부한다
+  (07-25의 다중 코너 bag은 A=1.00으로 통과 — 회귀 자체는 살아있다).
+- 웹앱(`tools/bag_analyzer/webapp/`)에 동일 로직 반영·재게시.
+
+### 6. 배포 / 커밋
+
+- 젯슨: `git checkout origin/main -- src/f1tenth_control/` + `colcon build --symlink-install`.
+  ⚠️ **젯슨은 `main`이 아니라 `backup/jetson-20260725` 브랜치**이고, 그 브랜치에는 팀 repo에
+  없는 로컬 커밋 `fb7b4d7`(F1_MAP 맵 통일 — global/local_planning·mcl 런치·맵)이 있다.
+  **머지하거나 브랜치를 갈아타면 그게 날아간다** → 패키지 단위 체크아웃이 정답.
+- 젯슨 백업 브랜치에 push: `0e735f3` (f1tenth_control 21개 파일만, 다른 패키지 무변경 확인).
+  main 대비 3 ahead / 9 behind.
+- 젯슨에 올라간 실차 기본값: `max_speed 5.0` / `min_speed 1.0` / `max_lateral_accel 5.1` /
+  `prebrake_decel 1.0` / `curvature_lookahead_count 80` / `understeer_gradient 0.019` /
+  `steer_authority_ratio 0.85`. `min_speed 1.0` 덕에 새 캡이 헤어핀에서 무력화되지 않는다.
+
+### 7. 부수 발견 — 플래너 프로파일에 코너 감속 램프가 없다
+
+```
+글로벌 경로 127점, 랩 31.6m
+프로파일 vx: 4.00 ~ 4.00     ← 전 구간 flat, 코너 램프 없음
+κ 최대 1.190 (R=0.84m) → 조향 한계 0.87 m/s, 플래너 요구 4.00 = 4.6배 초과
+```
+가장 조인 6개 지점 전부 플래너가 4.00을 요구한다. 컨트롤러 캡이 그걸 전부 떠받치는 구조라
+**플래닝 파트에 전달 필요**: ① 코너 감속 램프 ② κ 1.19(R=0.84m) 지점을 R≥1.2m로 완화.
+
+### 후속 과제
+
+| # | 항목 | 비고 |
+|---|---|---|
+| 1 | 새 세팅으로 재주행 검증 | 시케인은 통과 예상, 헤어핀은 캡 실효 확인 필요 |
+| 2 | `brake_gain` 0.0012 → 0.0018 | 5.1A → ~7.6A(상한 8.0 내). 락업 보며 한 단계씩 |
+| 3 | **vesc 서브모듈 브레이크 패치 미커밋** | `.bak.20260726-133535` 백업에만 의존 중. 별도 저장소(`f1tenth_system`)라 브랜치 전략 결정 필요 |
+| 4 | 게이트 1-B: `s_pid_kp` 0.002 → 0.006 → 0.008 | VESC Tool. 헌팅 주의 |
+| 5 | 게이트 1-C: `speed_max` 23250 → 40000 | `vesc.yaml`. B 없이는 무의미 |
+| 6 | 게이트 1-D: 우조향 −0.379 클리핑 | 서보 범위 실측 필요 |
+| 7 | `obstacle_brake_decel`(6.0) 실측 보정 | 낙관치. 장애물/추월 거동에 직접 영향 |
+
+---
+
 ## 2026-07-25 — 🛠 rosbag → LUT 캘리브레이션 오프라인 도구 (`tools/lut_calibrator/`)
 
 "지나간 rosbag으로도 LUT 보정이 되나?"에서 출발. 된다는 걸 07-25 5랩 bag으로 확인한 뒤
@@ -919,361 +1126,100 @@ ros2 launch f1tenth_control dashboard.launch.py mode:=calib   # odom 거리 스�
 
 ---
 
-## 2026-07-17 — 실차 원격(SSH) 브링업 중 발견된 문제 3건 해결 (도메인ID 충돌 / joy_teleop 오배선 / 조향 서보 트림)
+# 📦 아카이브 — 2026-07-17 이전 (요약)
 
-### 배경
-젯슨에 모니터·키보드 없이 무선 SSH로만 접속해 `f110`(f1tenth_stack bringup) 첫 실차 조이스틱
-테스트 진행. PC↔젯슨 SSH 키 인증 + VS Code Remote-SSH 세팅 완료 후, 실제 조작 중 문제 3가지를
-순차 발견·해결.
+> 일주일 이상 지난 항목들. **여전히 유효한 결론과 되풀이하면 안 될 실수만** 남기고 압축했다.
+> 시행착오 과정·중간 가설·당시 to-do는 삭제. 이후 세션에서 정정된 것은 정정본만 적었다.
 
-### 문제 1: VESC USB 미연결로 `vesc_driver_node` 기동 직후 사망
-- 증상: 조이스틱 입력이 차에 전혀 안 먹힘.
-- 로그(`~/.ros/log/.../launch.log`): `vesc_driver_node FATAL: Failed to open the serial port
-  /dev/sensors/vesc ... No such file or directory`.
-- `lsusb`에 VESC 관련 장치 자체가 없었음(허브·블루투스·Xbox 컨트롤러만 보임) → USB 케이블
-  실물 미연결/전원 문제로 확인, 재연결로 해결.
+## 2026-07-17 — 실차 원격 브링업 문제 3건
 
-### 문제 2: `ROS_DOMAIN_ID` 충돌 — 팀원 시뮬레이션이 실차 서보를 직접 명령
-- 증상: `f110` 켜자마자 바퀴가 오른쪽으로 확 꺾이고 안 풀림. `vesc_driver_node` 로그에
-  `servo command value (0.970716) above maximum limit (0.850000), clipping.`이 초당 수십 회
-  반복(수천 줄, 3분 넘게 고정값).
-- 원인: 젯슨 `~/.zshrc`의 `ROS_DOMAIN_ID=67`이 같은 Wi-Fi(MIRU) 네트워크의 **다른 팀원 PC가
-  돌리던 시뮬레이터(f1tenth_gym+planning stack)와 겹침**. `/drive` 토픽 발행자를 추적
-  (`ros2 topic info /drive --verbose`)한 결과 로컬에 존재하지 않는 `map_controller` 노드였고,
-  `/ego_racecar/odom` 등 시뮬 전용 토픽까지 같은 도메인에서 보였음 — 팀원의 시뮬 조향 명령이
-  DDS 도메인 충돌로 그대로 실차 `ackermann_mux`→서보에 새어 들어간 것.
-- 당시 조치: 젯슨 `.zshrc`의 `ROS_DOMAIN_ID`를 `67 → 88`로 변경. 이후 `ros2 node list`에서
-  팀원 쪽 노드 전부 사라짐, `/drive` 누수 중단 확인.
-- 🔴 **07-21 정정 — 이 조치는 되돌려졌고, 그게 맞다.** 현재 확정값은 **67**이다.
-  도메인 번호를 옮기는 건 증상만 가리는 대증요법이었다. 근본 원인은 "번호가 겹쳤다"가 아니라
-  **시뮬이 LAN으로 새어나간다**는 것이라, 번호를 어떻게 배정해도 같은 사고가 재발할 수 있다.
-  올바른 해법은 **시뮬 쪽에 `export ROS_LOCALHOST_ONLY=1`** — 도메인이 겹쳐도 안전하다.
-  자세한 내용은 07-21 작업 2 참고.
+- **VESC USB 미연결** → `vesc_driver_node`가 기동 직후 사망(`/dev/sensors/vesc` 없음).
+  조이스틱이 안 먹으면 `lsusb`부터 볼 것.
+- **`ROS_DOMAIN_ID` 충돌** — 같은 Wi-Fi의 팀원 시뮬(`map_controller` 노드)이 발행한 `/drive`가
+  실차 서보에 그대로 새어 들어와 바퀴가 풀락으로 꺾였다.
+  🔴 **당시 조치(67→88)는 되돌려졌고 그게 맞다. 확정값은 67.**
+  번호를 옮기는 건 대증요법 — 근본 해법은 **시뮬 쪽 `export ROS_LOCALHOST_ONLY=1`**.
+- **`joy_teleop.yaml` 조향축 오배선** — `drive-steering_angle.axis`가 `2`(LT 트리거, rest=1.0)라
+  딥맨 누르는 즉시 `steering_angle≈0.34` 고정. `2 → 0`으로 수정.
+  ⚠️ f1tenth_stack `ackermann_mux`의 teleop(pri 100)이 우리 `/drive`(pri 10)보다 항상 우선하므로
+  **`control_real.launch.py`를 켜도 이 버그는 안 고쳐진다** — f1tenth_stack 설정을 직접 고쳐야 함.
+- **서보 트림** — 실측 2점 보간으로 `steering_angle_to_servo_offset` 확정.
+  이론 게인보다 **실측 민감도가 약 2.7배 낮다**(서보 범위 클리핑/링키지 비선형) →
+  트림은 항상 이론 게인이 아니라 **실측 2점 보간**으로 할 것.
+  (당시 값 0.4633은 07-21에 **0.4672**로 재확정 — 07-21 섹션이 최신)
+- 부수: `miru` 계정이 `input` 그룹에 없어 `joy_node`가 `/joy` 미발행(`usermod -aG input`).
+  워크스페이스 구조 변경 후 stale 빌드 캐시 → `rm -rf build install` 전체 재빌드.
 
-### 문제 3: f1tenth_stack `joy_teleop.yaml` 조향축 오배선(axis 2 = LT 트리거)
-- 증상: LB(딥맨) 누르면 바퀴가 왼쪽으로 확 꺾임(조이스틱 스틱은 안 건드린 상태).
-- 원인: `~/f1tenth_ws/install/f1tenth_stack/share/f1tenth_stack/config/joy_teleop.yaml`의
-  `human_control.axis_mappings.drive-steering_angle.axis`가 `2`(LT 트리거, 실측 rest값
-  `1.0`)로 잘못 매핑됨. `scale=0.34` 곱해져 LB 누르는 즉시 `steering_angle≈0.34 rad`
-  (풀락에 근접) 고정 명령.
-  - 실측 `/joy` axes: `axes[0]`(좌스틱 좌우, rest≈0) / `axes[2]`(LT, rest=1.0) / `axes[5]`
-    (RT, rest=1.0) — `f1tenth_control` 자체 조향 축 관례(`axes[0]`, CLAUDE.md)와도 불일치.
-  - ⚠️ f1tenth_stack의 `ackermann_mux`는 자체 `teleop`(우선순위100)을 `f1tenth_control`의
-    `/drive`(우선순위10, `control_real.launch.py`의 `joy_teleop_monitor` 출력)보다 항상
-    우선하므로, **`control_real.launch.py`를 켜도 이 버그는 안 고쳐짐** — f1tenth_stack
-    자체 설정 파일을 직접 고쳐야 함.
-- 해결: `human_control.drive-steering_angle.axis`를 `2 → 0`으로 수정.
+## 2026-07-11 — MPPI 솔버 설계 + 조이스틱 재배치
 
-### 조향 서보 중립(트림) 캘리브레이션
-`vesc.yaml`의 `steering_angle_to_servo_offset`을 실측 2점 선형보간으로 확정.
+- 조이스틱 **RB(5) = MAP/MPPI 전환** 신설(당시엔 상태·표시만, 라우팅은 이후 세션).
+- `mpc_controller.cpp`(OSQP 기반 LTV-MPC, **CMakeLists에 미등록된 죽은 코드**였음)를
+  **샘플링 기반 MPPI로 전면 재작성**. OSQP 의존 제거.
+  - 정식화: 정보이론 MPPI(Williams 2018). K개 잡음 롤아웃 → `w_k=exp(-(J_k-β)/λ)/Σ` →
+    `u_t += Σ w_k ε_{t,k}` → 첫 제어 출력 + warm-start 시프트.
+  - 제어 `u=[조향 δ, 종가속 a]`, 롤아웃은 **동역학 자전거+Pacejka 횡력**,
+    저속(vx→0) 슬립각 발산은 **기구학 자전거로 블렌드**.
+  - 비용: 위치·헤딩·속도 2차 추종 + 트랙 경계 소프트 페널티. 제어비용은 λ에 암묵 반영.
+  - 별도 헤더 없이 단일 파일 인라인, 하단 `#ifdef MPPI_SMOKE_TEST`로 ROS 없이 폐루프 검증.
+- **⚠️ 아직 유효한 미해결 과제 — MPPI Pacejka 파라미터 실차 보정.** 현재 f1tenth_gym 기본값.
+  - 기존 NUC6 LUT는 (a_lat, v)→δ의 *역맵*이라 전방 롤아웃에 직접 못 쓴다. 단
+    **테이블 내용물 자체는 순방향 `a_lat=f(δ,v)`**이므로(캘리브레이터가 실측 `v·ψ̇`를 저장)
+    파라미터 식별용 데이터로는 적합하다.
+  - **A안(1순위·손 적음)**: 캘리브레이션 CSV의 각 `(δ,v)`에서 MPPI `step_dynamics`를
+    정상상태까지 굴려 나온 `a_lat`이 셀 값과 맞도록 Pacejka를 **오프라인 최소자승 피팅**.
+    Iz·과도특성은 공칭값(0.047).
+  - **B안(더 정합적·나중)**: `(δ,v,ψ̇,ψ̈,vy)` 로그로 전방 모델 파라미터를 직접 회귀
+    (B,C,D,E,Iz 동시) — 과도특성까지 잡음.
+  - 한계: 정상상태만으론 전/후축 분리가 under-determined, 캘리브레이터가 명령 조향을
+    실제 서보각 근사로 씀(조향 오프셋/지연 편향이 피팅에도 실림).
 
-| offset | 실측 오차 |
-|---|---|
-| 0.5304 (원본) | 살짝 오른쪽 (정량 미측정) |
-| 0.51 | +7° (오른쪽) |
-| 0.362 | −12° (왼쪽, 과보정) |
-| 0.4555 (2점 보간) | 거의 정중앙 |
-| **0.4633 (최종)** | **오른쪽 미세 트림 +1° 반영, 확정값** |
+## 2026-07-08 — VESC FOC 센서리스 저속 코깅/탈조 (초기 진단)
 
-- 이론 게인(`steering_angle_to_servo_gain=-1.2135`, 1도≈0.0212 서보값)보다 **실측 민감도가
-  약 2.7배 낮음**(1도≈0.00779 서보값) — 서보 범위 클리핑/조향 링키지 기구학 비선형 때문으로
-  추정. 향후 이런 트림 작업은 이론 게인이 아니라 **실측 2점 보간**으로 하는 게 정확함.
-- **최종값 `steering_angle_to_servo_offset: 0.4633`**, 위치:
-  `~/f1tenth_ws/install/f1tenth_stack/share/f1tenth_stack/config/vesc.yaml`. 서보/조향
-  링키지를 물리적으로 재장착하지 않는 한 유효.
+- **데드존 = `foc_openloop_rpm≈800` ~ `foc_sl_erpm_start=2250` ERPM (0.17~0.49 m/s).**
+  이 구간에서 **속도를 정적으로 유지**하려 하면 오버슈트 후 0으로 추락·재시동 무한반복.
+  **스윕 통과(가속/감속)는 상대적으로 안전** — 한 번 흔들리고 정상 도달.
+- Duty(오픈루프 단독)는 항상 매끄러움 — Speed(ERPM) 모드에서만 재현.
+  Speed PID Ramp·Openloop Current Max(7→15A)·Heavy Inertial Load 프리셋 전부 무효,
+  크래시 지점(~2100~2250)이 안 움직임 → **PID 게인/전류 캡 문제가 아니다.**
+- 실주행 파이프라인이 바로 이 Speed(ERPM) 모드다(`ackermann_to_vesc_node`).
+- 🔴 **이후 세션의 정정**: 07-23에 진짜 원인이 **플래시에 잘못 저장된 R(8.8 vs 실측 7.23mΩ)**
+  로 밝혀져 재검출로 벤치 해결, 07-24에 **부하 데드존**으로 최종 확정(푸시스타트로 회피,
+  HFI가 유일 근본책). 07-22에 제어측 **탈조 급발진 가드**(stall_guard) 구현.
+  → 이 섹션은 데드존 수치의 출처로만 유효하다.
 
-### 기타 — 젯슨 원격 접속 세팅
-- PC↔젯슨: SSH 키 인증(`~/.ssh/config`의 `Host jetson`, 사용자 `miru`, `10.1.1.3` — MIRU
-  네트워크 DHCP라 유동적일 수 있음) + VS Code Remote-SSH 확장 설치, `~/2026_IFAC` 원격
-  편집 가능.
-- 젯슨 `joy_node`가 `/joy`를 발행 안 하던 문제 → `miru` 계정이 `input` 그룹에 없어서였음
-  (`/dev/input/js0`가 `group input` 소유). `sudo usermod -aG input miru` + 재로그인으로 해결.
-- 젯슨 colcon 빌드 시 `f110_msgs`/`f1tenth_control` 둘 다 `CMake Error: source ... does not
-  match ... used to generate cache` — 예전 워크스페이스 구조(최상위 패키지)에서 `src/`
-  구조로 바뀌며 생긴 stale 빌드 캐시. `rm -rf build install && colcon build`(전체 재빌드)로
-  해결.
+## 2026-07-05 — 첫 실차 주행 준비 (당시 계획)
 
----
+- `control_real.launch.py` 신설(실차 보수 프리셋). 이후 세션에서 대폭 개편됨.
+- IMU 축 검증 항목이 여기서 처음 제기됨 → 07-19에 **VESC가 자이로를 deg/s, 가속도계를 g로
+  발행**(비-SI)하는 것으로 확정, `IMU_ANGULAR_SCALE`/`IMU_LINEAR_SCALE`로 보정 중.
+- StabilityController는 각속도·자세만 쓰므로 VESC 장착 위치 offset 영향 0(축만 맞추면 됨).
+  단 선형가속도엔 레버암 보정이 필요.
 
-## 2026-07-11 — 조이스틱 버튼 재배치 + MPPI 솔버 파일 리네임/빌드 연결
+## 2026-06-17 — 코너 벽 충돌·트랙 이탈 해결 (`wall_safety_margin` 신설)
 
-### 배경
-다음 세션에 MPPI 컨트롤러 설계를 시작하기 전, 실차에서 조이스틱 버튼 하나로
-MAP ↔ MPPI 제어 알고리즘을 전환할 수 있는 기반을 미리 마련해두기로 함.
-
-### 조이스틱 버튼 재배치 (`joy_teleop_monitor.cpp`)
-- **부스트 버튼: RB(5) → A(0)** 이동.
-- **신규: RB(5) = MAP/MPPI 알고리즘 전환 버튼** (`algorithm_button` 파라미터, 기본 5).
-  LB 토글과 동일한 상승 엣지 감지 패턴으로 구현, `current_algorithm_`
-  (`ControlAlgorithm::MAP`/`MPPI`) 상태를 전환하고 `/teleop_dashboard`에
-  "Active Algorithm" 줄로 표시.
-- ⚠️ **현재는 상태 전환 + 대시보드 표시만** 한다. MPPI 쪽 `/drive_autonomous`
-  소스가 될 노드가 아직 없어서, 실제 소스 라우팅(`auto_drive_callback` 확장)은
-  MPPI 노드가 생기는 다음 세션으로 미룸.
-- `launch/control_real.launch.py`, `launch/control_sim.launch.py`의
-  `boost_button`/`algorithm_button` 파라미터도 함께 갱신.
-
-### MPPI 솔버 파일 리네임 + 빌드 연결
-- `control_code/mpc_controller.cpp` → `control_code/control_MPPI.cpp`,
-  `include/f1tenth_control/mpc_controller.hpp` → `include/f1tenth_control/control_MPPI.hpp`
-  로 `git mv` (include guard/include 경로만 갱신, `MPCController` 등 심볼명은 유지 —
-  다음 세션에 이 파일 내부를 MPPI 알고리즘으로 재작성할 예정).
-- 이 파일은 이전까지 **`CMakeLists.txt`에 전혀 등록되지 않은 죽은 코드**였음(확인
-  결과 OSQP C API 기반 전역좌표 LTV-MPC 조향 솔버 클래스이며 ROS 노드/`main()`
-  아님). 이번에 처음으로 빌드에 연결:
-  - `find_package(osqp REQUIRED)` 추가 — `ros-humble-osqp-vendor`가 설치한
-    업스트림 OSQP CMake 패키지(`/opt/ros/humble/lib/cmake/osqp/`)가 `osqp::osqp`
-    임포트 타겟을 제공, 기존 코드의 `#include <osqp.h>`와 그대로 호환.
-  - `add_library(control_mppi_solver STATIC control_code/control_MPPI.cpp)` +
-    `target_link_libraries(... osqp::osqp)` 추가. 아직 어떤 노드도 링크하지
-    않는 **컴파일 검증 전용** 정적 라이브러리(`install(TARGETS ...)`에도 미포함).
-  - `package.xml`에 `<depend>osqp_vendor</depend>` 추가.
-
-### MPPI 알고리즘 본체 설계 (control_MPPI.cpp 재작성)
-지난 리네임에 이어 이 파일 내용을 비우고 **샘플링 기반 MPPI 컨트롤러**로 재설계.
-- **정식화**: 정보이론 MPPI(Williams 2018, IEEE T-RO). K개 잡음 제어열 롤아웃 →
-  동역학 롤아웃 비용 → 가중 `w_k=exp(-(J_k-β)/λ)/Σ` → `u_t+=Σ w_k ε_{t,k}` →
-  첫 제어 출력 + warm-start 시프트. QP/OSQP 불필요(순수 샘플링).
-- **제어/모델**: 제어 `u=[조향 δ, 종가속 a]`(조향+종방향 동시). 롤아웃 동역학은
-  **동역학 자전거(single-track)+Pacejka 마법공식 횡력**. 저속(vx→0)에서 슬립각
-  발산 → `v_switch`(기본 2m/s) 미만은 **기구학 자전거로 블렌드**(실차 정지출발 대응).
-- **비용**: 위치·헤딩·속도 2차 추종 + 트랙 경계 소프트 페널티(반폭−마진 초과 시).
-  제어비용은 λ 항으로 암묵 반영. 종단 가중 배수(`w_terminal`). 출력 저역통과 평활화
-  (LP-MPPI 근사, 채터링 저감).
-- **구조**: control_MAP.cpp처럼 **별도 헤더 없이 단일 파일에 인라인**(`MPPIController`
-  클래스). 리네임으로 생겼던 `control_MPPI.hpp` 삭제. 파일 하단 `#ifdef MPPI_SMOKE_TEST`
-  로 ROS 없이 폐루프 검증하는 스탠드얼론 하네스 내장.
-- **빌드**: MPPI는 외부 솔버가 없으므로 `CMakeLists.txt`의 `find_package(osqp)` 및
-  `target_link_libraries(... osqp::osqp)`, `package.xml`의 `<depend>osqp_vendor</depend>`
-  제거. `control_mppi_solver` static lib 타겟은 컴파일 검증용으로 유지.
-- **참조**: [MPPI overview](https://acdslab.github.io/mppi-generic-website/docs/mppi.html),
-  [ForzaETH race_stack(참조: 상태/기준 인터페이스 규약)](https://github.com/ForzaETH/race_stack),
-  [F1TENTH MPPI 사례](https://www.tdetlefsen.com/f1tenth-mppi.html),
-  [LP-MPPI 2503.11717](https://arxiv.org/abs/2503.11717).
-- **⚠️ LUT 정직성**: 기존 NUC6 Pacejka LUT는 (횡가속도,속도)→조향각의 *역맵*이라 전방
-  롤아웃엔 직접 못 씀. 전방 Pacejka 파라미터는 f1tenth_gym 기본값 사용(추후 실차 보정).
-- **검증**: 스모크 테스트 PASS — 원호 추종에서 횡오차 0.40→0.02m 수렴, 속도 3.0m/s
-  추종, 최악 solve 12.3ms(<20ms@50Hz, -O2 기준. colcon -O3/-flto면 더 빠름),
-  제어 한계·유한성 OK, vx=0 출발 특이점 없음.
-
-### 다음 세션 To-do
-- `control_MPPI.cpp`에 `ControlMppiNode`+`main()`을 **같은 단일 파일**에 추가
-  (`control_MAP.cpp`와 유사: odom/imu/global·local_waypoints 구독, 웨이포인트→MppiRef
-  변환, `/drive_autonomous` 발행). CMake `add_library`→`add_executable(control_mppi_node)`
-  전환 + `install(TARGETS)` 등록.
-- `joy_teleop_monitor`의 `auto_drive_callback`(또는 소스 선택 로직)을 확장해
-  `current_algorithm_`(RB 토글) 상태에 따라 MAP/MPPI 소스를 실제 라우팅.
-- Pacejka 타이어 파라미터(Bf/Cf/Df…) 실차/시뮬 보정 → 아래 "Pacejka 파라미터 보정" 참조.
-
-### Pacejka 파라미터 보정 — lut_calibrator 재활용 가능성 (내일 착수)
-**질문: MPPI 전방 Pacejka 파라미터를 기존 lut 갱신 메커니즘으로 적용 가능한가?**
-결론: **직접 plug-in은 불가, "파라미터 식별(fitting)용 데이터"로는 적합.**
-
-- 지난번 "LUT는 역맵이라 못 씀" 설명은 부정확했음(정정): `lut_calibrator_node.cpp`가
-  셀 `(|δ|, v)`에 저장하는 값은 실측 **정상상태 횡가속도 `a_lat = v·ψ̇`** —
-  즉 LUT **테이블 내용물 자체는 정상상태 순방향 맵 `a_lat=f(δ,v)`**이고, MAP이 그걸
-  역방향 조회(`lookup_steer_angle`)해 쓸 뿐. 데이터는 순방향이 맞다.
-- MPPI 전방 동역학도 정상상태 코너링(ω̇=0, v̇y=0, v 일정)에 이르면 `a_lat = vx·ω`를
-  뱉는다(캘리브레이터와 동일 공식) → 정합 비교 가능.
-  - 저-δ 기울기 → 코너링강성(α≈0의 B·C·D), 고-δ 포화값 → 마찰 피크 `D=μ·Fz` → μ.
-- **한계**: ① 정상상태 정보만 → **요관성 Iz·과도(슬립 build-up) 특성은 LUT에서 안 나옴**
-  (공칭값 0.047 사용 또는 별도 식별). ② single-track 정상상태만으론 **전/후축 분리가
-  under-determined** → lf/lr로 Fzf/Fzr 고정하고 앞뒤 B,C,E(또는 μ) 공유 가정, 혹은
-  등가 단일축 곡선으로 피팅. ③ 캘리브레이터가 `/drive` 명령 조향을 실제 서보각 근사로
-  씀(조향 오프셋/지연 편향이 피팅에도 실림 — LUT가 이미 안고 가는 가정).
-
-**권장 경로 2가지:**
-- **A안 (1순위·재활용, 손 적음):** 캘리브레이션 CSV(`~/f1tenth_lut_calibration/
-  NUC6_glc_pacejka_lookup_table_calibrated.csv`)를 읽어, 각 그리드점 `(δ,v)`에서 MPPI
-  `step_dynamics`를 정상상태까지 굴려 나온 `a_lat`이 셀 값과 일치하도록 Pacejka
-  파라미터(Bf/Cf/Df/Br/Cr/Dr/E)를 **오프라인 최소자승 피팅**하는 스크립트 1개 작성 →
-  `MppiParams` 기본값 갱신. Iz·과도특성은 공칭값. 기존 캘리브 메커니즘 그대로 살림.
-- **B안 (더 정합적·나중):** MPPI 노드가 선 뒤, lut_calibrator처럼 `(δ, v, ψ̇, ψ̈, vy)`
-  로그를 모아 **전방 모델 파라미터를 직접 회귀**(B,C,D,E,Iz 동시)하는 전용 캘리브레이터
-  신설. 손은 더 가지만 과도특성까지 잡음.
-- 착수 순서 제안: 내일은 A안(재활용) 먼저 시도해 정상상태 정합만 확보 → MPPI 노드/실주행
-  검증 후 필요하면 B안으로 과도특성 보강.
-
----
-
-## 2026-07-08 — 모터 저속 코깅/탈조 진단 (VESC FOC 센서리스)
-
-### 증상
-실차 브링업 중 VESC Tool로 duty 0.2 / rpm 1000 테스트 시 바퀴가 미세하게 움찔거리기만
-하고 매끄럽게 회전하지 않음(Fault 없음). VESC Tool RT Data로 라이브 파라미터 튜닝하며
-원인 분리.
-
-### 근본 원인 (확정)
-**FOC 센서리스 오픈루프(강제 커뮤테이션) ↔ 관측기(observer) 핸드오프 구간의 구조적
-불안정.** `foc_openloop_rpm≈800` ~ `foc_sl_erpm_start=2250` ERPM 사이("데드존")에서
-**속도를 고정 유지(정적 홀드)하려고 하면** 오버슈트 후 완전히 0으로 추락 → 재시동을
-무한 반복. 이 구간을 **그냥 통과(가속/감속 스윕)하는 것은 상대적으로 안전** —
-목표가 데드존 밖(예: 0 또는 2500 이상)이면 통과 중 한 번 흔들리고 정상적으로
-도달/정지함.
-
-- Duty(오픈루프 단독) 제어는 이 문제와 무관 — 항상 매끄러움 (`ERPM 1200 / Ramp 0.10s /
-  Boost 3.00A / Max 7.00A / Lock 0.00s` 조합에서 0→11746 ERPM 클린 램프 확인).
-- Speed(rpm) 제어 모드에서만 재현 — `Speed PID Ramp`(10000→2000), `Openloop Current
-  Max`(7→12~15A), `Heavy Inertial Load` 프리셋 등 여러 시도를 했지만 크래시 발생 지점
-  (~2100~2250 ERPM 부근)이 전혀 안 바뀜 → PID 게인/전류 캡 문제가 아니라 데드존
-  구조 자체의 문제로 결론.
-- 실차 감속(목표 rpm→0) 재현 테스트: 데드존을 하강 통과할 때 짧게(~0.2~0.3s) 덜컹인
-  뒤 정상적으로 0에 정지 — 무한루프는 아니고 "거친 정지" 수준.
-
-### 실주행 영향 분석
-`ackermann_to_vesc_node`(`~/2026_IFAC/vesc/vesc_ackermann`)가 `speed_to_erpm_gain=4614.0`
-(오프셋 0)로 m/s→ERPM 변환 후 VESC Speed(ERPM) 모드로 명령 — 즉 이번에 재현한 문제는
-**실제 주행 파이프라인과 동일한 제어 모드**임. 환산: `speed(m/s) = ERPM / 4614`.
-
-| ERPM | 실속도 |
-|---|---|
-| 800 (데드존 시작) | 0.17 m/s |
-| 2250 (데드존 끝) | 0.49 m/s |
-| `min_speed` 파라미터 (2.0 m/s) | 9228 ERPM |
-
-`steering_control_node`의 `min_speed_`는 일반 하한이 아니라 곡률 캡/롤 위험 시에만
-적용되는 하한이라(`control_code/steering_control_node.cpp` 507, 679줄), 출발/정지 시
-`final_speed`가 0에서/0으로 연속 램프되며 데드존을 매번 통과함. `min_speed=2.0m/s`
-자체는 데드존보다 훨씬 위라 **정상 순항/코너링 중 이 속도로 목표를 잡는 일은 없음**.
-결론: 출발 가속은 스윕 통과라 안전할 가능성 높고, 정지 시엔 짧은 덜컹임이 있을 수
-있으나 무한 진동은 아님. 완전 매끄러운 정지가 필요하면 추후 `Openloop Hysteresis`
-등으로 추가 튜닝 필요(보류, 다음 세션).
-
-### 부수 발견
-- **워크스페이스 동기화 어긋남**: `~/F1tenth_control/control_code/steering_control_node.cpp`
-  (이 리포)와 `~/2026_IFAC/f1tenth_control/control_code/steering_control_node.cpp`(빌드
-  대상)가 다름 — 배포본에 `controller_type`/`waypoint_topic`/MPC 파라미터가 추가돼
-  있고 리포에는 없음. 향후 코드 수정 시 어느 쪽이 최신인지 확인 필요.
-- `vesc_mcconf.xml`/`vesc_appconf.xml`(이 리포)도 실제 VESC 라이브 설정과 어긋난
-  상태(라이브에서 여러 차례 파라미터를 바꿔가며 테스트함, 프리셋 적용 이력도 있어
-  정확한 최종값 불확실). **다음 실차 세션에서 VESC Tool
-  `ConfBackup > Save Motor/App Configuration XML`로 라이브 설정을 내보내 이 리포의
-  XML을 갱신할 것.**
-
-### 보류
-- 감속 시 데드존 통과 덜컹임 추가 완화(`Openloop Hysteresis` 등) — 다음 세션.
-
----
-
-## 2026-07-05 (예정) — 첫 실차 주행 & IMU/LUT 준비
-
-세션(07-04)에서 도출한 내일 현장 작업 순서. 의존관계상 순서 지킬 것.
-
-### 0. 사전: 코드 반영 · 빌드 · 깃 정리
-- F1tenth_control → 2026_IFAC rsync 동기화 후 `colcon build`(신규 `control_real.launch.py` 포함).
-- ⚠️ 깃: `simul_practice` 브랜치 non-fast-forward(팀원 선푸시) 상태.
-  `cd ~/2026_IFAC && git pull --autostash origin simul_practice && git push origin simul_practice`
-  로 병합 후 푸시. **`f1up` 재실행 금지**(빈 커밋에서 체인 끊김).
-
-### 1. 첫 실차 주행 — control_real.launch.py (신규)
-- 시뮬 런치와 차이: `odom_topic=/pf/pose/odom`, `max_speed=6.0`(직선캡), `use_imu=False`,
-  `is_simulation=True`(수동 조작 허용), AEB 포함(odom remap), `joy_node` 포함.
-- 하드웨어 브링업(vesc/lidar/particle_filter/planning) 먼저 떠서 `/scan`,`/pf/pose/odom`,
-  `/global_waypoints`,`/joy` 발행 확인.
-- 조이스틱(구형 Xbox + BT동글): `ls /dev/input/js0` 인식 확인(360 무선은 일반 동글 페어링 불가).
-  `ros2 topic echo /joy`로 버튼 매핑 실측 — 조향 axes[0], RT axes[5], LB buttons[4],
-  B buttons[1], X buttons[2], RB buttons[5]. 밀리면 코드/파라미터 조정.
-- 시작은 MANUAL 대기 → **바퀴 들고** 스틱/RT 반응 + B 비상정지·X 해제 검증 → LB로 자율 전환.
-- 자율 시 `ros2 topic echo /drive_autonomous`로 speed ≤ 6.0 캡 확인.
-
-### 2. VESC 내장 IMU 조사
-- VESC 모델 확인 → 내장 IMU 유무(VESC Tool Realtime Data의 IMU 탭 값 확인).
-- ROS: `vesc_driver` IMU publish 옵션 켜서 `sensor_msgs/Imu` 토픽 확인 → `/imu/data`로 연결(remap).
-- ⚠️ 축 검증: 손으로 롤/요 흔들며 `angular_velocity.x`(롤레이트)·`.z`(요레이트)·orientation
-  부호가 코드 가정과 맞는지(VESC 90° 장착 회전 감안).
-- VESC가 차 뒤쪽 장착(전후 중앙 아님): StabilityController는 각속도·자세만 써 **offset 영향 0**
-  → 축만 맞추면 됨. 단 LUT용 선형가속도엔 레버암 보정 필요하니 **전후거리 d를 자로 실측해 둘 것**.
-
-### 3. IMU 활성화 (조건 충족 시)
-- `use_imu=True` → 롤 인지 ESC(`calculate_roll_ratio`)는 이미 배선돼 있어 바로 동작.
-- 미배선 죽은 코드: `calculate_steering_attenuation`(과도 감쇄), `calculate_yaw_rate_correction`
-  (요레이트 카운터스티어) — A안(롤 ESC) 축검증 후 필요하면 control_loop에 배선(B안).
-
-### 4. LUT 진단 (IMU 완성 후에만)
-- 정상상태 원선회로 IMU 실측 횡가속도 vs LUT(NUC6_glc) 예측 비교(과도구간 피하면 뒤쪽 offset 무관).
-- 불일치 시: A안 스칼라 보정(CSV 셀×계수) / B안 정식 재피팅. ⚠️ 재피팅 툴체인 불완전
-  (상류 steering_lookup의 helpers·모델설정·테이블생성기 없음 → 복구 필요).
-- 교체는 `lookup_table_file` 파라미터로(코드 수정 불필요).
-
-### 오늘(07-04) 완료
-- 신규 `launch/control_real.launch.py` 작성·빌드 성공(실차 보수 프리셋 + joy_node + AEB).
-
----
-
-## 2026-06-17 — 코너 이탈 문제 해결 + 코드 최적화
-
-### 1. CLAUDE.md 생성
-- 패키지 전체 구조·노드(steering_control_node / joy_teleop_monitor / aeb_node)·토픽 흐름·파라미터·빌드 위치(⚠️ `~/2026_IFAC`에서만 colcon 빌드, 이 폴더는 `COLCON_IGNORE`)를 문서화.
-
-### 2. 코너에서 벽 충돌 후 트랙 이탈 문제 — 원인 분석 & 해결
-
-**증상:** global_planner의 `/global_waypoints`를 추종해 f1tenth_gym 시뮬을 돌리면 코너에서
-끝까지 못 돌고 외벽에 박은 뒤 트랙을 완전히 이탈.
-
-**분석 방법:**
-- 헤드리스 시뮬 스택(gym_bridge + global_trajectory_publisher + steering_control_node + joy_teleop_monitor)을 백그라운드로 재현, 텔레메트리 1000+샘플 수집.
-- 서브에이전트 2팀(코드 정밀추적 / 텔레메트리 정량분석) 병렬 가동.
-- 맵 점유격자(pgm)로 레이싱라인의 실제 벽 클리어런스 측정.
-
-**근본 원인 (확정):**
-- 오버스피드·언더스티어·제어 게인 문제 **아님** (실제속도가 플래너보다 평균 2.5m/s 낮고, 조향 포화 0.6%뿐, 충돌 직전까지 lat_err<0.3m로 추종 정상).
-- **플래너 최적라인(iqp)이 벽에 과도하게 붙어 있음**(클리어런스 ~0.4m). 차체(0.58×0.31m)가 코너에서 각도가 틀어질 때 벽을 스쳐 충돌 → 이후 역주행·벽 관통으로 완전 이탈.
-- 가장 타이트한 지점: idx9·idx89 등(우측 구간). 감속해도 같은 지점에서 충돌(속도 문제 아님 재확인).
-- 참고: 센터라인은 클리어런스 0.76m로 안전하나 현 플래너가 `/centerline_waypoints` 실제 발행 안 함.
-
-**채택한 수정 (사용자 선택: 제어측 안전라인):**
-- `steering_control_node.cpp` `global_path_callback`에서 메시지의 `d_left`/`d_right`/`psi`로
-  벽에 붙은 웨이포인트를 트랙 중심 쪽으로 밀어 최소 벽 여유 확보.
-- 신규 파라미터 **`wall_safety_margin`**(기본 0.6, 런타임 조정 가능, 0이면 원본 라인).
-- 부수: `heading_damping_gain`(기본 0, 튜닝 훅) 추가 — 단, 실험 결과 효과 없어 비활성 유지.
-
-**검증 결과 (시뮬, 동일 트랙):**
-
-| 지표 | Baseline | 수정 후(C=0.6) |
-|---|---|---|
-| 충돌 이벤트 | 15회 | **0회** |
-| 트랙 이탈 | 다수 | **0** |
-| 랩 완주 | ❌ | **~5랩 연속 (idx 107/107)** |
-| 평균속도 | 2.71 m/s | **3.97 m/s** |
-
-**커밋:** `4d39d1e` fix(control): 안전라인 시프트로 좁은 코너 벽 충돌·트랙 이탈 해결
-
-### 3. 코드 최적화 (대회 미사용 죽은 코드 제거)
-- 삭제: `velocity_profiler.{cpp,hpp}`(노드 미사용, 속도는 플래너 수신), `geometry_utils.{cpp,hpp}`(VelocityProfiler 전용).
-- 제거: 미사용 파라미터/멤버 `sim`, `enable_obstacle_avoidance`, `last_lookahead_idx_`(write-only) + 관련 include·CMakeLists 정리.
-- **IMU 관련은 전부 보존** (IMU 미장착, 추후 도입 예정): `use_imu`/`yaw_rate_gain`/roll ESC/acc 버퍼 및 `imu_stability_controller` 모듈 전체.
-- 검증: 클린 빌드 성공, 시뮬 회귀 충돌 0·107/107 완주(평균 4.03 m/s). 순감 −180줄.
-- **커밋:** `88da8dc` refactor(control): 대회 미사용 죽은 코드 제거 (IMU 관련은 보존)
-
-### 보류/후속 과제
-- **LUT 하드코딩 절대경로**(`/home/tenmeneat/...` 폴백 3개): 대회 노트북에선 깨질 수 있어 정리 권장(현재 이 PC에선 동작해 보류).
-- **플래너 안전마진 재생성**(근본해결·속도 유지): 플래닝 담당에게 차폭+안전마진 반영 요청 시, 제어측 안전라인 시프트 없이 더 빠른 라인으로 완주 가능.
-- **`MAP_controller_reference.py`**: 선배 코드 원본(참고용, 빌드 대상 아님). VS Code 노란 줄은 ROS2 패키지 unresolved import + 미사용 import 경고(에러 아님). 참고 끝나면 삭제 가능.
-- `curvature_ff_blend`·`heading_damping_gain` 토글은 기본 0(무효), 튜닝 훅으로 보존.
-
----
+- **원인은 오버스피드·언더스티어·게인이 아니었다** — 실제 속도가 플래너보다 평균 2.5 m/s 낮고
+  조향 포화 0.6%, 충돌 직전까지 `lat_err<0.3m`로 추종은 정상이었다.
+  진짜 원인은 **플래너 최적라인(iqp)이 벽에 과도하게 붙은 것**(클리어런스 ~0.4m).
+  차체 0.58×0.31m가 코너에서 각도가 틀어질 때 벽을 스침. 감속해도 같은 지점에서 충돌.
+- **해결 = 제어측 안전라인 시프트**: `global_path_callback`에서 메시지의 `d_left`/`d_right`로
+  벽에 붙은 웨이포인트를 트랙 중심 쪽으로 민다. 신규 `wall_safety_margin`(기본 0.6, 0이면 원본).
+- 검증(시뮬 동일 트랙): 충돌 15회 → **0회**, 이탈 다수 → 0, 미완주 → **5랩 연속**,
+  평균속도 2.71 → **3.97 m/s**. 커밋 `4d39d1e`.
+- 죽은 코드 제거(−180줄): `velocity_profiler`/`geometry_utils` 등. IMU 관련은 전부 보존.
+  커밋 `88da8dc`.
+- `curvature_ff_blend`·`heading_damping_gain`은 효과 없어 기본 0(튜닝 훅으로만 보존).
 
 ## 작년 대회 코드 대비 개선점 (new_map_con / MAP_controller.py)
 
-작년 대회 컨트롤러는 `2026_IFAC/new_map_con`의 Frenet 기반 Python MAP 컨트롤러
-(참조 복사본: `control_code/MAP_controller_reference.py`). 현재 `steering_control_node.cpp`는
-그 **L1 Guidance + Steering LUT 핵심 알고리즘을 그대로 포팅**하고 주변을 강화한 것.
+조향의 "두뇌"(L1 Guidance + Steering LUT)는 작년 Python 컨트롤러 그대로 포팅했고,
+차별점은 알고리즘 혁신이 아니라 **엔지니어링 개선**이다.
 
-| 항목 | 작년 (MAP_controller, Python) | 현재 (steering_control_node, C++) |
+| 항목 | 작년 (Python, 40Hz) | 현재 (C++17, 50Hz) |
 |---|---|---|
-| 언어/주기 | Python(rclpy), 40 Hz | **C++17, 50 Hz** (-O3 -march=native -flto) |
-| 좌표계 | **Frenet 의존**(FrenetConverter, /car_state/frenet/odom) | **Cartesian만**(odom+waypoints 직접) |
-| 코어 조향(L1→sinη→a_lat→LUT) | 보유 | 동일(포팅) |
-| 코너 감속 | 플래너 속도 그대로 | **곡률 룩어헤드 사전감속**(v=√(a_lat/κ)) 추가 |
-| 벽 여유 | 없음 | **안전라인 시프트**(d_left/d_right) 추가 |
-| 종방향 | 속도 명령 그대로 출력 | **가감속 rate-limit 램프** 추가 |
-| IMU | 종가속도(acc_y)로 조향 스케일만 | **+롤 인지형 ESC**(전복/스핀 방지, 현재 IMU 미장착이라 대기) |
-| 경로 끊김 시 | **정지**(speed=0) | **LiDAR Gap-follower 폴백**(계속 주행) |
-| 구조 | 단일 631줄 클래스 | 기능별 모듈 분리(GapFollower/StabilityController/LUT) |
-
-**핵심 요약:** 조향 계산의 "두뇌"(L1+LUT)는 작년 것 그대로. 차별점은 ① 더 빠른 실행(C++/50Hz),
-② 의존성 축소(Frenet 제거), ③ 안전·강건성 레이어 추가(곡률 사전감속, 롤 ESC, 갭 폴백,
-안전라인 시프트, 가감속 램프). 즉 "알고리즘 혁신"보다 **"검증된 알고리즘을 더 빠르고·안전하고·
-독립적으로 돌게 만든 엔지니어링 개선"**이 핵심.
-
-미세 최적화: sin(asin(x))=x 항등식으로 삼각함수 호출 제거, 경로 평균곡률 1회만 계산 등.
+| 좌표계 | Frenet 의존 | **Cartesian만**(odom+waypoints 직접) |
+| 코너 감속 | 플래너 속도 그대로 | **곡률 룩어헤드 사전감속** + (07-26) **조향 권한 캡** |
+| 벽 여유 | 없음 | **안전라인 시프트**(`wall_safety_margin`) |
+| 종방향 | 명령 그대로 출력 | **가감속 rate-limit 램프**, 탈조 가드, 런치 킥 |
+| IMU | 종가속도로 조향 스케일만 | **+롤 인지형 ESC**, 요레이트 카운터스티어 |
+| 경로 끊김 시 | 정지 | GapFollower 폴백(⚠️ 07-22부터 기본 **비활성** — 실차에서 차가 스스로 출발) |
+| 구조 | 단일 631줄 클래스 | 기능별 모듈 분리 + MPPI 대안 컨트롤러 |
