@@ -23,7 +23,20 @@ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-
 .tv{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}.tl{font-size:12px;color:var(--dim)}
 .tsub{font-size:11px;color:#6e7783;font-variant-numeric:tabular-nums;margin-top:2px}
 /* 계기판 클러스터 (리플레이 하단) */
-#cluster{width:100%;height:190px;display:block;background:#07090d;border-top:1px solid var(--line)}
+#cluster{width:100%;height:224px;display:block;background:#07090d;border-top:1px solid var(--line)}
+/* 랩 타임 리스트 — F1 타이밍 타워 관례(보라=베스트) */
+.laps{display:flex;flex-direction:column;gap:4px;margin-top:9px}
+.lap{display:grid;grid-template-columns:52px 1fr 76px 74px;gap:10px;align-items:center;font-size:12.5px}
+.lap .ln{color:var(--dim);font-size:11px;letter-spacing:.05em}
+.lap .bar{height:15px;border-radius:3px;background:#161b22;overflow:hidden;position:relative}
+.lap .bf{height:100%;border-radius:3px;background:#4c8dff}
+.lap.best .bf{background:#bc8cff}
+.lap .lt{text-align:right;font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--fg)}
+.lap.best .lt{color:#bc8cff;font-weight:700}
+.lap .gap{text-align:right;font-variant-numeric:tabular-nums;font-size:11.5px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;color:#f5a623}
+.lap.best .gap{color:#bc8cff;font-size:10.5px;letter-spacing:.06em}
+.lapnote{font-size:12px;color:var(--dim);margin-top:8px}
 .viewer{background:#0a0d12;border:1px solid var(--line);border-radius:10px;overflow:hidden}
 #gl{width:100%;height:460px;display:block;cursor:grab}#gl:active{cursor:grabbing}
 .ctl{display:flex;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
@@ -112,6 +125,9 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
       <span><span class="dot" style="background:#bc8cff"></span>글로벌 경로</span>
     </div>
     <canvas id="modestrip" title="주행 모드 타임라인"></canvas>
+
+    <h2 id="h_laps" style="display:none">랩 타임 <span class="hint">— 보라 = 베스트 랩</span></h2>
+    <div id="lapbox"></div>
 
     <h2>핵심 주행 그래프 <span class="hint">— 각 그래프 오른쪽에 읽는 법·결론</span></h2>
     <div class="chartrow">
@@ -576,16 +592,17 @@ async function analyze(buffers){
   const cmd=drive.length?{t:drive.map(d=>d.t),speed:drive.map(d=>d.speed),steer:drive.map(d=>d.steer),src:driveLabel}:null;
 
   // ── 글로벌 경로 → 3D경로 + 크로스트랙 오차 + 계획속도 ──
-  let wp=[],plannedVx=null,xtrack=null,plannedStats=null;
+  let wp=[],plannedVx=null,xtrack=null,plannedStats=null,wpIdx=null;
   if(wpnts&&wpnts.length){
     wp=wpnts.map(w=>[w.x,w.y]);
-    const wt=[],wv=[],xv=[];
-    for(let i=0;i<N;i++){const px=track[i][1],py=track[i][2];let best=1e18,bvx=0;
-      for(let j=0;j<wpnts.length;j++){const dx=wpnts[j].x-px,dy=wpnts[j].y-py,d=dx*dx+dy*dy;if(d<best){best=d;bvx=wpnts[j].vx;}}
-      wt.push(track[i][0]);wv.push(bvx);xv.push(Math.sqrt(best));}
+    const wt=[],wv=[],xv=[];wpIdx=new Int32Array(N);
+    for(let i=0;i<N;i++){const px=track[i][1],py=track[i][2];let best=1e18,bvx=0,bj=0;
+      for(let j=0;j<wpnts.length;j++){const dx=wpnts[j].x-px,dy=wpnts[j].y-py,d=dx*dx+dy*dy;if(d<best){best=d;bvx=wpnts[j].vx;bj=j;}}
+      wt.push(track[i][0]);wv.push(bvx);xv.push(Math.sqrt(best));wpIdx[i]=bj;}
     plannedVx={t:wt,v:wv};xtrack={t:wt,v:xv};
     const pvv=wpnts.map(w=>w.vx).filter(v=>v>0.01);plannedStats=pvv.length?{mx:Math.max(...pvv),mn:Math.min(...pvv)}:null;
   }
+  const laps=computeLaps(track,wpIdx,wpnts?wpnts.length:0);
 
   // ── VESC / 커맨드 / 모드 ──
   const vescS=vesc.length?{t:vesc.map(v=>v.t),curr:vesc.map(v=>v.curr),volt:vesc.map(v=>v.volt),erpm:vesc.map(v=>v.erpm)}:null;
@@ -621,7 +638,7 @@ async function analyze(buffers){
       else start=null;}
   }
 
-  const S={track,scans,wp,imu:IMU,estop,mppi,hasMap,dur,alatSource,
+  const S={track,scans,wp,laps,imu:IMU,estop,mppi,hasMap,dur,alatSource,
     cmd,plannedVx,xtrack,plannedStats,vesc:vescS,cmdErpm,cmdBrake,cmdServo,modeStr,odomLabel,poseSrc,
     loc,scanRate,stallDur,hasLocal:!!(lwpnts&&lwpnts.length)};
   const D=diagnose(S);
@@ -629,6 +646,75 @@ async function analyze(buffers){
 }
 
 // ══ 적응형 진단 보조: 실측 그립 · 코너 분할(주행 요레이트 기반, 맵 불일치와 무관) ══
+// ══ 랩 검출 ═══════════════════════════════════════════════════════════════════
+// 두 가지 방법. 글로벌 경로가 있으면 **최근접 웨이포인트 인덱스가 끝→처음으로 감기는 순간**을
+// 결승선으로 본다(컨트롤러가 트랙을 보는 방식과 같고, 경로에서 좀 벗어나도 견딤).
+// 경로가 없으면 출발점 근처 통과로 폴백한다.
+// 두 방법 모두 '한 바퀴를 실제로 돌았는가'를 확인한다 — 결승선 근처에서 왔다갔다 하거나
+// MCL이 튀는 것만으로 랩이 카운트되면 랩타임이 통째로 거짓이 된다.
+const LAP_MIN_TIME=3.0;              // 이보다 짧으면 랩으로 안 침 [s]
+function computeLaps(track,wpIdx,M){
+  const N=track.length;
+  if(N<20)return null;
+  const marks=[];                    // 결승선 통과 시각
+  let method=null;
+  if(wpIdx&&M>20){
+    method='waypoint';
+    let seenFar=false;
+    for(let i=1;i<N;i++){
+      const a=wpIdx[i-1],b=wpIdx[i];
+      if(a>M*0.55)seenFar=true;                       // 트랙 후반부를 실제로 지났나
+      if(seenFar&&a>M*0.75&&b<M*0.25){                // 끝→처음 감김 = 결승선
+        const t0=track[i-1][0],t1=track[i][0];
+        marks.push((t0+t1)/2);seenFar=false;}
+    }
+  }else{
+    method='startline';
+    // 출발점(움직이기 시작한 첫 지점) 기준. 멀리 갔다가(farR) 돌아오면(nearR) 한 바퀴.
+    let s=0;while(s<N&&track[s][4]<0.5)s++;
+    if(s>=N-5)return null;
+    const sx=track[s][1],sy=track[s][2];
+    let xmin=1e18,xmax=-1e18,ymin=1e18,ymax=-1e18;
+    for(let i=0;i<N;i++){const x=track[i][1],y=track[i][2];
+      if(x<xmin)xmin=x;if(x>xmax)xmax=x;if(y<ymin)ymin=y;if(y>ymax)ymax=y;}
+    const diag=Math.hypot(xmax-xmin,ymax-ymin);
+    if(!(diag>2))return null;
+    const nearR=Math.max(1.0,diag*0.06),farR=Math.max(3.0,diag*0.30);
+    let away=false;
+    for(let i=s;i<N;i++){
+      const d=Math.hypot(track[i][1]-sx,track[i][2]-sy);
+      if(d>farR)away=true;
+      else if(away&&d<nearR){marks.push(track[i][0]);away=false;}
+    }
+  }
+  if(!marks.length)return null;
+  // 마크 사이를 랩으로. 첫 마크 이전은 아웃랩(계측 안 함)
+  const list=[];
+  for(let k=1;k<marks.length;k++){
+    const time=marks[k]-marks[k-1];
+    if(time>=LAP_MIN_TIME)list.push({n:list.length+1,t0:marks[k-1],t1:marks[k],time});
+  }
+  if(!list.length)return null;
+  let best=0;for(let k=1;k<list.length;k++)if(list[k].time<list[best].time)best=k;
+
+  // 각 표본의 소속 랩 + 랩 내 진행도(0~1) — 라이브 델타 계산용
+  const lapOf=new Int32Array(N).fill(-1),prog=new Float64Array(N).fill(NaN);
+  for(let i=0;i<N;i++){
+    const t=track[i][0];
+    for(let k=0;k<list.length;k++){
+      if(t>=list[k].t0&&t<=list[k].t1){lapOf[i]=k;
+        prog[i]=(wpIdx&&M>20)?wpIdx[i]/M:(t-list[k].t0)/Math.max(list[k].time,1e-6);
+        break;}
+    }
+  }
+  // 베스트 랩의 (진행도 → 경과시간) 곡선 — 진행도 단조 증가로 정리해 보간에 쓴다
+  const bp=[],be=[];
+  for(let i=0;i<N;i++)if(lapOf[i]===best&&isFinite(prog[i])){
+    if(!bp.length||prog[i]>bp[bp.length-1]){bp.push(prog[i]);be.push(track[i][0]-list[best].t0);}}
+  return {list,best,lapOf,prog,method,bestCurve:bp.length>4?{p:bp,e:be}:null,
+          marks,unfinished:marks.length?track[N-1][0]-marks[marks.length-1]:0};
+}
+
 // ══ 속도 구간별 가감속 권한 ══════════════════════════════════════════════════
 // 팀 요청: "속도 구간별로 가감속이 얼마나 되었나". 속도를 구간으로 나눠 그 구간에
 // 머무는 동안의 종가속도(dvx/dt)를 가속쪽/감속쪽으로 갈라 집계한다.
@@ -1082,6 +1168,36 @@ function drawSpeedBins(){
   c.fillStyle='#9aa4b2';c.fillText('90퍼센타일(최대 권한)',lx+13,M.t-6);
 }
 
+// ── 랩 타임 리스트 (막대 길이 ∝ 랩타임, 베스트는 보라) ──
+function renderLaps(){
+  const box=document.getElementById('lapbox'),h=document.getElementById('h_laps');
+  if(!box||!h)return;
+  const L=DATA.laps;
+  if(!L||!L.list.length){h.style.display='none';box.innerHTML='';return;}
+  h.style.display='';
+  const mx=Math.max(...L.list.map(l=>l.time)),bt=L.list[L.best].time;
+  const rows=L.list.map((l,k)=>{
+    const w=(l.time/mx*100).toFixed(1),gap=l.time-bt;
+    return `<div class="lap${k===L.best?' best':''}">`
+      +`<div class="ln">LAP ${l.n}</div>`
+      +`<div class="bar"><div class="bf" style="width:${w}%"></div></div>`
+      +`<div class="lt">${fmtLap(l.time)}</div>`
+      +`<div class="gap">${k===L.best?'BEST':'+'+gap.toFixed(3)}</div></div>`;
+  }).join('');
+  const mean=L.list.reduce((s,l)=>s+l.time,0)/L.list.length;
+  const spread=mx-bt;
+  const how=L.method==='waypoint'?'글로벌 경로의 결승선 통과(웨이포인트 인덱스 감김)'
+                                 :'출발점 재통과(글로벌 경로 없어 폴백)';
+  let note=`계측 ${L.list.length}랩 · 베스트 <b style="color:#bc8cff">${fmtLap(bt)}</b> · 평균 ${fmtLap(mean)}`
+    +` · 편차 ${spread.toFixed(3)}s — 검출 기준: ${how}.`;
+  // ⚠️ 랩 수가 "체감보다 하나 적다"는 오해가 제일 잦은 지점이라 먼저 밝힌다.
+  note+=` <b>결승선 통과와 통과 사이만 계측</b>하므로, 첫 통과 이전(아웃랩)은 시작 지점이`
+    +` 트랙 어디였는지 알 수 없어 빠진다 — n번 통과했으면 n−1랩이 표시된다.`;
+  if(L.unfinished>LAP_MIN_TIME)note+=` 마지막 ${L.unfinished.toFixed(1)}s도 미완주라 제외.`;
+  if(L.list.length===1)note+=' 랩이 1개라 베스트 비교는 의미 없음.';
+  box.innerHTML=`<div class="laps">${rows}</div><div class="lapnote">${note}</div>`;
+}
+
 function drawSpeedBinTable(){
   const el=document.getElementById('bintbl');if(!el)return;
   const B=DATA.stats.speedBins||[];
@@ -1163,15 +1279,78 @@ function gauge(c,cx,cy,r,opt){
   c.font='11px system-ui';c.fillStyle='#9aa4b2';c.textBaseline='alphabetic';
   c.fillText(opt.label,cx,cy+r*1.34);
 }
+// 랩타임 표기: 1분 넘으면 m:ss.mmm, 아니면 ss.mmm
+function fmtLap(s){
+  if(!isFinite(s))return '—';
+  if(s<60)return s.toFixed(3);
+  const m=Math.floor(s/60);return `${m}:${(s-m*60).toFixed(3).padStart(6,'0')}`;
+}
+// 베스트 랩의 같은 지점 대비 앞/뒤 (레이싱 텔레메트리의 delta-to-best)
+function deltaToBest(i){
+  const L=DATA.laps;if(!L||!L.bestCurve)return null;
+  const k=L.lapOf[i];if(k<0||k===L.best)return null;
+  const pr=L.prog[i];if(!isFinite(pr))return null;
+  const {p,e}=L.bestCurve;
+  if(pr<=p[0]||pr>=p[p.length-1])return null;
+  let lo=0,hi=p.length-1;
+  while(lo+1<hi){const m=(lo+hi)>>1;if(p[m]<=pr)lo=m;else hi=m;}
+  const f=(pr-p[lo])/Math.max(p[hi]-p[lo],1e-9);
+  const bestEl=e[lo]+(e[hi]-e[lo])*f;
+  return (cur-L.list[k].t0)-bestEl;
+}
+// 상단 타이밍 스트립 (F1 타이밍 타워 느낌: 현재 랩 크게, 베스트는 보라, 델타는 앞/뒤 색)
+function drawLapStrip(c,W,SH){
+  const L=DATA.laps;
+  c.fillStyle='#0a0d12';c.fillRect(0,0,W,SH);
+  c.strokeStyle='#1b2230';c.lineWidth=1;
+  c.beginPath();c.moveTo(0,SH+.5);c.lineTo(W,SH+.5);c.stroke();
+  const i=idxAt(cur),k=L?L.lapOf[i]:-1;
+  const cy=SH*0.5;
+  c.textBaseline='middle';
+  // 좌: 랩 카운터
+  c.textAlign='left';
+  c.font='9.5px system-ui';c.fillStyle='#59616e';c.fillText('LAP',14,cy-9);
+  c.font='700 17px ui-monospace,Menlo,Consolas,monospace';
+  c.fillStyle=k>=0?'#e6edf3':'#59616e';
+  c.fillText(k>=0?`${k+1}/${L.list.length}`:'—',14,cy+7);
+  // 중앙: 현재 랩 경과 (재생 위치 기준)
+  const el=k>=0?cur-L.list[k].t0:null;
+  c.textAlign='center';
+  c.font='9.5px system-ui';c.fillStyle='#59616e';
+  c.fillText(k>=0?'현재 랩':(L?'아웃랩 / 미완주':'랩 미검출'),W*0.42,cy-9);
+  c.font='700 20px ui-monospace,Menlo,Consolas,monospace';c.fillStyle='#e6edf3';
+  c.fillText(el!=null?fmtLap(el):'—:—',W*0.42,cy+8);
+  // 우중앙: 베스트
+  if(L){
+    c.font='9.5px system-ui';c.fillStyle='#59616e';
+    c.fillText(`베스트 (L${L.best+1})`,W*0.66,cy-9);
+    c.font='700 17px ui-monospace,Menlo,Consolas,monospace';c.fillStyle='#bc8cff';
+    c.fillText(fmtLap(L.list[L.best].time),W*0.66,cy+7);
+  }
+  // 우: 베스트 대비 델타 (음수=앞섬)
+  const d=deltaToBest(i);
+  c.textAlign='right';
+  c.font='9.5px system-ui';c.fillStyle='#59616e';c.fillText('Δ 베스트',W-14,cy-9);
+  c.font='700 17px ui-monospace,Menlo,Consolas,monospace';
+  c.fillStyle=d==null?'#59616e':(d<0?'#39d353':'#f5a623');
+  c.fillText(d==null?'—':(d>=0?'+':'')+d.toFixed(3),W-14,cy+7);
+  // 랩 진행도 바
+  if(k>=0&&isFinite(L.prog[i])){
+    c.fillStyle='#161b22';c.fillRect(0,SH-2.5,W,2.5);
+    c.fillStyle='#4c8dff';c.fillRect(0,SH-2.5,W*Math.max(0,Math.min(1,L.prog[i])),2.5);
+  }
+}
+
 function drawCluster(){
   if(!clusterCv||!track||!track.length)return;
   const c=clusterCv.getContext('2d');
   const W=clusterCv.clientWidth,H=clusterCv.clientHeight;
   c.clearRect(0,0,W,H);
   const p=track[idxAt(cur)];if(!p)return;
+  const SH=34;drawLapStrip(c,W,SH);                    // 상단 타이밍 스트립
   const vx=p[4],dvx=p[6],alat=p[5];
   const gLat=alat/G,gLon=dvx/G;
-  const cy=H*0.46,rBig=Math.min(H*0.36,W*0.13),rSm=rBig*0.76;
+  const HB=H-SH,cy=SH+HB*0.46,rBig=Math.min(HB*0.36,W*0.13),rSm=rBig*0.76;
   const cxC=W/2,gap=Math.max(rBig+rSm+26,W*0.20);
   // 종가속도 스케일: 생 max를 쓰면 E-stop 급제동 스파이크 하나(-16 m/s²)가 스케일을 먹어
   // 나머지 구간 내내 바늘이 죽는다 → 98퍼센타일로 잡고 초과분은 게이지에서 클램프(수치는 실값 표시).
@@ -1444,7 +1623,7 @@ function renderReport(D,name){
   show('modestrip',anyMode);
   show('wrap_steer',!!D.cmd);show('wrap_x',!!D.xtrack);show('wrap_vesc',!!D.vesc);show('wrap_cmd',!!D.cmdBrake);
   show('h_extra',!!(D.cmd||D.xtrack||D.vesc||D.cmdBrake));
-  fillExplain(D);drawSpeedBinTable();computeClusterScales();
+  fillExplain(D);drawSpeedBinTable();renderLaps();computeClusterScales();
   computeBounds();defcam();cur=T0;playing=false;
   wireControls();
   const paint=()=>{resizeAll();drawTrajectory();drawStaticCharts();syncSeek();draw();};
