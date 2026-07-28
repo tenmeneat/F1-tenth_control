@@ -54,6 +54,28 @@ def generate_launch_description():
         description='코너 그립 클램프 a_lat [m/s^2] (실차 실측 마찰한계 ~3.1 m/s² 반영)'
     )
 
+    # ── 좌우 조향 한계 (2026-07-28, 실차 전용) ──
+    # 젯슨 vesc.yaml의 servo_min 0.2703 / servo_max 0.6363 은 servo **0.4533 중심 ±0.1830**
+    # (= ±0.41 rad)으로 계산된 낡은 값이다. 이후 기계적 센터를 맞추며 트림 offset이
+    # **0.4672로 의도적으로 이동**됐는데 servo_min/max는 갱신되지 않아, 실제 가동각이
+    # 좌 +0.441 / 우 **-0.379(잘림)**로 갈려 있었다. 07-27 bag(run_0727_203040)에서
+    # servo 0.6502가 발행돼 vesc_driver의 servo_limit에 잘린 것이 실제로 관측된다.
+    #
+    # 🔧 해결(2026-07-28 적용): vesc.yaml의 범위를 **현 트림 0.4672 기준으로 재계산**해
+    #    ±0.42 rad 대칭으로 맞췄다 — servo_min 0.2703→**0.2798**, servo_max 0.6363→**0.6546**.
+    #    좌는 travel 축소(0.441→0.42)라 무조건 안전하고, 우는 +0.0183(18.3us, 바퀴 2.35°) 확장이다.
+    # ⚠️ 이 두 값과 젯슨 vesc.yaml은 **반드시 함께** 움직여야 한다. 컨트롤러만 올리면
+    #    vesc_driver가 조용히 자르고 컨트롤러는 "꺾었다"고 착각한다(요레이트 카운터스티어와
+    #    조향 권한 속도 캡이 전부 실제보다 낙관적이 됨).
+    max_steering_left_arg = DeclareLaunchArgument(
+        'max_steering_left', default_value='0.42',
+        description='좌조향(δ>0) 물리 한계 [rad]. vesc.yaml servo_min 0.2798과 한 쌍'
+    )
+    max_steering_right_arg = DeclareLaunchArgument(
+        'max_steering_right', default_value='0.42',
+        description='우조향(δ<0) 물리 한계 [rad]. vesc.yaml servo_max 0.6546과 한 쌍'
+    )
+
     # 비워두면 기존 폴백 순서(steering_lookup share → f1tenth_control share)로 로드.
     # lut_calibrator_node가 만든 보정 LUT를 쓰려면 그 출력 경로를 지정할 것
     # (예: $HOME/f1tenth_lut_calibration/NUC6_glc_pacejka_lookup_table_calibrated.csv)
@@ -76,6 +98,8 @@ def generate_launch_description():
         max_speed=LaunchConfiguration('max_speed'),
         max_lateral_accel=LaunchConfiguration('max_lateral_accel'),
         base_max_accel=LaunchConfiguration('base_max_accel'),
+        max_steering_left=LaunchConfiguration('max_steering_left'),
+        max_steering_right=LaunchConfiguration('max_steering_right'),
         lookup_table_file=LaunchConfiguration('lookup_table_file'),
         # VESC 자이로가 deg/s로 발행(2026-07-19 확인) → rad/s 환산. 근거는 _control_common.py 주석.
         imu_angular_scale=common.IMU_ANGULAR_SCALE_REAL,
@@ -154,6 +178,8 @@ def generate_launch_description():
         odom_topic_arg,
         max_speed_arg,
         max_lateral_accel_arg,
+        max_steering_left_arg,
+        max_steering_right_arg,
         lookup_table_file_arg,
         base_max_accel_arg,
         steering_control,

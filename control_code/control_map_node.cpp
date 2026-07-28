@@ -30,8 +30,20 @@ using namespace f1tenth_control;
 
 namespace {
 
-// 조향각 물리 한계 [rad] — 하드웨어 기준값(±23.5°). rate limit/클리핑과 조향 권한 속도 캡이
-// 같은 값을 봐야 하므로 상수 한 곳에서 정의한다.
+// 조향각 물리 한계 [rad] — 차량 스펙 기준값(±23.5°). 좌우 한계 파라미터의 기본값이며,
+// 하드웨어가 대칭이면 이 값 하나로 충분하다.
+//
+// ⚠️ 2026-07-28: 좌우 한계를 파라미터로 분리했다. 실차에서 한동안 우조향이 잘리고 있었다.
+//   젯슨 vesc.yaml의 servo_min 0.2703 / servo_max 0.6363 은 servo **0.4533 중심 ±0.1830**
+//   (= ±0.41 rad)으로 계산된 값인데, 이후 기계적 센터를 맞추며 트림 offset이 **0.4672로
+//   의도적으로 이동**됐고 servo_min/max는 그대로 남았다. 그 결과 실제 가동각이
+//     좌(servo_min) → +0.441 rad       우(servo_max) → **-0.379 rad (잘림)**
+//   로 갈렸다. 07-27 bag(run_0727_203040)에서 servo 0.6502가 발행돼 vesc_driver의
+//   servo_limit에 잘린 것이 실제로 관측된다. 즉 트림이 아니라 **범위가 낡은 것**이 원인.
+//   → 해결: vesc.yaml의 servo_min/max를 현 트림(0.4672) 기준으로 재계산
+//     (±0.42 rad → [0.2798, 0.6546]). 컨트롤러 쪽은 아래 두 파라미터로 맞춘다.
+//   ⚠️ 두 변경은 **반드시 같이** 가야 한다. 컨트롤러만 0.42로 올리면 vesc_driver가 조용히
+//     자르고 컨트롤러는 "꺾었다"고 착각한다(요레이트 피드백·조향 권한 캡이 전부 틀어짐).
 constexpr double MAX_STEERING_ANGLE = 0.41;
 
 // 전 구간 최근접 웨이포인트 스캔. 반환 {최단거리, 인덱스}.
@@ -283,6 +295,15 @@ public:
         // false로 두면 구 거동(명목 L1_distance 분모) — 즉시 롤백용.
         this->declare_parameter<bool>("l1_use_actual_distance", true);
 
+        // ── 좌우 조향 한계 (2026-07-28) ──
+        // 서보 트림이 기계 중심에서 밀려 좌우 가동각이 다르다(위 MAX_STEERING_ANGLE 주석 참고).
+        // 둘 다 0.41이면 기존 대칭 거동과 100% 동일하다.
+        // 실차 현재값 기준 권장: left 0.41 / right 0.379.
+        // ⚠️ 곡률 사전감속의 **조향 권한 속도 캡은 둘 중 작은 쪽**을 쓴다 — 큰 쪽을 쓰면
+        //    우선회 코너에서 실제보다 8% 더 꺾을 수 있다고 보고 속도를 덜 줄인다(낙관 오류).
+        this->declare_parameter<double>("max_steering_left", MAX_STEERING_ANGLE);
+        this->declare_parameter<double>("max_steering_right", MAX_STEERING_ANGLE);
+
         // ── 최근접 인덱스 견고화 (2026-07-28, MCL pose 붕괴 대응) ──
         // closest_idx_max_heading_err: 전역 재탐색에서 경로 접선과 차량 헤딩의 허용 오차 [rad].
         //   0이면 게이트 비활성(구 거동). 기본 1.75rad(100°) — 정상 추종에선 절대 안 걸리고
@@ -359,6 +380,17 @@ public:
         this->get_parameter("recovery_speed", recovery_speed_);
 
         this->get_parameter("l1_use_actual_distance", l1_use_actual_distance_);
+        this->get_parameter("max_steering_left", max_steering_left_);
+        this->get_parameter("max_steering_right", max_steering_right_);
+        max_steering_left_ = std::max(0.05, std::abs(max_steering_left_));
+        max_steering_right_ = std::max(0.05, std::abs(max_steering_right_));
+        steer_limit_min_ = std::min(max_steering_left_, max_steering_right_);
+        if (std::abs(max_steering_left_ - max_steering_right_) > 1e-6) {
+            RCLCPP_WARN(this->get_logger(),
+                "조향 한계 좌우 비대칭: 좌 %.3f / 우 %.3f rad — 속도 캡은 작은 쪽(%.3f)을 사용. "
+                "근본 해결은 서보 트림 재정렬(링키지)임",
+                max_steering_left_, max_steering_right_, steer_limit_min_);
+        }
         this->get_parameter("closest_idx_max_heading_err", closest_idx_max_heading_err_);
         this->get_parameter("idx_jump_confirm_dist", idx_jump_confirm_dist_);
         int jump_cycles;
@@ -470,7 +502,8 @@ public:
         RCLCPP_INFO(this->get_logger(), "로컬 경로 토픽(/local_waypoints) 구독 설정 완료.");
 
         // 3. 알고리즘 인스턴스 초기화 및 통신 채널 설정
-        gap_follower_ = std::make_unique<GapFollower>(180.0, 0.38, 3.0, 0.41);
+        // 갭팔로워는 좌우 대칭 한계 하나만 받으므로 작은 쪽(= 확실히 낼 수 있는 각)을 준다.
+        gap_follower_ = std::make_unique<GapFollower>(180.0, 0.38, 3.0, steer_limit_min_);
         stability_controller_ = std::make_unique<StabilityController>(0.15, 0.2);  // alpha_roll, alpha_yaw_rate
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -884,7 +917,7 @@ private:
         speed_ratio = std::max(0.0, std::min(1.0, speed_ratio));
         double final_speed = target_min_speed + speed_ratio * (max_speed - target_min_speed);
 
-        double steer_ratio = std::abs(final_steering_angle) / MAX_STEERING_ANGLE;
+        double steer_ratio = std::abs(final_steering_angle) / steer_limit_min_;
         final_speed *= (1.0 - 0.50 * steer_ratio);
 
         double speed_error = final_speed - current_speed_;
@@ -1116,7 +1149,10 @@ private:
 
                 // (b) 조향 권한 한계 (2026-07-26) — δ = L·κ + K_us·κ·v² ≤ δ_avail
                 if (understeer_gradient_ > 1e-6) {
-                    double steer_budget = steer_authority_ratio_ * MAX_STEERING_ANGLE
+                    // ⚠️ 좌우 중 **작은** 한계를 쓴다 — 이 지점의 곡률이 좌회전인지 우회전인지는
+                    // 알 수 있지만(kappa 부호), 캡은 코너 진입 전에 미리 걸어야 하고 경로가
+                    // S자면 양쪽이 다 온다. 큰 쪽을 쓰면 우선회에서 8% 낙관이 된다.
+                    double steer_budget = steer_authority_ratio_ * steer_limit_min_
                                           - wheelbase_ * k_i;
                     // budget ≤ 0 → 기구학적으로도 못 도는 곡률(R < L/tanδ_avail).
                     // 여기서 0으로 두면 아래 backward-pass가 "가능한 한 늦게까지 감속"으로
@@ -1324,7 +1360,9 @@ private:
         steering_angle = std::max(last_steering_angle_ - threshold, std::min(steering_angle, last_steering_angle_ + threshold));
 
         // 5) 물리 한계 적용
-        steering_angle = std::max(-MAX_STEERING_ANGLE, std::min(steering_angle, MAX_STEERING_ANGLE));
+        // 좌우 한계를 따로 적용 (δ>0 = 좌). 하드웨어가 못 내는 각을 명령해봐야 vesc_driver의
+        // servo_limit이 조용히 자를 뿐이고, 컨트롤러는 그 사실을 모른 채 "꺾었다"고 가정하게 된다.
+        steering_angle = std::max(-max_steering_right_, std::min(steering_angle, max_steering_left_));
         last_steering_angle_ = steering_angle;
 
         // 7. 종방향 제어 명령 (Target Speed) 산출
@@ -1676,6 +1714,11 @@ private:
 
     // L1 횡가속 분모를 목표점까지의 실제 직선거리로 쓸지 (false면 구 거동: 명목 L1_distance)
     bool l1_use_actual_distance_ = true;
+
+    // 좌우 조향 한계 [rad] (2026-07-28). 둘 다 MAX_STEERING_ANGLE이면 기존 대칭 거동과 동일.
+    double max_steering_left_ = MAX_STEERING_ANGLE;
+    double max_steering_right_ = MAX_STEERING_ANGLE;
+    double steer_limit_min_ = MAX_STEERING_ANGLE;   // 속도 캡·갭팔로워용 보수값
 
     // 최근접 인덱스 견고화 (2026-07-28, MCL pose 붕괴 대응)
     double closest_idx_max_heading_err_ = 1.75;  // 전역 재탐색 헤딩 게이트 [rad], 0이면 비활성

@@ -50,6 +50,11 @@ def generate_launch_description():
         max_speed=LaunchConfiguration('max_speed'),
         max_lateral_accel=LaunchConfiguration('max_lateral_accel'),
         base_max_accel=LaunchConfiguration('base_max_accel'),
+        # 시뮬 차량 모델은 좌우 대칭이라 ±0.41 그대로. 실차의 서보 트림 중심 어긋남
+        # (좌 +0.441 / 우 -0.379, control_real.launch.py 주석 참고)은 하드웨어 특성이므로
+        # 시뮬로 옮기지 않는다 — 옮기면 시뮬 랩타임 기준선이 하드웨어 결함을 따라 흔들린다.
+        max_steering_left=0.41,
+        max_steering_right=0.41,
         # 시뮬 IMU는 sim_imu_bridge_node가 odom angular.z(이미 rad/s)를 중계 → 보정 불필요.
         # 실차 값(pi/180)을 여기 쓰면 요레이트가 1/57로 죽어 카운터스티어가 엉뚱해진다.
         imu_angular_scale=common.IMU_ANGULAR_SCALE_SIM,

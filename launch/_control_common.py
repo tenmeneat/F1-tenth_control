@@ -516,6 +516,7 @@ def declare_common_args():
 
 def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max_accel,
                             imu_angular_scale, imu_linear_scale,
+                            max_steering_left, max_steering_right,
                             lookup_table_file='', remappings=None):
     """control_map_node — 환경별로 다른 값만 인자로 받고 나머지는 공용 정의.
     remappings: 실차에서만 필요한 토픽 리매핑(예: vesc_driver의 sensors/imu/raw →
@@ -559,6 +560,13 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             # L1 횡가속 분모 (2026-07-28)
             'l1_use_actual_distance': ParameterValue(
                 LaunchConfiguration('l1_use_actual_distance'), value_type=bool),
+            # ── 좌우 조향 한계 (2026-07-28) — 진입점 런치가 환경별로 넘긴다 ──
+            # 실차는 vesc.yaml의 servo_min/max와 **반드시 한 쌍**으로 움직인다. 컨트롤러만
+            # 올리면 vesc_driver가 조용히 자르고 컨트롤러는 꺾었다고 착각한다. 경위와 값은
+            # control_real.launch.py 주석 참고(트림 0.4672 기준 ±0.42 → [0.2798, 0.6546]).
+            # ⚠️ 시뮬은 차량 모델이 대칭이라 ±0.41 — 실차 하드웨어 특성을 시뮬에 옮기지 않는다.
+            'max_steering_left': max_steering_left,
+            'max_steering_right': max_steering_right,
             # 최근접 인덱스 견고화 (2026-07-28)
             'closest_idx_max_heading_err': LaunchConfiguration('closest_idx_max_heading_err'),
             'idx_jump_confirm_dist': LaunchConfiguration('idx_jump_confirm_dist'),
