@@ -240,7 +240,7 @@ public:
         this->declare_parameter<double>("stall_hold_delay", 1.0);
         // 런치 킥(자율 정지출발 시 VESC 센서리스 데드존 관통) — 아래 8-c 참고
         this->declare_parameter<bool>("launch_boost_enable", true);
-        this->declare_parameter<double>("launch_boost_speed", 3.0);       // 데드존 관통용 펀치 속도 명령 [m/s]
+        this->declare_parameter<double>("launch_boost_speed", 2.2);       // 데드존 관통용 펀치 속도 명령 [m/s]
         this->declare_parameter<double>("launch_boost_time", 0.6);        // 관통 실패 시 포기까지 최대 펀치 시간 [s] (< stall_hold_delay)
         this->declare_parameter<double>("launch_exit_speed", 0.8);        // 실측이 이 속도 넘으면 관통 성공 → 킥 종료 [m/s]
         this->declare_parameter<double>("launch_standstill_speed", 0.3);  // 실측이 이 속도 미만이면 정지 판정 → 킥 시작 [m/s]

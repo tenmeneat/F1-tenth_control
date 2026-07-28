@@ -372,12 +372,12 @@ def declare_common_args():
         #      큰 전류 → 예측 불가능한 펀치가 된다.
         # 출발 불능이 재발하면 `launch_boost_enable:=true`로 되살릴 것(파라미터는 그대로 보존).
         DeclareLaunchArgument(
-            'launch_boost_enable', default_value='false',
-            description='런치 킥 on/off (자율 정지출발 데드존 관통 펀치). 07-27부터 기본 꺼짐 — 데드존은 VESC 오픈루프 전류로 해결됨'
+            'launch_boost_enable', default_value='true',
+            description='런치 킥 on/off (자율 정지출발 데드존 관통 펀치)'
         ),
         DeclareLaunchArgument(
-            'launch_boost_speed', default_value='3.0',
-            description='데드존 관통용 펀치 속도 명령 [m/s]. 매뉴얼 스로틀 세기 감각으로 조정(세게=5.0/약하게=2.0)'
+            'launch_boost_speed', default_value='2.2',
+            description='데드존 관통용 펀치 속도 명령 [m/s]'
         ),
         DeclareLaunchArgument(
             'launch_boost_time', default_value='0.6',
