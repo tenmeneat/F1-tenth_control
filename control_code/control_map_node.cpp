@@ -234,7 +234,7 @@ public:
         //    PID가 ERPM 오차에 비례해 전류를 만들어(kp=0.003) 60A를 뽑으려면 20000 ERPM
         //    ≈ 4.7 m/s의 명령 선행이 물리적으로 필요하다 — 선행을 좁히면 가속이 그대로 죽는다.
         //    그래서 "차가 실제로 안 움직이는 동안"에만 발동하는 표적형 가드로 둔다.
-        this->declare_parameter<bool>("stall_guard_enable", true);
+        this->declare_parameter<bool>("stall_guard_enable", false);
         this->declare_parameter<double>("stall_speed_threshold", 0.7);
         this->declare_parameter<double>("stall_hold_speed", 1.5);
         this->declare_parameter<double>("stall_hold_delay", 1.0);
