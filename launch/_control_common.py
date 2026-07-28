@@ -185,7 +185,7 @@ def declare_common_args():
             description='L1 룩어헤드 거리 베이스 오프셋 [m] (공식: l1_gain + v*l1_distance)'
         ),
         DeclareLaunchArgument(
-            'l1_distance', default_value='0.22',
+            'l1_distance', default_value='0.3',
             description='L1 룩어헤드 거리 속도 게인 [s] (공식: l1_gain + v*l1_distance)'
         ),
         DeclareLaunchArgument(
@@ -249,6 +249,79 @@ def declare_common_args():
         DeclareLaunchArgument(
             'min_speed', default_value='1.0',
             description='최저 순항 속도 [m/s] (곡률 감속 하한). 장애물 정지엔 미적용(0까지 허용)'
+        ),
+
+        # ── L1 횡가속 분모: 목표점까지의 실제 거리 (2026-07-28) ──
+        # pure pursuit 법칙은 a_lat = 2·v²·sin(eta)/L_실제 인데, L1 목표점은 경로 **호 길이**
+        # L1_distance만큼 전진해 고르므로 |목표점−차량| != L1_distance다. 차량이 경로 뒤/옆에
+        # 있으면 실제 거리가 더 길고, 07-27 실차 bag 실측 비율(|목표점−차량|/L1_distance)은
+        # 중앙 1.06~1.31 · p95 최대 1.72였다. 명목값을 분모로 쓰면 횡가속 명령이 그만큼
+        # 과대(최대 +70%)해지고 **경로에서 벗어날수록 = 복귀가 필요한 순간에 더 심해져**
+        # 오버슈트·조향 발진을 만든다. false면 구 거동(명목 L1_distance) — 즉시 롤백용.
+        DeclareLaunchArgument(
+            'l1_use_actual_distance', default_value='true',
+            description='L1 횡가속 분모로 목표점까지의 실제 직선거리 사용. false면 구 거동(명목 L1 거리)'
+        ),
+
+        # ── 최근접 인덱스 견고화 (MCL pose 붕괴 대응, 2026-07-28) ──
+        # 07-27 실차 bag(run_0727_195937)에서 MCL pose가 깨진 직후 closest_idx가
+        # 86→27→31→89로 트랙 반대편을 오갔고, 경로 접선과 차량 헤딩의 오차가 +146.7°/-173.0°
+        # 까지 벌어졌다(주행 샘플의 9.5%가 |오차|>90°). 그 인덱스로 만든 L1 목표점이 차 뒤에
+        # 찍혀 조향 명령이 0.2초마다 부호를 뒤집었다 — "명령은 왼쪽인데 차는 오른쪽"의 정체.
+        #
+        # closest_idx_max_heading_err: 전역 재탐색에서 경로 접선이 차량 헤딩과 이 각도 이내인
+        #   후보만 고려한다. 0이면 게이트 비활성(구 거동). 기본 1.75rad(=100°)는 정상 추종에서
+        #   절대 안 걸리고 역주행 웨이포인트만 배제하는 값. 조건을 만족하는 후보가 하나도
+        #   없으면 게이트를 포기하고 무제한 스캔으로 폴백한다(재획득 불능 상황을 만들지 않음).
+        DeclareLaunchArgument(
+            'closest_idx_max_heading_err', default_value='1.75',
+            description='최근접 전역 재탐색 시 경로접선-차량헤딩 허용오차 [rad]. 0이면 비활성'
+        ),
+        # 한 사이클(20ms)에 물리적으로 가능한 경로 이동은 v·dt(8m/s에서 16cm)뿐이다. 그보다 먼
+        # 점프는 즉시 채택하지 않고 confirm_cycles 동안 연속 유지될 때만 받아들인다(1회성 pose
+        # 튐 무시). 보류 중에는 조향을 직전값으로 홀드하고 pose_suspect_speed로 감속한다.
+        # ⚠️ cycles를 너무 키우면 진짜 이탈 후 재획득이 늦어진다. 5 = 100ms.
+        DeclareLaunchArgument(
+            'idx_jump_confirm_dist', default_value='2.0',
+            description='이 거리[m]를 넘는 최근접 인덱스 점프는 확인 대기'
+        ),
+        DeclareLaunchArgument(
+            'idx_jump_confirm_cycles', default_value='5',
+            description='점프가 연속 이 사이클(50Hz) 유지되면 채택. 0이면 게이트 비활성'
+        ),
+        DeclareLaunchArgument(
+            'pose_suspect_speed', default_value='1.5',
+            description='pose 튐 보류 중 속도 상한 [m/s]'
+        ),
+
+        # ── 자율 미체결 중 속도 램프 고정 (bumpless transfer, 2026-07-28) ──
+        # control_map_node는 /drive_mode와 무관하게 상시 50Hz로 돌기 때문에, MANUAL/E-stop으로
+        # 서 있는 동안에도 속도 램프가 계속 감겨 올라간다. A를 눌러 ackermann_mux가 열리는 순간
+        # 그 값이 **계단으로** VESC에 꽂힌다. 07-27 실차 bag 8개 전부에서 확인:
+        #   정차 중 /drive_autonomous 1.50(최대 3.98) → engage 순간 commands/motor/speed가
+        #   0 → 6348 ERPM 한 스텝 → 모터전류 60~62A(l_current_max 포화) → 급발진
+        # 램프를 실측 속도로 눌러두면 engage 시점의 명령이 실측과 같아져 계단이 사라진다.
+        #
+        # ⚠️ 체결(autonomous) 중에는 아무 일도 하지 않는다 — 07-22에 금지한 일반 lead-clamp
+        #    ("명령이 실측보다 앞서지 못하게")와 다르다. VESC 속도 PID가 60A를 뽑는 데 필요한
+        #    명령 선행(~4.7 m/s)은 주행 중 그대로 보존된다.
+        # ⚠️ /drive_mode 미수신·끊김(timeout 초과) 시 게이트는 **자동 비활성**이다. 시뮬은
+        #    joy_teleop_monitor가 /drive_mode를 발행하지 않으므로 기존 거동이 그대로 유지된다.
+        DeclareLaunchArgument(
+            'engage_gate_enable', default_value='true',
+            description='자율 미체결(/drive_mode != autonomous) 중 속도 램프를 실측에 고정'
+        ),
+        DeclareLaunchArgument(
+            'drive_mode_topic', default_value='/drive_mode',
+            description='자율 체결 상태 토픽 (f1tenth_stack drive_mode_manager 발행)'
+        ),
+        DeclareLaunchArgument(
+            'engaged_mode_value', default_value='autonomous',
+            description='체결로 판정할 /drive_mode 문자열'
+        ),
+        DeclareLaunchArgument(
+            'drive_mode_timeout', default_value='1.0',
+            description='이 시간[s] 넘게 /drive_mode 미수신이면 게이트 자동 비활성(시뮬 호환)'
         ),
 
         # ── 기동 실패(VESC 센서리스 탈조) 가드 ──
@@ -483,6 +556,21 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'wall_safety_margin': 0.6,
             'recovery_lat_error': LaunchConfiguration('recovery_lat_error'),
             'recovery_speed': LaunchConfiguration('recovery_speed'),
+            # L1 횡가속 분모 (2026-07-28)
+            'l1_use_actual_distance': ParameterValue(
+                LaunchConfiguration('l1_use_actual_distance'), value_type=bool),
+            # 최근접 인덱스 견고화 (2026-07-28)
+            'closest_idx_max_heading_err': LaunchConfiguration('closest_idx_max_heading_err'),
+            'idx_jump_confirm_dist': LaunchConfiguration('idx_jump_confirm_dist'),
+            'idx_jump_confirm_cycles': ParameterValue(
+                LaunchConfiguration('idx_jump_confirm_cycles'), value_type=int),
+            'pose_suspect_speed': LaunchConfiguration('pose_suspect_speed'),
+            # 자율 미체결 중 램프 고정 (2026-07-28)
+            'engage_gate_enable': ParameterValue(
+                LaunchConfiguration('engage_gate_enable'), value_type=bool),
+            'drive_mode_topic': LaunchConfiguration('drive_mode_topic'),
+            'engaged_mode_value': LaunchConfiguration('engaged_mode_value'),
+            'drive_mode_timeout': LaunchConfiguration('drive_mode_timeout'),
             'lookup_table_file': lookup_table_file,
             'use_imu': ParameterValue(LaunchConfiguration('use_imu'), value_type=bool),
             'imu_angular_scale': imu_angular_scale,

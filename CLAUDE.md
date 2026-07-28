@@ -82,7 +82,7 @@ ros2 launch f1tenth_control dashboard.launch.py mode:=real  # 실차 원격(우�
 
 ### 1. `control_map_node` (control_code/control_map_node.cpp) — 메인 자율주행 제어
 50 Hz 제어 루프. **L1 Guidance + Steering Lookup Table(LUT)** 기반.
-- 구독: `<odom_topic>`(기본 `/ego_racecar/odom`), `/imu/data`, `/scan`, `/global_waypoints`(`f110_msgs/WpntArray`, transient_local QoS)
+- 구독: `<odom_topic>`(기본 `/ego_racecar/odom`), `/imu/data`, `/scan`, `/global_waypoints`(`f110_msgs/WpntArray`, transient_local QoS), `/drive_mode`(`std_msgs/String` — 2026-07-28 신설, 자율 미체결 중 속도 램프 와인드업 차단. 발행자 없으면 자동 비활성이라 시뮬 무영향)
 - 발행: `/drive_autonomous` (`ackermann_msgs/AckermannDriveStamped`) — Mux를 거쳐 최종 `/drive`로 전달됨
 - 분리된 알고리즘 모듈(별도 .cpp/.hpp):
   - `GapFollower` — 글로벌 경로 미수신 시 순수 LiDAR 갭 추종 폴백
@@ -278,10 +278,24 @@ graph TD
 
 속도 비례 룩어헤드 거리로 전방 목표점을 선정, 횡가속도 명령을 계산한 뒤 LUT로 조향각을 결정합니다.
 
-$$\delta = \arctan\!\left(\frac{2L\sin\alpha}{L_{lt}}\right), \quad L_{lt} = k_{ld} \cdot v + L_{min}$$
+$$L_1 = \mathrm{clip}\Big(\big(q + m\,v\big)\cdot s_\kappa,\ \ \max(t_{min},\ \sqrt{2}\,e_{lat}),\ \ t_{max}\Big)
+\qquad
+a_{lat} = \frac{2\,v_{lu}^2}{\lVert \mathbf{p}_t - \mathbf{p}\rVert}\sin\eta
+\qquad
+\delta = \mathrm{LUT}(a_{lat},\ v_{lu})$$
 
-- $L$: 휠베이스 (0.33 m), $\alpha$: 차량 헤딩과 목표점 사이 각도
-- $k_{ld}$: `l1_gain`, $L_{min}$: `l1_distance`
+- $q$ = `l1_gain`(0.5) = **상수항**, $m$ = `l1_distance`(0.3) = **속도 계수** → $L_1 = 0.5 + 0.3v$
+  > ⚠️ **이름이 역할과 반대다.** `l1_gain`이 기울기가 아니라 절편이고 `l1_distance`가 기울기다
+  > (원본 Python MAP의 `q_l1`/`m_l1` 대응). 2026-07-28 이전 문서는 이걸 거꾸로 적어놨었다.
+- $s_\kappa$: $|\kappa_{closest}|>0.3$이면 최대 25% 축소(코너 반응성), $t_{min}$=`t_clip_min`(0.6), $t_{max}$=`t_clip_max`(5.0)
+- $\sin\eta$: 차량 좌표계에서 목표점 방향의 횡성분 / 실제 거리 (+면 목표가 왼쪽)
+- **목표점 $\mathbf{p}_t$는 `closest_idx`로부터 경로 호 길이 $L_1$만큼 전진한 점**(`walk_forward`).
+  차량 기준 직선거리가 아니다.
+- ⚠️ **분모는 명목 $L_1$이 아니라 목표점까지의 실제 거리 $\lVert\mathbf{p}_t-\mathbf{p}\rVert$다**
+  (2026-07-28 수정, `l1_use_actual_distance`=false면 구 거동). 호 길이로 고른 목표점의 실제
+  거리는 웨이포인트 이산화(1점 간격까지 초과) + 차량 오프셋 때문에 $L_1$보다 길다 —
+  07-27 실차 bag 실측 비율 중앙 1.06~1.31·p95 최대 1.72. 명목값을 쓰면 횡가속 명령이 그만큼
+  과대해지고 **경로에서 벗어날수록 = 복귀가 필요한 순간에 더 심해진다.**
 
 #### 요레이트 피드백 카운터스티어 (Yaw Rate Feedback)
 
@@ -344,6 +358,12 @@ $$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\p
 | `curvature_lookahead_count` | 60 | 곡률 룩어헤드 스캔 거리 하한 (×0.1m → 6m). 20(=2m)은 4 m/s에서 0.5초 앞밖에 못 봄 (2026-07-25 승격·상향) |
 | `understeer_gradient` | 0.019 | **조향 권한 속도 캡**의 K_us [rad/(m/s²)]. 0이면 캡 비활성(구 거동). 아래 ②-b 참고 (2026-07-26 신설) |
 | `steer_authority_ratio` | 0.85 | δ_max(0.41) 중 곡률 추종에 배정할 비율. 나머지는 횡오차·요레이트 보정 여유 (2026-07-26 신설) |
+| `l1_use_actual_distance` | true | L1 횡가속 분모로 목표점까지의 **실제 직선거리** 사용. false면 구 거동(명목 L1 거리) (2026-07-28 신설) |
+| `closest_idx_max_heading_err` | 1.75 | 최근접 전역 재탐색 시 경로접선-차량헤딩 허용오차 [rad]. 0이면 비활성 (2026-07-28 신설) |
+| `idx_jump_confirm_dist` / `idx_jump_confirm_cycles` | 2.0 / 5 | 이 거리[m] 초과 인덱스 점프는 연속 N사이클 유지될 때만 채택. cycles=0이면 비활성 (2026-07-28 신설) |
+| `pose_suspect_speed` | 1.5 | 인덱스 점프 보류 중(조향 홀드) 속도 상한 [m/s] (2026-07-28 신설) |
+| `engage_gate_enable` | true | 자율 미체결(`/drive_mode` != autonomous) 중 속도 램프를 실측에 고정 (2026-07-28 신설) |
+| `drive_mode_topic` / `engaged_mode_value` / `drive_mode_timeout` | `/drive_mode` / `autonomous` / 1.0 | engage 게이트 입력. timeout 넘게 미수신이면 게이트 자동 비활성(시뮬 호환) (2026-07-28 신설) |
 
 (2026-07-11: 과거 "③ 어디에도 노출 안 됨" 그룹이었던 15개 전부 `_control_common.py`의
 `declare_common_args()`에 추가해 여기로 이동 — 이제 `control_map_node.cpp`를 안 건드리고도 전부

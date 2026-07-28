@@ -15,6 +15,7 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
+#include "std_msgs/msg/string.hpp"
 
 #include "f1tenth_control/types.hpp"
 #include "f1tenth_control/gap_follower.hpp"
@@ -46,6 +47,49 @@ std::pair<double, size_t> scan_closest(const std::vector<Waypoint>& wps, double 
         }
     }
     return {min_dist, closest_idx};
+}
+
+// 각도를 [-pi, pi]로 정규화.
+inline double wrap_pi(double a) {
+    while (a > M_PI) a -= 2.0 * M_PI;
+    while (a < -M_PI) a += 2.0 * M_PI;
+    return a;
+}
+
+// 헤딩 정합 최근접 스캔 (2026-07-28 신설).
+//
+// scan_closest는 순수 거리 최소화라, 트랙이 스스로에게 가까워지는 구간이나 MCL pose가 깨진
+// 직후에 **차량이 향한 방향과 정반대인 웨이포인트**를 최근접으로 고를 수 있다. 그 인덱스로
+// 만든 L1 목표점은 차 뒤쪽에 찍히고, sin_eta 부호가 뒤집혀 조향이 역전된다.
+// 07-27 실차 bag(run_0727_195937)에서 실제로 관측: closest_idx 86→27→31→89로 튀며
+// 경로 접선과 차량 헤딩의 오차가 +146.7°/+151.8°/-173.0°까지 벌어졌고(주행 샘플의 9.5%가
+// |오차|>90°), 그 구간에서 조향 명령이 0.2초마다 부호를 뒤집었다.
+//
+// → 경로 접선(wp.yaw)이 차량 헤딩과 max_heading_err 이내인 후보만 고려한다.
+//   조건을 만족하는 후보가 하나도 없으면(차를 반대로 놓은 초기 획득 등) 게이트를 포기하고
+//   기존 무제한 스캔 결과를 그대로 쓴다 — 이 함수가 "아무것도 못 찾는" 경우를 만들지 않는다.
+// 반환 {최단거리, 인덱스, 게이트가 실제로 적용됐는지}.
+std::tuple<double, size_t, bool> scan_closest_heading_gated(
+    const std::vector<Waypoint>& wps, double x, double y, double yaw, double max_heading_err) {
+    if (max_heading_err <= 0.0) {   // 0이면 게이트 비활성 = 구 거동
+        auto [d, i] = scan_closest(wps, x, y);
+        return {d, i, false};
+    }
+    double min_dist = std::numeric_limits<double>::max();
+    size_t closest_idx = 0;
+    bool found = false;
+    for (size_t i = 0; i < wps.size(); ++i) {
+        if (std::abs(wrap_pi(wps[i].yaw - yaw)) > max_heading_err) continue;
+        double dist = std::hypot(wps[i].x - x, wps[i].y - y);
+        if (dist < min_dist) {
+            min_dist = dist;
+            closest_idx = i;
+            found = true;
+        }
+    }
+    if (found) return {min_dist, closest_idx, true};
+    auto [d, i] = scan_closest(wps, x, y);   // 후보 전무 → 폴백
+    return {d, i, false};
 }
 
 // start_idx에서 경로를 따라 호 길이 max_dist만큼 전진하며 각 웨이포인트를 방문한다.
@@ -231,6 +275,46 @@ public:
         this->declare_parameter<double>("recovery_lat_error", 1.0);
         this->declare_parameter<double>("recovery_speed", 2.0);
 
+        // ── L1 목표점까지의 "실제" 거리로 횡가속을 산출할지 (2026-07-28) ──
+        // pure pursuit 법칙은 a_lat = 2·v²·sin(eta)/L_실제 인데, 목표점은 호 길이 기준으로
+        // 고르므로 |목표점-차량| != L1_distance다. 07-27 실차 bag 실측 비율(중앙 1.06~1.31,
+        // p95 최대 1.72) — 명목 L1_distance를 분모로 쓰면 횡가속 명령이 최대 70% 과대해지고,
+        // 경로에서 벗어날수록(= 복귀가 필요한 바로 그 순간) 더 심해져 오버슈트·발진을 만든다.
+        // false로 두면 구 거동(명목 L1_distance 분모) — 즉시 롤백용.
+        this->declare_parameter<bool>("l1_use_actual_distance", true);
+
+        // ── 최근접 인덱스 견고화 (2026-07-28, MCL pose 붕괴 대응) ──
+        // closest_idx_max_heading_err: 전역 재탐색에서 경로 접선과 차량 헤딩의 허용 오차 [rad].
+        //   0이면 게이트 비활성(구 거동). 기본 1.75rad(100°) — 정상 추종에선 절대 안 걸리고
+        //   역주행 웨이포인트(오차 >90°)만 배제하는 값.
+        // idx_jump_confirm_dist / idx_jump_confirm_cycles: 한 사이클(20ms)에 물리적으로 가능한
+        //   인덱스 이동은 몇 점뿐이다. 그보다 먼 점프는 즉시 받아들이지 않고, 연속으로
+        //   confirm_cycles 사이클 동안 같은 점프를 가리킬 때만 채택한다(= pose 1회성 튐 무시).
+        //   보류 중에는 pose를 신뢰할 수 없으므로 조향을 직전값으로 홀드하고 감속한다.
+        this->declare_parameter<double>("closest_idx_max_heading_err", 1.75);
+        this->declare_parameter<double>("idx_jump_confirm_dist", 2.0);
+        this->declare_parameter<int>("idx_jump_confirm_cycles", 5);
+        this->declare_parameter<double>("pose_suspect_speed", 1.5);
+
+        // ── 자율 미체결 중 속도 명령 와인드업 차단 (bumpless transfer, 2026-07-28) ──
+        // 이 노드는 /drive_mode를 모른 채 상시 돌기 때문에, MANUAL/E-stop으로 서 있는 동안에도
+        // 속도 램프(last_target_speed_)가 계속 감겨 올라간다. A를 눌러 ackermann_mux가 열리는
+        // 순간 그 값이 **계단으로** VESC에 꽂힌다. 07-27 실차 bag 8개 전부에서 확인:
+        // 정차 중 /drive_autonomous가 1.50(최대 3.98)까지 감겨 있었고, engage 순간
+        // commands/motor/speed가 0 → 6348 ERPM 한 스텝, 모터전류가 매번 60~62A(l_current_max)
+        // 포화 → 급발진. (s_pid_ramp_erpms_s 21160으로 VESC 쪽 완충도 사실상 없음)
+        // → autonomous가 아닐 때 램프를 실측 속도로 눌러두면 engage가 무충격이 된다.
+        // ⚠️ 주행 중(autonomous)에는 아무 일도 하지 않는다 — 07-22에 금지한 일반 lead-clamp
+        //    (명령이 실측보다 앞서지 못하게 막는 것)와 다르다. VESC 속도 PID가 전류를 뽑는 데
+        //    필요한 명령 선행 여유는 그대로 보존된다.
+        // ⚠️ /drive_mode를 한 번도 못 받았거나 끊긴 지 timeout이 지나면 게이트는 **비활성**이 된다.
+        //    시뮬(joy_teleop_monitor는 /drive_mode를 발행하지 않음)과 drive_mode_manager 미기동
+        //    상황에서 기존 거동이 그대로 유지되도록 하기 위함이다.
+        this->declare_parameter<bool>("engage_gate_enable", true);
+        this->declare_parameter<std::string>("drive_mode_topic", "/drive_mode");
+        this->declare_parameter<std::string>("engaged_mode_value", "autonomous");
+        this->declare_parameter<double>("drive_mode_timeout", 1.0);
+
         this->get_parameter("wheelbase", wheelbase_);
         this->get_parameter("l1_gain", l1_gain_);
         this->get_parameter("l1_distance", l1_distance_);
@@ -273,6 +357,19 @@ public:
         this->get_parameter("wall_safety_margin", wall_safety_margin_);
         this->get_parameter("recovery_lat_error", recovery_lat_error_);
         this->get_parameter("recovery_speed", recovery_speed_);
+
+        this->get_parameter("l1_use_actual_distance", l1_use_actual_distance_);
+        this->get_parameter("closest_idx_max_heading_err", closest_idx_max_heading_err_);
+        this->get_parameter("idx_jump_confirm_dist", idx_jump_confirm_dist_);
+        int jump_cycles;
+        this->get_parameter("idx_jump_confirm_cycles", jump_cycles);
+        idx_jump_confirm_cycles_ = std::max(0, jump_cycles);
+        this->get_parameter("pose_suspect_speed", pose_suspect_speed_);
+
+        this->get_parameter("engage_gate_enable", engage_gate_enable_);
+        this->get_parameter("drive_mode_topic", drive_mode_topic_);
+        this->get_parameter("engaged_mode_value", engaged_mode_value_);
+        this->get_parameter("drive_mode_timeout", drive_mode_timeout_);
 
         int cl_count;
         this->get_parameter("curvature_lookahead_count", cl_count);
@@ -397,6 +494,19 @@ public:
         }
         obstacle_last_recv_time_ = this->now(); // 노드 클럭 타입으로 초기화(clock mismatch 방지)
 
+        // 자율 체결 상태 구독 (실차 f1tenth_stack drive_mode_manager가 "estop"/"manual"/
+        // "autonomous"를 발행). 시뮬엔 발행자가 없어 아래 게이트가 자동으로 비활성이 된다.
+        if (engage_gate_enable_) {
+            drive_mode_sub_ = this->create_subscription<std_msgs::msg::String>(
+                drive_mode_topic_, 10,
+                std::bind(&ControlMapNode::drive_mode_callback, this, std::placeholders::_1));
+            RCLCPP_INFO(this->get_logger(),
+                        "engage 게이트 활성 — %s == \"%s\"일 때만 속도 램프 진행 "
+                        "(미수신 %.1fs 초과 시 자동 비활성)",
+                        drive_mode_topic_.c_str(), engaged_mode_value_.c_str(), drive_mode_timeout_);
+        }
+        drive_mode_last_recv_time_ = this->now();
+
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             "/drive_autonomous", 10);
 
@@ -459,6 +569,26 @@ private:
 
     void scan_callback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
         latest_scan_ = msg;
+    }
+
+    void drive_mode_callback(const std_msgs::msg::String::ConstSharedPtr msg) {
+        bool engaged = (msg->data == engaged_mode_value_);
+        if (engaged != is_engaged_) {
+            RCLCPP_INFO(this->get_logger(),
+                        "자율 체결 상태 변경: %s → %s (램프 %s)",
+                        is_engaged_ ? "체결" : "미체결", engaged ? "체결" : "미체결",
+                        engaged ? "진행" : "실측 속도로 고정");
+        }
+        is_engaged_ = engaged;
+        drive_mode_last_recv_time_ = this->now();
+        drive_mode_seen_ = true;
+    }
+
+    // engage 게이트가 지금 실제로 작동 중인가.
+    // /drive_mode를 한 번도 못 받았거나 timeout 넘게 끊겼으면 false(= 구 거동 유지).
+    bool engage_gate_active() const {
+        if (!engage_gate_enable_ || !drive_mode_seen_) return false;
+        return (this->now() - drive_mode_last_recv_time_).seconds() < drive_mode_timeout_;
     }
 
     // opponent_detector의 raw 장애물(추적 확정 전, 벽 제거+Frenet 투영 완료)을 그대로 보관.
@@ -618,6 +748,9 @@ private:
         if (first_reception || last_target_idx_ >= waypoints_.size()) {
             last_target_idx_ = scan_closest(waypoints_, current_x_, current_y_).second;
             waypoints_initialized_ = true;
+            // 추적기를 새로 잡았으므로 점프 게이트의 비교 기준도 무효화한다 — 안 하면 다음
+            // 사이클의 정상적인 재획득이 "점프"로 오판돼 불필요한 홀드가 걸린다.
+            global_idx_valid_ = false;
         }
 
         // 전체 경로의 평균 곡률을 한 번만 계산 (control_loop에서 매 사이클 반복 제거)
@@ -701,7 +834,13 @@ private:
         smooth_curvature(local_waypoints_, local_is_closed_);
 
         // 배열이 교체되면 로컬 인덱스 추적기를 초기화(다음 사이클에서 전역 재탐색으로 복구)
-        if (n != prev_size) last_local_idx_ = 0;
+        // ⚠️ 추적기를 0으로 되돌릴 땐 점프 게이트의 비교 기준도 같이 무효화해야 한다
+        // (2026-07-28). 안 하면 다음 사이클에 wps[0] → 진짜 최근접점(팀 플래너의 191점 풀랩에선
+        // 최대 17m)이 "pose 튐"으로 오판돼 매 재발행마다 조향 홀드+감속이 걸린다.
+        if (n != prev_size) {
+            last_local_idx_ = 0;
+            local_idx_valid_ = false;
+        }
 
         if (local_is_closed_ != last_logged_local_closed_) {
             RCLCPP_INFO(this->get_logger(), "로컬 경로 기하: %s (웨이포인트 %zu개)",
@@ -839,7 +978,10 @@ private:
         // 인덱스 추적기는 경로 소스별로 따로 둔다 — 로컬/글로벌은 배열 길이·인덱싱이 다를 수
         // 있어 하나를 공유하면 소스가 바뀔 때 엉뚱한 인덱스에서 탐색을 시작한다.
         size_t& idx_tracker = following_local ? last_local_idx_ : last_target_idx_;
-        if (idx_tracker >= n) idx_tracker = 0;   // 배열이 교체되어 범위를 벗어난 경우
+        // 점프 게이트의 "비교 기준이 유효한가"도 소스별로 따로 둔다 — 소스가 바뀐 첫 사이클에
+        // 남의 추적기와 비교하면 정상 전환이 매번 점프로 오판된다.
+        bool& idx_valid = following_local ? local_idx_valid_ : global_idx_valid_;
+        if (idx_tracker >= n) { idx_tracker = 0; idx_valid = false; }   // 배열이 교체되어 범위를 벗어난 경우
 
         if (path_closed) {
             // 닫힌 루프: 직전 인덱스 주변 윈도우 스캔 + 이탈 시 전역 재탐색
@@ -869,13 +1011,58 @@ private:
                 }
             }
             // Fail-safe recovery: 경로와 2.5m 초과하여 멀어지면 전체 탐색 (U턴 옆차선 점프 방지)
+            // ⚠️ 이 전역 재탐색이 pose 붕괴 시 인덱스 텔레포트의 통로다 — 헤딩 게이트를 건다.
             if (min_dist > 2.5) {
-                std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
+                auto [d, i, gated] = scan_closest_heading_gated(
+                    wps, current_x_, current_y_, current_yaw_, closest_idx_max_heading_err_);
+                min_dist = d; closest_idx = i;
+                if (!gated && closest_idx_max_heading_err_ > 0.0) {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "전역 재탐색: 헤딩 정합(±%.0f°) 후보가 없어 게이트 없이 선택 — "
+                        "차량이 경로 반대 방향이거나 pose가 깨졌을 수 있음",
+                        closest_idx_max_heading_err_ * 180.0 / PI);
+                }
             }
         } else {
             // 열린 구간(짧은 회피경로): 전체 최근접 스캔(~50점이라 저렴, wrap 인덱스 미사용)
-            std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
+            std::tie(min_dist, closest_idx, std::ignore) = scan_closest_heading_gated(
+                wps, current_x_, current_y_, current_yaw_, closest_idx_max_heading_err_);
         }
+
+        // 1-b. 인덱스 점프 확인 게이트 (2026-07-28, MCL pose 붕괴 대응)
+        // 한 사이클(20ms)에 물리적으로 가능한 경로 이동은 최대 v*dt(= 8m/s에서 16cm)다.
+        // 그보다 훨씬 먼 점프는 pose가 튄 것이므로 즉시 채택하지 않고, 연속 confirm_cycles
+        // 동안 같은 점프가 유지될 때만 받아들인다. 보류 중에는 직전 인덱스를 그대로 쓰고
+        // pose_suspect_ 플래그를 세워 조향 홀드 + 감속으로 넘어간다.
+        // ⚠️ 최초 획득(경로 수신 직후)과 배열 교체 때는 비교 대상이 없으므로 게이트를 건너뛴다.
+        pose_suspect_ = false;
+        if (idx_jump_confirm_cycles_ > 0 && idx_valid && closest_idx != idx_tracker &&
+            idx_tracker < n) {
+            double jump = std::hypot(wps[closest_idx].x - wps[idx_tracker].x,
+                                     wps[closest_idx].y - wps[idx_tracker].y);
+            if (jump > idx_jump_confirm_dist_) {
+                if (++idx_jump_count_ < idx_jump_confirm_cycles_) {
+                    // 보류: 직전 인덱스 유지 (min_dist도 그 기준으로 다시 잰다)
+                    closest_idx = idx_tracker;
+                    min_dist = std::hypot(wps[closest_idx].x - current_x_,
+                                          wps[closest_idx].y - current_y_);
+                    pose_suspect_ = true;
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                        "인덱스 점프 %.2fm 보류(%d/%d) — pose 튐 의심, 조향 홀드+감속",
+                        jump, idx_jump_count_, idx_jump_confirm_cycles_);
+                } else {
+                    RCLCPP_WARN(this->get_logger(),
+                        "인덱스 점프 %.2fm 확정 채택(%d 사이클 연속) — 경로 재획득",
+                        jump, idx_jump_count_);
+                    idx_jump_count_ = 0;
+                }
+            } else {
+                idx_jump_count_ = 0;
+            }
+        } else {
+            idx_jump_count_ = 0;
+        }
+
         // ⚠️ 추적기 갱신은 두 분기 공통이어야 한다(2026-07-21). 예전엔 닫힌 분기에서만
         // 되썼기 때문에, 로컬 추종 중에는 last_target_idx_가 0에 고정된 채 얼어붙었다
         // (로그의 "초기 인덱스: 0"이 매 재발행마다 0으로 찍히던 정체). 그 상태로 로컬→글로벌
@@ -883,6 +1070,7 @@ private:
         // 의존해 복구했다 — 시작/피니시처럼 트랙이 스스로에게 가까운 구간에선 failsafe가
         // 안 걸려 엉뚱한 인덱스에 잠길 수 있다.
         idx_tracker = closest_idx;
+        idx_valid = true;
         double lateral_error = min_dist;
 
         // 1.5 곡률 룩어헤드 사전 감속 (Curvature Lookahead Pre-deceleration)
@@ -1057,7 +1245,20 @@ private:
         if (L1_distance > 0.0) {
             // speed_for_lu도 곡률 제한 적용
             speed_for_lu = std::min(speed_for_lu, curvature_speed_limit);
-            lat_acc = 2.0 * std::pow(speed_for_lu, 2) / L1_distance * sin_eta;
+
+            // ⚠️ 분모는 **목표점까지의 실제 직선거리**여야 한다 (2026-07-28 수정).
+            // pure pursuit 법칙은 a_lat = 2·v²·sin(eta)/L_실제 인데, 목표점은 walk_forward가
+            // 경로 **호 길이** L1_distance만큼 전진해 고르므로 |목표점-차량| != L1_distance다.
+            // 차량이 경로 뒤/옆에 있으면 실제 거리가 더 길어진다 — 07-27 실차 bag 실측 비율
+            // (|목표점-차량| / L1_distance)은 중앙 1.06~1.31, p95 최대 1.72였다.
+            // 명목값을 분모로 쓰면 그만큼 횡가속 명령이 과대해지고(최대 +70%), 경로에서
+            // 벗어날수록 = 복귀가 필요한 바로 그 순간에 더 심해져 오버슈트·조향 발진을 만든다.
+            // 하한은 t_clip_min_ — 목표점이 차량에 붙어버린 경우(L1_norm→0) 발산 방지.
+            double l1_denom = L1_distance;
+            if (l1_use_actual_distance_) {
+                l1_denom = std::max(L1_norm, t_clip_min_);
+            }
+            lat_acc = 2.0 * std::pow(speed_for_lu, 2) / l1_denom * sin_eta;
         }
         double steering_angle = lookup_table_.lookup_steer_angle(lat_acc, speed_for_lu);
 
@@ -1110,6 +1311,14 @@ private:
                 current_speed_, steering_angle, wheelbase_, yaw_rate_gain_);
         }
 
+        // 3.9) pose 튐 보류 중 조향 홀드 (2026-07-28, 1-b 게이트와 한 쌍)
+        // 인덱스 점프를 보류한 사이클은 closest_idx가 직전값으로 고정돼 있어 이번 사이클의
+        // L1 기하 자체를 신뢰할 수 없다. 새 값을 만들어내지 않고 직전 조향을 그대로 유지한다
+        // (아래 rate limit·클리핑은 그대로 통과 — 값이 안 변하므로 no-op).
+        if (pose_suspect_) {
+            steering_angle = last_steering_angle_;
+        }
+
         // 4) Rate limit
         double threshold = 0.4;
         steering_angle = std::max(last_steering_angle_ - threshold, std::min(steering_angle, last_steering_angle_ + threshold));
@@ -1154,6 +1363,12 @@ private:
             target_speed = std::min(target_speed, recovery_speed_);
         }
 
+        // pose 튐 보류 중에는 감속한다 — 기하를 못 믿는 상태로 고속 주행하지 않는다.
+        // 보류가 confirm_cycles(기본 5 = 100ms) 안에 풀리면 원래 속도로 자연 복귀한다.
+        if (pose_suspect_) {
+            target_speed = std::min(target_speed, pose_suspect_speed_);
+        }
+
         // 8. 롤링 가변 가감속 필터링 (ESC) 및 최종 구동 발행
         double roll_ratio = 0.0;
         if (use_imu_) {
@@ -1188,6 +1403,37 @@ private:
         }
         last_target_speed_ = final_speed;
 
+        // 8-a2. 자율 미체결 중 램프 고정 — bumpless transfer (2026-07-28)
+        //   이 노드는 drive_mode와 무관하게 상시 50Hz로 돌기 때문에, MANUAL/E-stop으로 서 있는
+        //   동안에도 위 램프가 계속 감겨 올라간다. A를 눌러 ackermann_mux가 navigation 채널을
+        //   여는 순간 그 값이 계단으로 VESC에 꽂힌다. 07-27 실차 bag 8개 전부에서 확인:
+        //     정차 중 /drive_autonomous 1.50(최대 3.98) → engage 순간 commands/motor/speed가
+        //     0 → 6348 ERPM 한 스텝 → 모터전류 60~62A(l_current_max 포화) → 급발진
+        //   램프 상태를 실측 속도로 눌러두면 engage 시점의 명령이 실측과 같아져 계단이 사라지고,
+        //   그 뒤엔 base_max_accel 램프가 정상적으로 가속을 만든다.
+        //
+        //   ⚠️ 체결(autonomous) 중에는 아무것도 하지 않는다. 07-22에 금지한 일반 lead-clamp
+        //      ("명령이 실측보다 앞서지 못하게")와 다르다 — VESC 속도 PID가 전류를 뽑는 데
+        //      필요한 명령 선행 여유(60A에 ~4.7 m/s)는 주행 중 그대로 보존된다.
+        //   ⚠️ /drive_mode 미수신·끊김 시 게이트는 자동 비활성(engage_gate_active() 참고) →
+        //      시뮬과 drive_mode_manager 미기동 상황에서 기존 거동이 그대로 유지된다.
+        const bool disengaged = engage_gate_active() && !is_engaged_;
+        if (disengaged) {
+            final_speed = std::max(0.0, current_speed_);
+            last_target_speed_ = final_speed;
+            // 미체결 중엔 탈조·런치 상태도 누적하지 않는다(둘 다 "출발하려는데 안 나간다"를
+            // 판정하는 로직인데, 애초에 출발 명령이 하류로 나가지 않는 구간이다).
+            // ⚠️ launch_latched_off_는 여기서 건드리지 않는다 — 매 사이클 false로 되돌리면
+            //    아래 8-c의 킥이 무한 재무장돼 미체결 중에도 publish_speed가 계속 부스트
+            //    값으로 덮인다(램프를 고정해도 발행값이 안 따라오는 원인이었음).
+            stall_time_ = 0.0;
+            launch_active_ = false;
+            launch_time_ = 0.0;
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "자율 미체결 — 속도 램프를 실측(%.2f m/s)에 고정 중(engage 시 무충격 전환)",
+                current_speed_);
+        }
+
         // 8-b. 기동 실패(VESC 센서리스 탈조) 안티와인드업 가드 (2026-07-22 실차 증상)
         //   위 램프의 증분은 실측 속도와 무관하게 매 사이클 max_accel*dt씩 쌓인다. 실차 VESC는
         //   센서리스 FOC라 정지→출발 시 오픈루프 구간(~0.59 m/s)을 못 넘기고 수 초간 탈조할 수
@@ -1221,8 +1467,11 @@ private:
         //   ⚠️ launch_boost_time(0.6s) < stall_hold_delay(1.0s)라 stall_guard와 안 싸움:
         //      킥 성공 시 차가 나가 stall_guard 미발동, 킥 실패(0.6s 초과) 시 포기하고 stall_guard가
         //      급발진 안전망으로 인계(과열 방지 위해 차가 실제 움직일 때까지 재시도 안 함).
+        //   ⚠️ 미체결 중에는 킥도 돌리지 않는다(2026-07-28). 킥은 final_speed가 아니라
+        //      publish_speed만 덮으므로, 게이트가 램프를 눌러놔도 킥이 켜져 있으면 발행값이
+        //      계속 launch_boost_speed로 나간다 — 정차 중 3.0 m/s가 상시 발행되던 원인.
         double publish_speed = final_speed;
-        if (launch_boost_enable_) {
+        if (launch_boost_enable_ && !disengaged) {
             bool moving = std::abs(current_speed_) > launch_exit_speed_;
             bool standstill = std::abs(current_speed_) < launch_standstill_speed_;
             if (moving) launch_latched_off_ = false;                    // 움직였으면 다음 정지서 다시 킥
@@ -1424,6 +1673,28 @@ private:
     bool last_logged_local_closed_ = false; // 기하 판정 변화 시에만 로그
     double recovery_lat_error_ = 1.0;
     double recovery_speed_ = 2.0;
+
+    // L1 횡가속 분모를 목표점까지의 실제 직선거리로 쓸지 (false면 구 거동: 명목 L1_distance)
+    bool l1_use_actual_distance_ = true;
+
+    // 최근접 인덱스 견고화 (2026-07-28, MCL pose 붕괴 대응)
+    double closest_idx_max_heading_err_ = 1.75;  // 전역 재탐색 헤딩 게이트 [rad], 0이면 비활성
+    double idx_jump_confirm_dist_ = 2.0;         // 이 거리[m] 초과 점프는 확인 대기
+    int idx_jump_confirm_cycles_ = 5;            // 연속 이 사이클 유지되면 채택 (0이면 비활성)
+    int idx_jump_count_ = 0;                     // 현재 점프가 연속 유지된 사이클 수
+    bool pose_suspect_ = false;                  // 이번 사이클 pose를 못 믿음(조향 홀드+감속)
+    double pose_suspect_speed_ = 1.5;            // 보류 중 속도 상한 [m/s]
+    bool global_idx_valid_ = false;              // 점프 게이트 비교 기준 유효성(소스별)
+    bool local_idx_valid_ = false;
+
+    // 자율 체결 게이트 (bumpless transfer, 2026-07-28)
+    bool engage_gate_enable_ = true;
+    std::string drive_mode_topic_ = "/drive_mode";
+    std::string engaged_mode_value_ = "autonomous";
+    double drive_mode_timeout_ = 1.0;
+    bool is_engaged_ = false;        // 마지막 수신 기준 자율 체결 여부
+    bool drive_mode_seen_ = false;   // /drive_mode를 한 번이라도 받았는지(미수신 시 게이트 비활성)
+    rclcpp::Time drive_mode_last_recv_time_;
     bool waypoints_initialized_ = false; // 최초 global_waypoints 수신 여부(재발행 시 인덱스 오초기화 방지)
     double avg_waypoint_spacing_ = 0.36; // global_path_callback에서 실측 갱신, 수신 전 보수적 기본값
 
@@ -1469,6 +1740,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::Subscription<f110_msgs::msg::ObstacleArray>::SharedPtr obstacle_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr drive_mode_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr global_path_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr local_path_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
