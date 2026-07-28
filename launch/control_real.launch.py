@@ -67,7 +67,7 @@ def generate_launch_description():
     # 급해짐. 실차 모터/구동 여유와 저속 출발 안정성 실측 확인 후 유지할 것(급가속으로 휠스핀/
     # 앞들림 시 하향).
     base_max_accel_arg = DeclareLaunchArgument(
-        'base_max_accel', default_value='9.0',
+        'base_max_accel', default_value='2.5',
         description='종방향 최대 가속도 한계 [m/s^2] (⚠️ sim 승리값, 실차 급가속 검증 필요)'
     )
 
@@ -87,14 +87,22 @@ def generate_launch_description():
         remappings=[('/imu/data', 'sensors/imu/raw')],
     )
 
-    # MPPI 컨트롤러 노드 — control_map_node와 나란히 상시 구동(/drive_mppi 발행).
-    # 평소엔 Mux가 MAP을 라우팅(MPPI 출력 무시), 조이스틱 RB로 즉시 MPPI 전환.
-    # 실차 IMU 리매핑은 control_map_node와 동일(/imu/data→sensors/imu/raw).
-    mppi_control = common.build_control_mppi_node(
-        odom_topic=LaunchConfiguration('odom_topic'),
-        max_speed=LaunchConfiguration('max_speed'),
-        remappings=[('/imu/data', 'sensors/imu/raw')],
-    )
+    # ── MPPI 노드 배선 제거 (2026-07-27) ─────────────────────────────────────
+    # 실차 bag 3건(07-26 20:41, 07-27 19:44/20:25) 모두에서 /drive_mppi가 50Hz 목표 대비
+    # **10Hz**밖에 못 나왔다 — solve 하나에 ~100ms로 실시간 예산(20ms)을 5배 초과한다.
+    # 그런데 실제로는 MAP만 쓰고 있어(RB 미사용) 출력은 셀렉터가 전부 버린다.
+    # 즉 젯슨 CPU만 먹는 순수 낭비였고, 07-27 19:44 bag에선 /odom·/pf/pose/odom·/scan이
+    # **동시에 ~140ms 멈추는** 시스템 전체 정지가 관측됐다(과부하 징후).
+    #
+    # 되살리려면: 아래 블록 주석 해제 + LaunchDescription에 `mppi_control,` 복원 +
+    # drive_source_selector의 algorithm_button을 99 → 5(RB)로 되돌릴 것. 세 곳 다 필요하다.
+    # (시뮬 control_sim.launch.py는 그대로 둔다 — 거긴 CPU 여유가 있고 MPPI 튜닝에 쓴다)
+    #
+    # mppi_control = common.build_control_mppi_node(
+    #     odom_topic=LaunchConfiguration('odom_topic'),
+    #     max_speed=LaunchConfiguration('max_speed'),
+    #     remappings=[('/imu/data', 'sensors/imu/raw')],
+    # )
 
     # 실차 수동/자율/E-stop Mux는 팀 공용 f1tenth_stack이 담당한다(drive_mode_manager +
     # ackermann_mux). 따라서 우리 joy_teleop_monitor는 이 런치에서 제외한다(2026-07-17) —
@@ -113,7 +121,13 @@ def generate_launch_description():
         name='drive_source_selector',
         output='screen',
         parameters=[{
-            'algorithm_button': 5,   # RB
+            # ⚠️ 2026-07-27: MPPI 노드를 뺐으므로 RB 토글을 **의도적으로 무효화**했다.
+            # 살려두면 RB를 누르는 순간 셀렉터가 MPPI를 활성 소스로 잡는데 /drive_mppi가
+            # 아무도 발행하지 않아 /drive가 침묵 → mux navigation 입력이 끊겨 차가 선다.
+            # drive_source_selector는 buttons.size() <= algorithm_button_ 이면 조기 반환하므로
+            # 패드 버튼 수(F710 11개)보다 큰 값을 주면 토글이 안전하게 죽는다.
+            # MPPI 복원 시 5(RB)로 되돌릴 것.
+            'algorithm_button': 99,
         }]
     )
 
@@ -143,6 +157,6 @@ def generate_launch_description():
         lookup_table_file_arg,
         base_max_accel_arg,
         steering_control,
-        mppi_control,
+        # mppi_control,   # 2026-07-27 제거 — 위 블록 참고
         drive_source_selector,
     ])
