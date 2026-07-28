@@ -61,19 +61,36 @@ def generate_launch_description():
     # 좌 +0.441 / 우 **-0.379(잘림)**로 갈려 있었다. 07-27 bag(run_0727_203040)에서
     # servo 0.6502가 발행돼 vesc_driver의 servo_limit에 잘린 것이 실제로 관측된다.
     #
-    # 🔧 해결(2026-07-28 적용): vesc.yaml의 범위를 **현 트림 0.4672 기준으로 재계산**해
-    #    ±0.42 rad 대칭으로 맞췄다 — servo_min 0.2703→**0.2798**, servo_max 0.6363→**0.6546**.
-    #    좌는 travel 축소(0.441→0.42)라 무조건 안전하고, 우는 +0.0183(18.3us, 바퀴 2.35°) 확장이다.
+    # 🔧 대칭화 시도(2026-07-28) → **롤백됨. 재적용 전 반드시 벤치 검증할 것.**
+    #    vesc.yaml 범위를 현 트림 0.4672 기준으로 재계산해 ±0.42 대칭으로 바꿨었다
+    #    (servo_min 0.2703→0.2798, servo_max 0.6363→**0.6546**). 그런데 되돌렸다:
+    #
+    #    🔴 이유 — odom이 조향 명령에서 요레이트를 **합성**한다.
+    #       vesc.yaml의 `use_servo_cmd_to_calc_angular_velocity: true`이므로
+    #         steering = (servo_cmd_clipped − offset) / gain ,  yaw_rate = v·tan(steering)/L
+    #       즉 odom 회전은 센서가 아니라 **클립된 명령값**에서 나온다.
+    #       구 범위에선 이게 자동으로 자기정합이었다 — 수동 풀스틱(steering_scale 0.41)이
+    #       servo 0.6502를 명령해도 vesc_driver가 0.6363으로 자르고, **바퀴도 odom도 같이**
+    #       -0.379가 되어 어긋날 수가 없었다.
+    #       servo_max를 0.6546으로 넓히면 그 클립이 사라져 odom은 무조건 -0.410을 믿는데,
+    #       링키지가 거기까지 못 가면 **하드 우회전마다 요레이트가 8% 과적분**된다.
+    #       → SLAM 매핑 중 헤딩이 뭉개진다(2026-07-28 실제 증상, 이 변경 직후 발생).
+    #
+    #    ✅ 재적용 조건: 바퀴 띄우고 servo 0.6363 vs 0.6546을 직접 명령해 **바퀴가 실제로 더
+    #       꺾이는지** 확인(스톨음·링키지 걸림 없이). 확인되면 vesc.yaml과 아래 값을 같이 0.42로.
+    #       탐색 도구: tools/servo_range_probe.py. 보관본: vesc.yaml.sym042.20260728 (젯슨)
+    #
     # ⚠️ 이 두 값과 젯슨 vesc.yaml은 **반드시 함께** 움직여야 한다. 컨트롤러만 올리면
     #    vesc_driver가 조용히 자르고 컨트롤러는 "꺾었다"고 착각한다(요레이트 카운터스티어와
-    #    조향 권한 속도 캡이 전부 실제보다 낙관적이 됨).
+    #    조향 권한 속도 캡이 전부 실제보다 낙관적이 됨). 반대로 vesc.yaml만 넓히면 **odom이
+    #    깨진다**(위 참고) — 어느 쪽 한쪽만 바꾸는 게 제일 위험하다.
     max_steering_left_arg = DeclareLaunchArgument(
-        'max_steering_left', default_value='0.42',
-        description='좌조향(δ>0) 물리 한계 [rad]. vesc.yaml servo_min 0.2798과 한 쌍'
+        'max_steering_left', default_value='0.41',
+        description='좌조향(δ>0) 물리 한계 [rad]. vesc.yaml servo_min 0.2703(→+0.441)이지만 차량 스펙 0.41로 제한'
     )
     max_steering_right_arg = DeclareLaunchArgument(
-        'max_steering_right', default_value='0.42',
-        description='우조향(δ<0) 물리 한계 [rad]. vesc.yaml servo_max 0.6546과 한 쌍'
+        'max_steering_right', default_value='0.379',
+        description='우조향(δ<0) 물리 한계 [rad]. vesc.yaml servo_max 0.6363이 여기서 자름 — 실제 가동각'
     )
 
     # 비워두면 기존 폴백 순서(steering_lookup share → f1tenth_control share)로 로드.

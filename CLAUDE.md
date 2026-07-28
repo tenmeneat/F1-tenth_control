@@ -13,8 +13,9 @@ ROS 2 패키지 `f1tenth_control` 하나로 구성되며, 플래닝 팀이 발�
 - 언어: C++17 (메인 런타임), Python (참조용 원본 컨트롤러 / LUT 프로토타입)
 - 빌드 시스템: `ament_cmake` (ROS 2)
 - 코드/주석 언어: **한국어** — 새 코드도 주변 코드의 한국어 주석 밀도·스타일에 맞출 것
-- 차량: 휠베이스 0.33 m, 최대 조향각 **±0.42 rad(약 ±24.1°)** — 2026-07-28 서보 범위를 트림 기준으로
-  재계산해 좌우 대칭 확보(그 전엔 좌 +0.441 / 우 −0.379로 비대칭). 시뮬은 ±0.41. VESC 모터 컨트롤러
+- 차량: 휠베이스 0.33 m, 최대 조향각 **좌 0.41 / 우 0.379 rad(비대칭)** — servo_min/max가 옛 중심
+  기준이라 우측이 잘린다. 2026-07-28에 ±0.42 대칭화를 시도했다가 **odom이 깨져 롤백**
+  (아래 ⚠️ 참고). 시뮬은 대칭 ±0.41. VESC 모터 컨트롤러
 
 ## 워크스페이스 구조 ⚠️ 중요
 
@@ -364,7 +365,7 @@ $$a_{\max} = a_{\text{base}} \cdot \Bigl(1 - \text{clip}\!\left(\frac{|\phi|}{\p
 | `idx_jump_confirm_dist` / `idx_jump_confirm_cycles` | 2.0 / 5 | 이 거리[m] 초과 인덱스 점프는 연속 N사이클 유지될 때만 채택. cycles=0이면 비활성 (2026-07-28 신설) |
 | `pose_suspect_speed` | 1.5 | 인덱스 점프 보류 중(조향 홀드) 속도 상한 [m/s] (2026-07-28 신설) |
 | `engage_gate_enable` | true | 자율 미체결(`/drive_mode` != autonomous) 중 속도 램프를 실측에 고정 (2026-07-28 신설) |
-| `max_steering_left` / `max_steering_right` | 0.42 / 0.42 (real), 0.41 / 0.41 (sim) | 좌/우 조향 물리 한계 [rad]. **젯슨 `vesc.yaml`의 `servo_min`(0.2798)/`servo_max`(0.6546)과 반드시 한 쌍** — 컨트롤러만 올리면 vesc_driver가 조용히 자른다. 곡률 조향 권한 캡·갭팔로워는 둘 중 **작은 쪽**을 씀 (2026-07-28 신설) |
+| `max_steering_left` / `max_steering_right` | 0.41 / 0.379 (real), 0.41 / 0.41 (sim) | 좌/우 조향 물리 한계 [rad]. **젯슨 `vesc.yaml`의 `servo_min`(0.2703)/`servo_max`(0.6363)과 반드시 한 쌍.** ⚠️ vesc.yaml만 넓히면 **odom이 깨진다** — `use_servo_cmd_to_calc_angular_velocity: true`라 odom 요레이트가 클립된 조향 **명령**에서 합성되므로, 클립이 풀리면 링키지가 못 가는 각도를 odom이 믿는다(07-28 ±0.42 대칭화 시도 → SLAM 헤딩 붕괴 → 롤백). 곡률 조향 권한 캡·갭팔로워는 둘 중 **작은 쪽**을 씀 (2026-07-28 신설) |
 | `drive_mode_topic` / `engaged_mode_value` / `drive_mode_timeout` | `/drive_mode` / `autonomous` / 1.0 | engage 게이트 입력. timeout 넘게 미수신이면 게이트 자동 비활성(시뮬 호환) (2026-07-28 신설) |
 
 (2026-07-11: 과거 "③ 어디에도 노출 안 됨" 그룹이었던 15개 전부 `_control_common.py`의

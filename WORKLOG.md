@@ -213,7 +213,7 @@ double angular_displacement      = current_angular_vel_ * comp_dt;
 - 2000(구값)은 가속을 0.47 m/s²로 하드캡 → 절대 되돌리지 말 것 [[vesc-speed-pid-ramp-accel-cap]]
 - `s_pid_kp` 0.006은 유지. bumpless transfer 적용 후 60A 포화가 남는지 먼저 보고 판단.
 
-### 6. ✅ 좌우 조향 비대칭 해소 — servo 범위가 낡아 우조향이 8% 잘리고 있었다
+### 6. ⚠️ 좌우 조향 비대칭 — 대칭화 시도했다가 odom이 깨져 롤백
 
 젯슨 `vesc.yaml`: gain −0.4463, offset **0.4672**, `servo_min` 0.2703 / `servo_max` 0.6363.
 
@@ -231,7 +231,35 @@ servo 범위는 갱신되지 않았다. 그래서 실제 가동각이:
 🔴 **원인은 트림이 아니라 범위다.** (처음엔 "링키지가 1.78° 틀어졌다"로 진단했는데 트림
 이동이 의도된 것이라는 사용자 지적으로 정정 — 고칠 대상은 `servo_min/max`였다.)
 
-**해결(적용 완료)** — 현 트림 0.4672 기준으로 범위 재계산, **좌우 ±0.42 rad 대칭**:
+#### 🔴 대칭화 시도 → **롤백됨 (odom 붕괴)**. 재적용 전 반드시 벤치 검증.
+
+servo 범위를 넓혔더니 **SLAM 매핑 중 odom이 깨졌다**(07-28 16시경 실제 발생). 원인은
+`vesc.yaml`의 `use_servo_cmd_to_calc_angular_velocity: true` —
+**odom 요레이트가 센서가 아니라 "클립된 조향 명령"에서 합성된다:**
+```
+steering = (servo_cmd_clipped − offset) / gain ,   yaw_rate = v·tan(steering)/L
+```
+- **구 범위에선 이게 자동으로 자기정합이었다.** 수동 풀스틱(`joy_teleop.yaml`의
+  `steering_scale: 0.41`)이 servo 0.6502를 명령해도 vesc_driver가 0.6363으로 자르고,
+  **바퀴도 odom도 똑같이** −0.379가 되어 어긋날 수가 없었다.
+- `servo_max`를 0.6546으로 넓히면 그 클립이 사라져 **odom은 무조건 −0.410을 믿는다.**
+  링키지가 거기까지 실제로 못 가면 하드 우회전마다 요레이트가 **8% 과적분** → SLAM 헤딩 붕괴.
+
+⚠️ **교훈: 이 차의 odom은 조향 명령의 클립에 의존해 자기정합을 유지하고 있었다.**
+`servo_min/max`를 넓히는 건 "조향 여유 확보"가 아니라 **odom 신뢰성을 링키지 실측에 거는 일**이다.
+한쪽만(vesc.yaml만) 넓히는 게 제일 위험하다 — 컨트롤러만 올리면 조용히 잘리기만 하지만,
+vesc.yaml만 넓히면 **위치추정이 깨진다**.
+
+✅ **재적용 조건**: 바퀴 띄우고 servo 0.6363 vs 0.6546을 직접 명령해 **바퀴가 실제로 더 꺾이는지**
+확인(스톨음·링키지 걸림 없이). 확인되면 vesc.yaml과 런치 값을 **같이** 0.42로.
+보관본: 젯슨 `vesc.yaml.sym042.20260728`, 도구 `tools/servo_range_probe.py`.
+
+**현재 상태(롤백 후)**: `servo_min` 0.2703 / `servo_max` 0.6363,
+런치 `max_steering_left` 0.41 / `max_steering_right` **0.379**(실제 가동각을 정직하게 반영).
+
+<details><summary>시도했던 대칭 값 (재적용 시 참고)</summary>
+
+현 트림 0.4672 기준으로 범위 재계산, **좌우 ±0.42 rad 대칭**:
 
 | | 구값 | 신값 | δ |
 |---|---|---|---|
@@ -239,6 +267,7 @@ servo 범위는 갱신되지 않았다. 그래서 실제 가동각이:
 | `servo_max` | 0.6363 | **0.6546** | −0.4199 rad (−24.06°) — **+0.0183 확장**(18.3µs, 바퀴 2.35°) |
 
 범위 중심 (0.2798+0.6546)/2 = **0.46720** = offset과 정확히 일치.
+</details>
 
 - 젯슨 `vesc.yaml` **src·install 양쪽** 수정(둘 다 실파일, 심볼릭 아님 — 백업 `.bak.20260728`)
 - 컨트롤러: `MAX_STEERING_ANGLE` 상수 하나 → **`max_steering_left`/`max_steering_right`
