@@ -228,7 +228,7 @@ def declare_common_args():
         # 그립만 보고 2배 빠르게 진입한 결과 풀락(0.410)에도 안 돌아가고 크로스트랙이
         # 0.11 → 2.07m로 발산했다. understeer_gradient=0 이면 이 항 전체 비활성(구 거동).
         DeclareLaunchArgument(
-            'understeer_gradient', default_value='0.019',
+            'understeer_gradient', default_value='0.0',
             description='언더스티어 그래디언트 K_us [rad/(m/s^2)]. 0이면 조향 권한 캡 비활성'
         ),
         # ⚠️ 1.0으로 두면 곡률 추종에 δ_max를 다 써버려 횡오차 보정·요레이트 피드백 여력이 0이 된다.
@@ -290,7 +290,7 @@ def declare_common_args():
             description='점프가 연속 이 사이클(50Hz) 유지되면 채택. 0이면 게이트 비활성'
         ),
         DeclareLaunchArgument(
-            'pose_suspect_speed', default_value='1.5',
+            'pose_suspect_speed', default_value='5.0',
             description='pose 튐 보류 중 속도 상한 [m/s]'
         ),
 

@@ -315,7 +315,7 @@ public:
         this->declare_parameter<double>("closest_idx_max_heading_err", 1.75);
         this->declare_parameter<double>("idx_jump_confirm_dist", 2.0);
         this->declare_parameter<int>("idx_jump_confirm_cycles", 5);
-        this->declare_parameter<double>("pose_suspect_speed", 1.5);
+        this->declare_parameter<double>("pose_suspect_speed", 5.0);
 
         // ── 자율 미체결 중 속도 명령 와인드업 차단 (bumpless transfer, 2026-07-28) ──
         // 이 노드는 /drive_mode를 모른 채 상시 돌기 때문에, MANUAL/E-stop으로 서 있는 동안에도
@@ -1154,17 +1154,14 @@ private:
                     // S자면 양쪽이 다 온다. 큰 쪽을 쓰면 우선회에서 8% 낙관이 된다.
                     double steer_budget = steer_authority_ratio_ * steer_limit_min_
                                           - wheelbase_ * k_i;
-                    // budget ≤ 0 → 기구학적으로도 못 도는 곡률(R < L/tanδ_avail).
-                    // 여기서 0으로 두면 아래 backward-pass가 "가능한 한 늦게까지 감속"으로
-                    // 자연히 처리하고, 최종 min_speed_ 하한이 정지는 막는다.
-                    double v_steer = (steer_budget > 0.0)
-                        ? std::sqrt(steer_budget / (understeer_gradient_ * k_i))
-                        : 0.0;
-                    if (v_steer < v_cap_i) {
-                        v_cap_i = v_steer;
-                        if (k_i > steer_bound_k) {   // 창 안에서 가장 조인 곡률만 기록
-                            steer_bound_k = k_i;
-                            steer_bound_v = v_steer;
+                    if (steer_budget > 0.0) {
+                        double v_steer = std::sqrt(steer_budget / (understeer_gradient_ * k_i));
+                        if (v_steer < v_cap_i) {
+                            v_cap_i = v_steer;
+                            if (k_i > steer_bound_k) {   // 창 안에서 가장 조인 곡률만 기록
+                                steer_bound_k = k_i;
+                                steer_bound_v = v_steer;
+                            }
                         }
                     }
                 }
@@ -1726,7 +1723,7 @@ private:
     int idx_jump_confirm_cycles_ = 5;            // 연속 이 사이클 유지되면 채택 (0이면 비활성)
     int idx_jump_count_ = 0;                     // 현재 점프가 연속 유지된 사이클 수
     bool pose_suspect_ = false;                  // 이번 사이클 pose를 못 믿음(조향 홀드+감속)
-    double pose_suspect_speed_ = 1.5;            // 보류 중 속도 상한 [m/s]
+    double pose_suspect_speed_ = 5.0;            // 보류 중 속도 상한 [m/s]
     bool global_idx_valid_ = false;              // 점프 게이트 비교 기준 유효성(소스별)
     bool local_idx_valid_ = false;
 
