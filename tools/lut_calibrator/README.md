@@ -16,7 +16,7 @@
 ## 사용법
 
 ```bash
-source /opt/ros/humble/setup.bash          # 메시지 디시리얼라이즈에 필요
+source /opt/ros/<distro>/setup.bash        # 메시지 디시리얼라이즈에 필요 (humble/jazzy 등)
 source ~/2026_IFAC/install/setup.bash
 
 # bag 하나

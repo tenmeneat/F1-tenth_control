@@ -6,7 +6,7 @@
 ackermann_to_vesc 브레이크 패치 / drive_mode_manager E-stop)이라 상호작용을
 매 스텝 확인해야 한다. bag 하나 던지면 아래 7개를 판정한다.
 
-    source /opt/ros/humble/setup.bash
+    source /opt/ros/<distro>/setup.bash
     python3 check_ramp_step.py <bag폴더|.db3> [--ramp 21160]
 
 vesc_msgs 없이 동작한다(/sensors/core를 CDR 직접 디코드) — 랩탑에서 바로 돌아간다.

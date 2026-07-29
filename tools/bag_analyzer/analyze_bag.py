@@ -9,7 +9,7 @@ analyze_bag.py — F1TENTH 주행 rosbag 통합 분석 도구
   3) 자동 튜닝 가이드 (a_lat 그립초과·감속권한·조향포화 휴리스틱 → 권장 파라미터)
 
 사용법:
-  source /opt/ros/humble/setup.bash        # rclpy 디시리얼라이즈에 필요
+  source /opt/ros/<distro>/setup.bash      # rclpy 디시리얼라이즈에 필요 (humble/jazzy 등)
   python3 analyze_bag.py <bag_dir | .db3> [--out report.html]
          [--odom /odom] [--grip 5.0]
 

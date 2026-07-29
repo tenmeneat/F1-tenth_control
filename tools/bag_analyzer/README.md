@@ -15,7 +15,7 @@ F1TENTH 실차/시뮬 주행 rosbag 하나를 넣으면 **자체 실행형 `repo
 
 ## 사용법
 ```bash
-source /opt/ros/humble/setup.bash          # rclpy 디시리얼라이즈에 필요
+source /opt/ros/<distro>/setup.bash        # rclpy 디시리얼라이즈에 필요 (humble/jazzy 등)
 python3 analyze_bag.py <bag폴더 | .db3> [옵션]
 xdg-open <name>_report.html
 ```

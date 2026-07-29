@@ -19,7 +19,7 @@ voltage_input 이다(2026-07-26 젯슨 echo로 확인·검증). 여러 후보를
 타당성과 **odom 속도 대비 ERPM 비**(speed_to_erpm_gain 4232 부근)로 자동 판별한다.
 
 사용법:
-  source /opt/ros/humble/setup.bash
+  source /opt/ros/<distro>/setup.bash
   python3 analyze_longitudinal.py <bag폴더 | .db3> [--odom /odom] [--erpm-gain 4232]
 """
 import sys, os, glob, sqlite3, struct, math, argparse

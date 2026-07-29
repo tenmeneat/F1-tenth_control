@@ -18,7 +18,7 @@ calibrate_lut_from_bag.py — rosbag → Steering LUT 실측 보정 CSV (오프�
 누적해도 된다.
 
 사용법:
-  source /opt/ros/humble/setup.bash          # 메시지 디시리얼라이즈에 필요
+  source /opt/ros/<distro>/setup.bash        # 메시지 디시리얼라이즈에 필요 (humble/jazzy 등)
   python3 calibrate_lut_from_bag.py ~/rosbag_log/0725/rosbag_*
   python3 calibrate_lut_from_bag.py <bag> --fresh      # 누적 무시하고 새로 시작
 
@@ -81,7 +81,7 @@ def load_messages(db3_files, wanted_topics):
                 sys.exit(
                     f"[에러] 메시지 타입 '{ttype}'을 불러올 수 없습니다: {e}\n"
                     "       ROS 2와 워크스페이스를 소싱했는지 확인하세요 "
-                    "(source /opt/ros/humble/setup.bash; source ~/2026_IFAC/install/setup.bash)"
+                    "(source /opt/ros/<distro>/setup.bash; source ~/2026_IFAC/install/setup.bash)"
                 )
         if topics:
             placeholders = ",".join("?" * len(topics))

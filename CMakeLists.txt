@@ -57,7 +57,6 @@ ament_target_dependencies(joy_teleop_monitor
 add_executable(control_map_node
   control_code/control_map_node.cpp
   control_code/gap_follower.cpp
-  control_code/imu_stability_controller.cpp
 )
 target_include_directories(control_map_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
