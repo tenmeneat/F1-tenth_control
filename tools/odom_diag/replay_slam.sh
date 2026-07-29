@@ -15,14 +15,26 @@
 
 # ⚠️ set -u 금지 — ROS setup.bash 가 미정의 변수를 참조해 즉시 죽는다
 set +u
-source /opt/ros/humble/setup.bash
-source ~/f1tenth_ws/install/setup.bash
+# 2026-07-29: jazzy 우선, humble 폴백 (젯슨·랩탑 둘 다 24.04+Jazzy 로 올라감)
+if [ -f /opt/ros/jazzy/setup.bash ]; then
+    source /opt/ros/jazzy/setup.bash
+else
+    source /opt/ros/humble/setup.bash
+fi
+# f1tenth_ws 는 젯슨에만 있다. 랩탑에서 오프라인 재현할 때는 없어도 된다
+# (slam_toolbox 는 apt 로 /opt/ros 에 깔리고, 파라미터는 아래 저장소 사본을 쓴다).
+[ -f ~/f1tenth_ws/install/setup.bash ] && source ~/f1tenth_ws/install/setup.bash
 export ROS_DOMAIN_ID=91          # 실차 도메인(67)과 격리 — 재생이 차에 안 샌다
-export ROS_LOCALHOST_ONLY=1
+export ROS_LOCALHOST_ONLY=1                      # Jazzy 에선 폐기 예정이지만 아직 동작
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST   # Jazzy 의 정식 대체 변수
 
 LABEL="${1:-base}"; shift || true
 BAG="${BAG:-/tmp/bag_nomap}"     # filter_bag.py 로 map->odom 을 제거한 bag
-YAML=~/f1tenth_ws/install/f1tenth_stack/share/f1tenth_stack/config/slam_toolbox_params.yaml
+# 파라미터 파일: 저장소 사본(랩탑) 우선, 없으면 젯슨 f1tenth_ws 설치본.
+# ⚠️ f1tenth_stack 의 f1tenth_online_async.yaml 은 업스트림 원본이라 쓰면 안 된다 —
+#    base_frame 이 laser 이고 angle_variance_penalty 가 1.0 이다.
+YAML="$(dirname "$0")/slam_toolbox_params.yaml"
+[ -f "$YAML" ] || YAML=~/f1tenth_ws/install/f1tenth_stack/share/f1tenth_stack/config/slam_toolbox_params.yaml
 OUT=/tmp/slamrun/$LABEL
 rm -rf "$OUT"; mkdir -p "$OUT"
 
