@@ -6,9 +6,11 @@
 
 **2026 IFAC F1TENTH 자율주행 대회**의 **하드웨어 / 제어(Control) 파트** 코드베이스입니다.
 ROS 2 패키지 `f1tenth_control` 하나로 구성되며, 플래닝 팀이 발행하는 글로벌 경로를
-추종하여 실차(또는 시뮬레이터)를 주행시키는 횡방향(조향)·종방향(가감속) 제어와
-안전 시스템(수동/자율 Mux)을 담당합니다. (라이다 기반 자율 비상제동(AEB)은 제어 파트에서
-제거됨 — 실제 비상정지는 planning 파트가 판단/발행)
+추종하여 실차(또는 시뮬레이터)를 주행시키는 횡방향(조향)·종방향(가감속) 제어를 담당합니다.
+(수동/자율/E-stop Mux(teleop)는 이 저장소 담당이 아님 — 실차는 팀 공용 f1tenth_stack의
+drive_mode_manager + ackermann_mux가 수행하며, 2026-07-29에 시뮬용 joy_teleop_monitor도
+저장소에서 제거됨. 라이다 기반 자율 비상제동(AEB)도 제어 파트에서 제거됨 — 실제 비상정지는
+planning 파트가 판단/발행)
 
 - 언어: C++17 (메인 런타임), Python (참조용 원본 컨트롤러 / LUT 프로토타입)
 - 빌드 시스템: `ament_cmake` (ROS 2)
@@ -60,9 +62,9 @@ cd ~/2026_IFAC
 colcon build --symlink-install --packages-select f1tenth_control
 source install/setup.bash
 
-# 시뮬레이션 실행 (gym_bridge·global_planner는 별도 기동 필요)
+# 시뮬레이션 실행 (gym_bridge·global_planner는 별도 기동 필요) — 기동 즉시 자율주행
 ros2 launch f1tenth_control control_sim.launch.py
-ros2 launch f1tenth_control control_sim.launch.py force_autonomous:=true yaw_rate_gain:=0.1
+ros2 launch f1tenth_control control_sim.launch.py yaw_rate_gain:=0.1
 
 # 실차 실행 (하드웨어 브링업·planning이 먼저 떠 있어야 함)
 # ⚠️ 실차는 f1tenth_stack(별도 워크스페이스 ~/f1tenth_ws)이 라이다·조이스틱·VESC 드라이버와
@@ -74,11 +76,10 @@ ros2 launch f1tenth_control control_real.launch.py max_speed:=4.0 max_lateral_ac
 
 # 개별 노드 실행 (디버깅용)
 ros2 run f1tenth_control control_map_node
-ros2 run f1tenth_control joy_teleop_monitor
 
-# 조이스틱/제어 상태 대시보드 (별도 터미널에서 — 뷰어 노드)
-ros2 launch f1tenth_control dashboard.launch.py            # 시뮬(mode:=sim 기본)
-ros2 launch f1tenth_control dashboard.launch.py mode:=real  # 실차 원격(우리 컴, ROS_DISCOVERY_SERVER 필요)
+# 실차 원격 대시보드 (별도 터미널에서 — 뷰어 노드, 우리 컴에서 실행)
+ros2 launch f1tenth_control dashboard.launch.py             # 실차 원격(mode:=real 기본, ROS_DISCOVERY_SERVER 필요)
+ros2 launch f1tenth_control dashboard.launch.py mode:=calib # odom 거리 스케일 보정
 ```
 
 - 두 launch 파일의 공용 파라미터·노드 정의는 `launch/_control_common.py`에 있음 — 조정 방법은
@@ -86,7 +87,7 @@ ros2 launch f1tenth_control dashboard.launch.py mode:=real  # 실차 원격(우�
 - CMake가 `-O3 -march=native -flto`로 최적화 빌드합니다 (임베디드 실시간 제어 성능 목적).
 - `compile_commands.json`이 생성되어 VS Code linter와 연동됩니다.
 
-## 노드 구성 (9개 실행 파일)
+## 노드 구성 (7개 실행 파일)
 
 ### 1. `control_map_node` (control_code/control_map_node.cpp) — 메인 자율주행 제어
 50 Hz 제어 루프. **L1 Guidance + Steering Lookup Table(LUT)** 기반.
@@ -111,57 +112,22 @@ ros2 launch f1tenth_control dashboard.launch.py mode:=real  # 실차 원격(우�
 - 출력: MPPI가 (조향, 종가속) 출력 → `speed = vx + accel·dt`(다음스텝 속도 적분)로 변환해 발행.
 - **`/scan` 불필요**(갭팔로워 없음, 비상제동은 planning 파트가 판단). LUT 불필요(전방 Pacejka 자체 모델). ⚠️ Pacejka는 gym 기본값 — 실차 보정은 별도 작업.
 
-### 2. `joy_teleop_monitor` (control_code/joy_teleop_monitor.cpp) — 제어권 Mux & 텔레메트리 (⚠️ 2026-07-17부터 시뮬 전용)
-Xbox 조이스틱으로 수동/자율 전환하고, 최종 `/drive`를 결정하는 **멀티플렉서**.
-⚠️ **실차 런치에서는 제외됨**(2026-07-17) — 실차는 팀 공용 `f1tenth_stack`의 `drive_mode_manager`
-+ `ackermann_mux`가 수동/자율/E-stop Mux를 담당하므로 이 노드를 띄우면 `/drive` 이중 발행 충돌.
-시뮬(`control_sim.launch.py`)엔 f1tenth_stack이 없어 이 노드가 여전히 전체 Mux 역할. 실차의
-MAP/MPPI 선택은 대신 `drive_source_selector`(아래 노드 2-B)가 담당.
-- 구독: `/joy`(원본: 조이스틱 드라이버 `joy_node`, `joy` 패키지 — 실차는 2026-07-14부터 이 저장소가 기동하지 않음. 팀 공용 `f1tenth_stack`(f110 단축어)이 라이다/조이스틱/vesc드라이버를 함께 기동하므로 중복 방지 위해 `control_real.launch.py`의 include와 자체 `launch/joy.launch.py` 모두 제거, joy_teleop_monitor는 f1tenth_stack이 띄운 `/joy`를 그대로 구독. 시뮬은 2026-07-17부터 `control_sim.launch.py`가 `joy_node`를 직접 번들, 아래 참고), `/drive_autonomous`(MAP), `/drive_mppi`(MPPI)
-- 발행: `/drive` (최종 구동 명령), `/teleop_dashboard`(`std_msgs/String`, 10Hz — 상태 대시보드 텍스트)
-- 대시보드는 화면에 직접 출력하지 않고 텍스트로 발행만 한다(화면 클리어를 Mux 밖으로 분리). 실제 렌더링은 `teleop_dashboard_node`가 별도 터미널에서 담당 → 공용 런치 터미널의 다른 노드 로그를 덮지 않음.
-- 버튼/축 매핑(2026-07-17 실차 `drive_mode_manager`와 정렬 — 시뮬↔실차 조작감 통일): **A(0)**
-  AUTONOMOUS(+E-stop 해제), **B(1)** 비상정지 Latch, **X(2)** MANUAL(+E-stop 해제), **RB(5)**
-  MAP/MPPI 알고리즘 전환. 축: **좌스틱 세로(axis1)** 속도(scale 5.0), **우스틱 가로(axis3)**
-  조향(scale 0.34). A/B/X는 drive_mode_manager와 동일한 래칭 시맨틱(구 LB 토글/X-해제/A-부스트
-  방식 폐지, 부스트 제거). RB 전환은 `current_algorithm_`에 따라 `auto_drive_callback`(MAP)/
-  `mppi_drive_callback`(MPPI)이 자기 차례일 때만 `/drive`로 포워딩(알고리즘 게이트가 E-stop보다
-  앞 → 비활성 소스 중복 브레이크 방지)
-- 기본 시작 모드(시뮬): `is_simulation`은 `_control_common.py`에서 **`True`로 고정**돼 있음
-  (2026-07-12 확정 — "기본은 항상 조이스틱 수동 대기"가 의도된 동작). 시뮬은 **MANUAL로 시작**하고
-  조이스틱 좌스틱 조작이 곧바로 `/drive`에 포워딩됨 — A로 AUTONOMOUS 전환. `force_autonomous=true`면
-  조이스틱 없이 AUTONOMOUS로 즉시 기동. (실차는 이 노드가 없고 drive_mode_manager가 ESTOP으로
-  시작 → 운전자가 A를 눌러 자율 진입.)
-- 수동 비상정지(B버튼 Latch) 활성 시 `/drive`에 brake(speed 0, accel -9.0) 최우선 송출
-  (라이다 AEB는 제거됨 — 비상정지는 planning 파트가 판단)
-- 대시보드 표시(2026-07-14): "Joystick E-Stop" 상태(`[ACTIVE - BRAKE LATCHED]`/`[NORMAL]`)가
-  속도와 무관하게 항상 표시되어 "E-stop으로 정지"와 "그냥 속도 0"을 구분 가능. "Commanded
-  RPM(ERPM)"도 추가 — 실제 `/drive`로 나간 마지막 속도(수동/자율/E-stop 어느 경로든)를
-  `speed_to_erpm_gain`(아래 참고)으로 환산해 표시(표시 전용 계산, 실제 VESC 변환은
-  `ackermann_to_vesc_node`가 별도 수행). VESC 실측 피드백 RPM(`sensors/core`,
-  `vesc_msgs/msg/VescStateStamped.state.speed`)은 `vesc_msgs`가 워크스페이스에 없을 수 있어
-  보류 — 확보되면 이어서 추가 가능.
-
-### 2-B. `drive_source_selector` (control_code/drive_source_selector.cpp) — 실차 전용 MAP/MPPI 슬림 셀렉터
+### 2. `drive_source_selector` (control_code/drive_source_selector.cpp) — MAP/MPPI 슬림 셀렉터 (sim/real 공용)
+MAP/MPPI 알고리즘 선택만 담당하는 슬림 노드 — 수동 조종/E-stop/대시보드 기능이 없다(teleop 아님).
 실차는 수동/자율/E-stop Mux를 팀 공용 `f1tenth_stack`(`drive_mode_manager` + `ackermann_mux`)이
-맡고 `joy_teleop_monitor`는 실차 런치에서 제외되므로(2026-07-17), MAP/MPPI 알고리즘 선택만
-담당하는 슬림 노드. `joy_teleop_monitor`에서 RB 선택 부분만 떼어낸 것(수동/E-stop/대시보드 없음).
-- 구독: `/joy`(RB 토글), `/drive_autonomous`(MAP), `/drive_mppi`(MPPI)
-- 발행: `/drive`(= `ackermann_mux`의 navigation 채널 `drive`, 우선순위10 — 자율모드에서 teleop
-  침묵 시 통과), `/mppi_active`(latched — `control_mppi_node` 활성/워밍업 게이트)
+맡고, 시뮬은 Mux 없이 이 노드가 자율 명령을 `/drive`로 직결한다(2026-07-29 joy_teleop_monitor
+제거 후 sim/real 공용화).
+- 구독: `/joy`(RB 토글 — 시뮬엔 발행자가 없어 항상 기본 [MAP]), `/drive_autonomous`(MAP),
+  `/drive_mppi`(MPPI)
+- 발행: `/drive`(실차 = `ackermann_mux`의 navigation 채널, 우선순위10 / 시뮬 = gym_bridge가 직접
+  구독), `/mppi_active`(latched — `control_mppi_node` 활성/워밍업 게이트)
 - RB(5)로 MAP↔MPPI 토글 → 활성 소스를 `/drive`로 재스탬프 포워딩. **E-stop을 몰라도 됨** —
-  `drive_mode_manager`가 `estop_lock`으로 mux 입력 전체를 마스킹하므로 제동 중엔 이 노드의 `/drive`도
-  자동 차단됨. `control_real.launch.py`에만 포함(시뮬은 joy_teleop_monitor가 이 역할까지 겸함).
+  실차는 `drive_mode_manager`가 `estop_lock`으로 mux 입력 전체를 마스킹하므로 제동 중엔 이 노드의
+  `/drive`도 자동 차단됨. `control_real.launch.py`는 MPPI 제거(2026-07-27)로 `algorithm_button`을
+  99로 무효화한 상태(복원 조건은 launch 주석 참고).
 
-### 3. `teleop_dashboard_node` (control_code/teleop_dashboard_node.cpp) — 시뮬 대시보드 뷰어
-`joy_teleop_monitor`가 발행하는 `/teleop_dashboard`(`std_msgs/String`)를 구독해, **자기 터미널에서** 화면을 지우고(`\033[2J\033[H`) 상태 대시보드를 렌더링하는 표시 전용 노드. (완성된 문자열을 그대로 그리는 뷰어라 시뮬 전용 — 실차엔 joy_teleop_monitor가 없어 이 토픽이 없음)
-- 구독: `/teleop_dashboard` / 발행: 없음
-- **별도 터미널**에서 실행: `ros2 launch f1tenth_control dashboard.launch.py` (기본 `mode:=sim`). control_real 런치에는 넣지 말 것(화면 클리어가 공용 터미널을 덮음).
-- 안전/제어 경로와 무관한 표시 전용 → 안 띄워도 주행에는 영향 없음.
-
-### 3-B. `realcar_dashboard_node` (control_code/realcar_dashboard_node.cpp) — 실차 원격 대시보드 (우리 컴에서 실행)
-실차(젯슨)엔 `joy_teleop_monitor`가 없어 `/teleop_dashboard`가 없으므로, 젯슨의 **원시 토픽을
-직접 구독**해 **우리 컴 터미널에서** 조립·렌더링하는 노드 → 젯슨 렌더 연산 0. 원격 wifi 뷰라
+### 3. `realcar_dashboard_node` (control_code/realcar_dashboard_node.cpp) — 실차 원격 대시보드 (우리 컴에서 실행)
+젯슨의 **원시 토픽을 직접 구독**해 **우리 컴 터미널에서** 조립·렌더링하는 노드 → 젯슨 렌더 연산 0. 원격 wifi 뷰라
 각 토픽의 마지막 수신 경과(age)도 색으로 표시(끊김 감지).
 - 구독: `/drive_mode`(estop/manual/autonomous), `/mppi_active`(MAP/MPPI, transient_local),
   `<odom_topic>`(기본 `/pf/pose/odom`), `/joy` / 발행: 없음
@@ -169,7 +135,7 @@ MAP/MPPI 선택은 대신 `drive_source_selector`(아래 노드 2-B)가 담당.
   ERPM(=속도×`speed_to_erpm_gain` 환산 — 실 VESC 피드백은 vesc_msgs 부재로 미사용),
   종가속도(odom `d(vx)/dt` EMA), 횡가속도(`vx×yaw_rate`). odom 파생이라 SI 단위 안전
   (IMU 축/단위 미확정 회피). E-stop은 자율 중 눌러도 drive_mode_manager가 최우선 처리
-- 실행: `ros2 launch f1tenth_control dashboard.launch.py mode:=real` (또는 `.zshrc`의 `realdash` alias)
+- 실행: `ros2 launch f1tenth_control dashboard.launch.py` (mode:=real 기본, 또는 `.zshrc`의 `realdash` alias)
 - ⚠️ **무선 연결 전제 = Fast DDS Discovery Server**: wifi가 DDS 멀티캐스트를 막고 우리 컴·젯슨
   둘 다 멀티홈이라 유니캐스트 피어만으론 디스커버리가 안 붙는다. 팀원이 젯슨을 Discovery
   Server(`10.1.1.3:11811`)로 세팅함 → 우리 컴에서 `export ROS_DISCOVERY_SERVER="10.1.1.3:11811"`
@@ -211,12 +177,6 @@ f1tenth_gym(gym_bridge)은 `/imu/data`를 발행하지 않으므로, `control_ma
 - ⚠️ 측정 시: 직선만 / 5~10m(1m는 자 오차가 2%) / **1.0~2.0 m/s**(FOC 센서리스 데드존
   800~2250 ERPM ≈ 0.17~0.49 m/s 회피) / 양방향(오프셋 검출) / 여러 속도(슬립 검출)
 
-### joy_node 시뮬 번들 (control_sim.launch.py 전용)
-실차와 달리 `control_sim.launch.py`는 `joy` 패키지의 `joy_node`를 `device_id` 인자와 함께
-직접 포함한다(2026-07-17) — `ifac_sim` 같은 터미널 1~7 일괄 실행 스크립트에서 별도 8번째
-터미널 없이 조이스틱 수동 개입/오버라이드를 바로 쓸 수 있게 하기 위함. 실차는 f1tenth_stack이
-`joy_node`를 별도로 띄우므로 `control_real.launch.py`엔 포함하지 않는다(중복 방지, 위 참고).
-
 ## 토픽 데이터 흐름
 
 ```
@@ -225,13 +185,13 @@ f1tenth_gym(gym_bridge)은 `/imu/data`를 발행하지 않으므로, `control_ma
         control_map_node  ──/drive_autonomous──┐ (MAP)
         control_mppi_node ──/drive_mppi────────┤ (MPPI)
                                                     ↓  RB 버튼으로 소스 선택
-  [시뮬] /joy ──→ joy_teleop_monitor (수동/자율/MAP·MPPI/E-stop Mux) ──/drive──→ gym_bridge
+  [시뮬] drive_source_selector (MAP/MPPI만) ──/drive──→ gym_bridge
   [실차] /joy ──→ drive_source_selector (MAP/MPPI만) ──/drive(navigation,pri10)─┐
          /joy ──→ f1tenth_stack drive_mode_manager ──teleop(pri100)+estop_lock─┤
                                           f1tenth_stack ackermann_mux ──────────┴─→ VESC
 ```
-(두 컨트롤러 노드는 항상 나란히 구동 — 기본은 MAP, RB로 MPPI 즉시 전환.
- 실차 수동/자율/E-stop은 f1tenth_stack 담당, 우리 셀렉터는 MAP/MPPI 선택만)
+(시뮬 기준 두 컨트롤러 노드는 나란히 구동 — 기본은 MAP, RB로 MPPI 즉시 전환.
+ 수동/자율/E-stop Mux(teleop)는 이 저장소에 없음 — 실차 f1tenth_stack 담당)
 
 ```mermaid
 graph TD
@@ -357,9 +317,9 @@ $$\delta \mathrel{+}= k_{\dot\psi} \cdot \left(\frac{v \tan\delta}{L} - \dot\psi
 
 | 파라미터 | 기본값 | 설명 |
 |---|---|---|
-| `max_speed` | **5.0**(real) / 12.0(sim) | 직선 최고속도 캡 [m/s]. 곡률 제한은 코너에서만 걸리므로 직선 상한은 이 값이 유일하다. control_mppi_node의 `v_max`로도 전달됨. real 5.0은 셰이크다운 캡 |
+| `max_speed` | **8.0**(real) / 12.0(sim) | 직선 최고속도 캡 [m/s]. 곡률 제한은 코너에서만 걸리므로 직선 상한은 이 값이 유일하다. control_mppi_node의 `v_max`로도 전달됨. real 8.0 = ERPM 상한(바퀴 ~9 m/s)의 89% (2026-07-30 5.0→8.0 상향) |
 | `min_speed` | **1.0** (real·sim 공통) | 최저 순항 속도 [m/s] (곡률 감속 하한). ⚠️ 장애물 정지 경로는 이 하한을 무시하고 0까지 내려감(안전 우선). ⚠️ 이 값이 조향 권한 캡보다 높으면 캡이 무력화된다(②-b) |
-| `max_lateral_accel` | **5.1**(real) / 10.0(sim) | 코너 그립 클램프 a_lat [m/s²]. real 5.1은 실측 마찰한계(~3.1) 반영해 보수화. sim은 랩타임 튜닝 기준 유지차 10.0 낙관치 그대로 |
+| `max_lateral_accel` | **6.0**(real) / 10.0(sim) | 코너 그립 클램프 a_lat [m/s²]. real 6.0은 LUT 그립 피크(~6.7) 이내이나 구 실측 마찰한계(~3.1)보다 낙관 (2026-07-30 5.1→6.0 상향). sim은 랩타임 튜닝 기준 유지차 10.0 낙관치 그대로 |
 | `base_max_accel` | **2.5**(real) / 9.0(sim) | 종방향 가속 rate limit [m/s²]. ⚠️ `_control_common.py`가 아니라 **각 진입점 런치**의 인자 |
 | `yaw_rate_gain` | **0.00** | 요레이트 카운터스티어 게인. 0 = 비활성 — 검증 데이터 부재(위 "요레이트 피드백" 참고) |
 | `use_imu` | true | IMU 보정 on/off (요레이트 카운터스티어 + 조향 스케일러용 종가속). 조향 채터링 시 false로 순수 L1+LUT 회귀 |
@@ -388,7 +348,7 @@ $$\delta \mathrel{+}= k_{\dot\psi} \cdot \left(\frac{v \tan\delta}{L} - \dot\psi
 | `launch_boost_speed` / `launch_boost_time` | 2.2 / 0.6 | 펀치 속도 명령 [m/s] / 포기까지 최대 시간 [s] (`stall_hold_delay`보다 작아야 함) |
 | `launch_exit_speed` / `launch_standstill_speed` | 0.8 / 0.3 | 관통 성공 판정 속도 / 정지 판정 속도 [m/s] (히스테리시스) |
 | `base_max_decel` | 8.0 | **명령 속도 하강 rate limit** [m/s²]. 낮추면 감속 명령이 늦게 도달 → 높게 유지 (②-a) |
-| `prebrake_decel` | **1.0** | **곡률 사전감속 제동거리 산출용 실측 감속 권한** [m/s²]. 낮을수록 코너를 일찍 봄. 실측 ~0.4라 1.0도 아직 낙관 (②-a) |
+| `prebrake_decel` | **2.5** | **곡률 사전감속 제동거리 산출용 감속 권한** [m/s²]. 낮을수록 코너를 일찍 봄. 2026-07-30 1.0→2.5 상향(고속 세팅) — 실측 coast ~0.4 대비 상당한 낙관치라, 코너 진입 언더스티어 시 **가장 먼저 되돌릴 값** (②-a) |
 | `curvature_lookahead_count` | **80** | 곡률 룩어헤드 스캔 거리 하한 (×0.1m → **8m**) |
 | `understeer_gradient` | **0.0** | **조향 권한 속도 캡**의 K_us [rad/(m/s²)]. **0 = 캡 비활성**(현재 기본). bag 회귀 실측치는 0.019 — 켤 때 쓸 값. ②-b 참고 |
 | `steer_authority_ratio` | 0.85 | δ_max 중 곡률 추종에 배정할 비율. 나머지는 횡오차·요레이트 보정 여유 |
@@ -412,7 +372,7 @@ $$\delta \mathrel{+}= k_{\dot\psi} \cdot \left(\frac{v \tan\delta}{L} - \dot\psi
 | 파라미터 | 의미 | 쓰이는 곳 | 방향 |
 |---|---|---|---|
 | `base_max_decel`(8.0) | 명령 속도를 초당 얼마나 빨리 떨어뜨릴 수 있나 (램프 rate limit) | control_loop 8 | **높게** 유지 — 낮추면 감속 명령이 늦게 도달 |
-| `prebrake_decel`(1.0) | 차가 **실제로 낼 수 있는** 감속도 (제동거리 `v²/2a`) | control_loop 1.5 (룩어헤드 거리 + backward-pass `v_reach`) | **실측값**에 맞춤 — 낮을수록 코너를 멀리서 보고 일찍 감속 |
+| `prebrake_decel`(2.5) | 차가 **실제로 낼 수 있는** 감속도 (제동거리 `v²/2a`) | control_loop 1.5 (룩어헤드 거리 + backward-pass `v_reach`) | **실측값**에 맞춤 — 낮을수록 코너를 멀리서 보고 일찍 감속 |
 
 ⚠️ `prebrake_decel`에 8.0(구 동작)을 쓰면 4 m/s에서 제동거리를 1.0m로 착각한다. 07-25 실차 bag
 실측 감속은 **-0.4 m/s²**(명령 4.00→3.11로 내렸는데 실속 4.03→3.80, 주행 중
@@ -631,8 +591,8 @@ zsh 단어 분할로 인한 파라미터 무시, A/B 전 산포 측정 누락 �
     이제 odom은 자이로 실측을 쓰므로(위 "젯슨 odom" 참고) 그 결합이 끊겼다.
     다만 **링키지가 실제로 그 각까지 가는지**는 여전히 미검증이라 재시도 전 각도기 실측 필요.
 - 시뮬/실차 런치파일 공통 로직은 `launch/_control_common.py`에 있음 — 공통 파라미터 추가/변경
-  시 여기 한 곳만 고치면 됨. 단 조이스틱 드라이버·`sim_imu_bridge_node` 포함 여부 같은
-  안전 관련 구조 차이는 일부러 공용화하지 않고 각 진입점 파일(`control_sim/real.launch.py`)에
-  그대로 둠(환경을 잘못 골라 안전기능이 빠진 채 기동되는 실수를 구조적으로 차단하기 위함)
+  시 여기 한 곳만 고치면 됨. 단 `sim_imu_bridge_node` 포함 여부 같은 안전 관련 구조 차이는
+  일부러 공용화하지 않고 각 진입점 파일(`control_sim/real.launch.py`)에 그대로 둠
+  (환경을 잘못 골라 안전기능이 빠진 채 기동되는 실수를 구조적으로 차단하기 위함)
 - `~/2026_IFAC` 사본이 repo보다 앞서있을 수 있음 — `f1up` 전 반드시 diff 확인, 일괄
   덮어쓰기로 팀원 최신 변경을 지우지 말 것(위 워크스페이스 구조 참고)

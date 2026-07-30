@@ -25,11 +25,10 @@ IMU_LINEAR_SCALE_SIM  = 1.0          # sim_imu_bridge_node는 0 고정
 def declare_common_args():
     """두 런치파일에서 동일하게 쓰는 인자 선언 목록."""
     return [
-        DeclareLaunchArgument(
-            'force_autonomous',
-            default_value='false',
-            description='true 시 조이스틱 없이 자율주행 모드 즉시 기동'
-        ),
+        # ⚠️ force_autonomous·speed_to_erpm_gain 인자는 teleop 제거(2026-07-29)와 함께 폐지됐다 —
+        #    유일한 소비처가 joy_teleop_monitor였다. 시뮬은 drive_source_selector가 자율 명령을
+        #    /drive로 직결하므로 기동 즉시 자율주행이고, ERPM 표시는 realcar_dashboard_node의
+        #    자체 파라미터 기본값(4232.0)을 쓴다.
         # 요레이트 카운터스티어 게인. 시뮬 스윕(0.0/0.08/0.15): 랩타임은 게인 무관, 0.15부터
         # 조향 채터링이 뚜렷(부호전환 0→3.32/s). 실차 오버스티어 검증 데이터가 없어 현재 0.
         DeclareLaunchArgument(
@@ -186,9 +185,11 @@ def declare_common_args():
             'base_max_decel', default_value='8.0',
             description='명령 속도 하강 rate limit [m/s^2]. 낮추면 감속 명령이 늦게 도달하므로 높게 유지'
         ),
+        # ⚠️ 2026-07-30 1.0→2.5 상향(사용자 결정, 고속 주행 세팅). 실측 coast(-0.4)보다 제동거리를
+        #    낙관적으로 보므로, 코너 진입이 늦게 느껴지면(언더스티어) 가장 먼저 되돌릴 값이다.
         DeclareLaunchArgument(
-            'prebrake_decel', default_value='1.0',
-            description='곡률 사전감속 제동거리 산출용 실측 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
+            'prebrake_decel', default_value='2.5',
+            description='곡률 사전감속 제동거리 산출용 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
         ),
         # ── 조향 권한 속도 캡 ──
         # 곡률 캡이 그립만 보던 구멍을 메운다. 그립("타이어가 그 횡가속을 낼 수 있나")과
@@ -427,16 +428,6 @@ def declare_common_args():
             description='MPPI 종가속 상한 [m/s^2] '
                         '(control_map_node의 base_max_accel과 정렬 — 기준궤적 램프 속도도 이 값을 쓴다)'
         ),
-
-        # ── VESC 속도→ERPM 변환 게인 (시뮬 대시보드 RPM 표시 전용) ──
-        # ⚠️ 이 저장소는 ackermann_to_vesc_node를 띄우지 않으므로(f1tenth_stack 담당) 이 값은
-        #    표시용일 뿐이다. 실제 변환 게인은 젯슨 vesc.yaml에 있고, 표시가 맞으려면 같아야 한다.
-        # 4232.0은 07-28 라이다 대조로 재검증됨(오차 ±0.3%). ⚠️ 줄자로는 재지 말 것 —
-        # 같은 차에서 -5.6%/-19.0%로 갈렸다(tools/odom_diag/lidar_odom_calib.py 사용).
-        DeclareLaunchArgument(
-            'speed_to_erpm_gain', default_value='4232.0',
-            description='속도[m/s]→VESC ERPM 변환 게인 (표시 전용 — 젯슨 vesc.yaml과 같은 값이어야 함)'
-        ),
     ]
 
 
@@ -575,34 +566,6 @@ def build_control_mppi_node(*, odom_topic, max_speed, remappings=None):
         }]
     )
 
-
-def build_joy_teleop_monitor():
-    """joy_teleop_monitor — 시뮬 전용(실차 런치에서는 제외).
-    실차는 f1tenth_stack의 drive_mode_manager + ackermann_mux가 Mux를 담당하므로 이 노드를
-    띄우면 /drive가 이중 발행되어 충돌한다. 시뮬엔 f1tenth_stack이 없어 이 노드가 전체
-    Mux(수동/자율/MAP·MPPI/E-stop) 역할을 한다.
-
-    버튼/축·스케일은 실차 drive_mode_manager와 일치시킨다(A=자율/B=정지/X=수동, 좌스틱세로=속도/
-    우스틱가로=조향) — 시뮬↔실차 조작감을 같게 해 근육기억을 전이시키기 위함.
-    ⚠️ 'is_simulation': True는 의도적으로 고정한 값이다 — 항상 MANUAL로 시작.
-       실차 안전 차단이 필요해졌다고 임의로 false로 되돌리지 말 것."""
-    return Node(
-        package='f1tenth_control',
-        executable='joy_teleop_monitor',
-        name='joy_teleop_monitor',
-        output='screen',
-        parameters=[{
-            'is_simulation': True,
-            'force_autonomous': LaunchConfiguration('force_autonomous'),
-            'max_speed': 5.0,             # drive_mode_manager speed_scale와 정렬
-            'max_steering_angle': 0.34,   # drive_mode_manager steering_scale와 정렬
-            'use_trigger_throttle': False,
-            'steering_axis': 3,           # 우스틱 가로
-            'throttle_axis': 1,           # 좌스틱 세로
-            'autonomous_button': 0,       # A
-            'emergency_button': 1,        # B
-            'manual_button': 2,           # X
-            'algorithm_button': 5,        # RB (MAP/MPPI)
-            'speed_to_erpm_gain': LaunchConfiguration('speed_to_erpm_gain'),
-        }]
-    )
+# ⚠️ build_joy_teleop_monitor()는 teleop 제거(2026-07-29)와 함께 삭제됐다. 수동/자율/E-stop
+#    Mux는 이 저장소 담당이 아니다 — 실차는 f1tenth_stack(drive_mode_manager + ackermann_mux),
+#    시뮬은 Mux 없이 drive_source_selector가 자율 명령을 /drive로 직결한다.

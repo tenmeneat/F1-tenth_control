@@ -36,12 +36,14 @@ def generate_launch_description():
         description='실차 위치추정 odom 토픽 (파티클필터/EKF)'
     )
 
-    # 직선 최대 속도 [m/s] — 첫 실주행 셰이크다운 캡. 안정성 확인 후 단계적으로 상향.
-    # ⚠️ 하드웨어 ERPM(40000) 상한 = 바퀴 ~9 m/s. 7.0은 그 약 78% 수준.
+    # 직선 최대 속도 [m/s] — 2026-07-30 5.0→8.0 상향(사용자 결정, 고속 주행 세팅).
+    # ⚠️ 하드웨어 ERPM(40000) 상한 = 바퀴 ~9 m/s. 8.0은 그 약 89% 수준 — 여유가 작으므로
+    #    직선 끝 제동 여력과 프로파일 vx가 실제 상한을 결정한다.
+    # ⚠️ base_max_accel이 2.5로 묶여 있어(아래) 짧은 직선에서는 8.0에 도달하지 못할 수 있다.
     max_speed_arg = DeclareLaunchArgument(
         'max_speed',
-        default_value='5.0',
-        description='control_map_node 직선 최대 속도 [m/s] (실차 보수 캡)'
+        default_value='8.0',
+        description='control_map_node 직선 최대 속도 [m/s]'
     )
 
     # max_lateral_accel = backward-pass 사전감속 그립 클램프 min(프로파일 vx, sqrt(a_lat/kappa)).
@@ -49,9 +51,11 @@ def generate_launch_description():
     # 실 타이어 그립을 초과하지 않도록. 프로파일을 공격적으로 재생성해 코너속도가 sqrt(6.5/kappa)를
     # 넘으면 backward-pass가 여기서 클램프한다. 실그립 매칭 프로파일+저속 셰이크다운 후, 여유가
     # 확인되면 상향 가능(sim 런치는 여전히 낙관치 10.0 — 랩타임 튜닝 기준 유지).
+    # 2026-07-30 5.1→6.0 상향(사용자 결정) — LUT 실 그립 피크(~6.7) 이내이나 구 실측
+    # 마찰한계(~3.1 m/s²)보다는 낙관치. 코너 슬라이드/언더스티어 시 다시 낮출 것.
     max_lateral_accel_arg = DeclareLaunchArgument(
-        'max_lateral_accel', default_value='5.1',
-        description='코너 그립 클램프 a_lat [m/s^2] (실차 실측 마찰한계 ~3.1 m/s² 반영)'
+        'max_lateral_accel', default_value='6.0',
+        description='코너 그립 클램프 a_lat [m/s^2] (LUT 그립 피크 ~6.7 이내)'
     )
 
     # ── 좌우 조향 한계 (2026-07-28, 실차 전용) ──

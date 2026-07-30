@@ -7,14 +7,12 @@ from launch.conditions import LaunchConfigurationEquals
 
 def generate_launch_description():
     # ==========================================================================
-    # 대시보드 뷰어 단독 런치 (별도 터미널에서 실행) — sim / real 두 모드
+    # 대시보드 뷰어 단독 런치 (별도 터미널에서 실행) — real / calib 두 모드
     # ==========================================================================
-    # mode:=sim (기본) — 시뮬용. joy_teleop_monitor가 발행하는 완성된
-    #   /teleop_dashboard(std_msgs/String)를 그대로 그리는 뷰어(teleop_dashboard_node).
-    #   전제: control_sim.launch.py(=joy_teleop_monitor 포함)가 실행 중이어야 함.
+    # (구 mode:=sim 뷰어(teleop_dashboard_node)는 teleop 제거(2026-07-29)와 함께 삭제됨 —
+    #  teleop Mux는 이 저장소 담당이 아니다.)
     #
-    # mode:=real — 실차(젯슨) 원격 모니터링. 실차엔 joy_teleop_monitor가 없어
-    #   /teleop_dashboard가 없으므로, realcar_dashboard_node가 젯슨의 원시 토픽
+    # mode:=real (기본) — 실차(젯슨) 원격 모니터링. realcar_dashboard_node가 젯슨의 원시 토픽
     #   (/drive_mode, /mppi_active, /drive, odom, /joy)을 직접 구독해 "우리 컴에서"
     #   조립·렌더링한다 → 젯슨 렌더 연산 0.
     #
@@ -34,28 +32,17 @@ def generate_launch_description():
     #   세 거리를 동시 적분해 어느 게인이 틀렸는지 분리해준다. 자세한 절차/주의는 노드 헤더 참고.
     #
     # 사용(우리 컴, 별도 터미널):
-    #   ros2 launch f1tenth_control dashboard.launch.py                 # 시뮬
-    #   ros2 launch f1tenth_control dashboard.launch.py mode:=real       # 실차 원격
-    #   ros2 launch f1tenth_control dashboard.launch.py mode:=real odom_topic:=/pf/pose/odom
+    #   ros2 launch f1tenth_control dashboard.launch.py                  # 실차 원격(기본)
+    #   ros2 launch f1tenth_control dashboard.launch.py odom_topic:=/pf/pose/odom
     #   ros2 launch f1tenth_control dashboard.launch.py mode:=calib      # odom 거리 보정
 
     mode_arg = DeclareLaunchArgument(
-        'mode', default_value='sim',
-        description="sim=완성문자열 뷰어(/teleop_dashboard), real=젯슨 원시토픽 원격 대시보드, "
-                    "calib=odom 거리 스케일 보정"
+        'mode', default_value='real',
+        description="real=젯슨 원시토픽 원격 대시보드, calib=odom 거리 스케일 보정"
     )
     odom_topic_arg = DeclareLaunchArgument(
         'odom_topic', default_value='/pf/pose/odom',
         description='real 모드 실측 속도 odom 토픽 (실차 파티클필터)'
-    )
-
-    # sim: 기존 문자열 뷰어
-    sim_viewer = Node(
-        package='f1tenth_control',
-        executable='teleop_dashboard_node',
-        name='teleop_dashboard_node',
-        output='screen',
-        condition=LaunchConfigurationEquals('mode', 'sim'),
     )
 
     # real: 젯슨 원시토픽을 로컬에서 조립·렌더링 (DDS 연결은 ROS_DISCOVERY_SERVER env로, 위 참고)
@@ -81,7 +68,6 @@ def generate_launch_description():
     return LaunchDescription([
         mode_arg,
         odom_topic_arg,
-        sim_viewer,
         real_viewer,
         calib_viewer,
     ])

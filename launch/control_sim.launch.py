@@ -4,21 +4,16 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 import _control_common as common
 
 
 def generate_launch_description():
-    # 실차용 joy.launch.py(제거됨)와 달리, 시뮬은 편의상 joy_node를 여기 함께 번들한다
-    # (device_id로 장치 선택). force_autonomous:=false로 켜서 조이스틱 수동 개입/오버라이드를
-    # 시험하고 싶을 때 이 파일 하나로 끝나게 하기 위함(ifac_sim 등 일괄 실행 스크립트 연계).
-    device_id_arg = DeclareLaunchArgument(
-        'device_id',
-        default_value='0',
-        description='조이스틱 디바이스 번호 (/dev/input/js<device_id>)'
-    )
+    # teleop(조이스틱 수동/자율/E-stop Mux)은 이 저장소 담당이 아니다(2026-07-29 제거) —
+    # 실차는 f1tenth_stack(drive_mode_manager + ackermann_mux), 시뮬은 Mux 없이
+    # drive_source_selector가 자율 명령(/drive_autonomous 또는 /drive_mppi)을 /drive로
+    # 직결한다. 기동 즉시 자율주행이며 별도 인자가 필요 없다(구 force_autonomous 폐지).
 
     # 종방향 최대 가속도 한계 [m/s^2] — real과 값이 갈릴 수 있어 진입점 파일에 각자 둔다.
     # 공격적 속도 프로파일(fuck_f1 재생성분)을 직선에서 놓치지 않도록 상향된 값(폐루프 6.97s
@@ -81,30 +76,24 @@ def generate_launch_description():
         }]
     )
 
-    joy_teleop_monitor = common.build_joy_teleop_monitor()
-
-    # 시뮬 전용 joy_node 번들 — 실차는 f1tenth_stack이 별도로 띄우므로 여기 없음.
-    joy_node = Node(
-        package='joy',
-        executable='joy_node',
-        name='joy_node',
+    # MAP/MPPI 슬림 셀렉터 — 자율 명령을 /drive로 포워딩(gym_bridge가 구독).
+    # 시뮬엔 /joy 발행자가 없으므로 항상 기본 알고리즘 [MAP]로 동작한다. MPPI를 시험하려면
+    # /joy를 발행하는 조이스틱 드라이버를 따로 띄워 RB(5)로 전환하면 된다(teleop 아님 — 셀렉터는
+    # 수동 조종/E-stop 기능이 없다).
+    drive_source_selector = Node(
+        package='f1tenth_control',
+        executable='drive_source_selector',
+        name='drive_source_selector',
         output='screen',
-        parameters=[{
-            'device_id': ParameterValue(LaunchConfiguration('device_id'), value_type=int),
-            'deadzone': 0.05,
-            'autorepeat_rate': 20.0,   # 트리거를 계속 당기고 있어도 /joy·/drive 명령 지속되게 재발행
-        }]
     )
 
     return LaunchDescription([
         *common.declare_common_args(),
-        device_id_arg,
         base_max_accel_arg,
         max_lateral_accel_arg,
         max_speed_arg,
         sim_imu_bridge,
         steering_control,
         mppi_control,
-        joy_teleop_monitor,
-        joy_node,
+        drive_source_selector,
     ])
