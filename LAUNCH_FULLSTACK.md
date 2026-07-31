@@ -35,11 +35,30 @@
 
 ## 1. 지도 만들기 / 옮기기 (새 트랙일 때만)
 
-### 매핑 (젯슨, f110 bringup이 떠 있는 상태에서)
+### 매핑 (**랩탑**에서 실행. 젯슨은 f110 bringup만 떠 있으면 됨)
 ```bash
 cd ~/slam_toolbox && source /opt/ros/jazzy/setup.zsh && source install/setup.zsh
-ros2 launch slam_toolbox online_async_launch.py use_sim_time:=false
+ros2 launch slam_toolbox online_async_launch.py use_sim_time:=false \
+  slam_params_file:=$HOME/F1tenth_control/tools/odom_diag/slam_toolbox_params.yaml
 ```
+
+⚠️ **`slam_params_file`을 꼭 넘길 것.** 안 주면 slam_toolbox 패키지 기본값이 쓰이는데
+`map_update_interval: 5.0`이라 `/map`이 5초에 한 번만 나온다 — 짧게 돌리면 맵이 거의
+안 그려져서 "안 되는 것처럼" 보인다(2026-07-31 실제로 헷갈렸던 지점).
+우리 파일은 트랙(46.9 m)에 맞춰 조정돼 있다:
+`map_update_interval 1.0` / `minimum_travel_distance 0.3` / `minimum_travel_heading 0.2` /
+`max_laser_range 10.0`(UST-10LX 실사용 범위 — 트랙 밖 잡동사니로 스캔매칭이 흔들리는 것 방지).
+
+ℹ️ 로그의 `Message Filter dropping message ... queue is full`은 **정상**이다.
+스캔은 40 Hz로 들어오는데 `minimum_time_interval: 0.5`라 slam은 2 Hz만 쓴다 — 나머지가
+버려지면서 찍히는 INFO다. 진짜로 TF가 없으면 `Registering sensor`가 아예 안 뜬다.
+
+매핑 요령:
+- **천천히**(0.5~1 m/s) 밀 것. 2 m/s면 처리 스캔 간격이 1 m라 스캔매칭이 성겨진다
+- 한 바퀴 이상 돌 것 (10초로는 아무것도 안 나온다)
+- **중간에 몇 초씩 정지** — odom 헤딩이 자이로 순수 적분이고 바이어스는 정지 중에만
+  학습된다(τ=10 s). 계속 굴러다니면 갱신이 안 돼 10분에 ~19°까지 쌓인다
+- 진행 확인: `ros2 topic hz /map` / `ros2 run tf2_ros tf2_echo map odom`
 
 ### 저장 (다른 터미널)
 ```bash
