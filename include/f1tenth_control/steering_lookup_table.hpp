@@ -100,45 +100,75 @@ public:
         return true;
     }
 
-    double lookup_steer_angle(double accel, double vel) {
+    // (횡가속도, 속도) → 조향각.
+    //
+    // ⚠️ 2026-07-30: 속도축을 **최근접 열 하나**로 고르던 것을 인접 두 열 선형보간으로 바꿨다.
+    //    속도축 간격이 0.1016 m/s라 최근접 방식은 순항 중 속도가 열 경계를 넘을 때마다 조향각이
+    //    계단으로 튄다(50Hz에서 경계 근처를 오가면 그대로 채터링). 그립 포화 조향각이 속도에
+    //    민감한 고속(v=6.19 → 0.121 rad, v=7.0 → 0.100 rad)에서 특히 크다.
+    //
+    // saturated(옵션): 요청 횡가속도가 그 속도의 **그립 피크를 넘어** 조향각이 saturate됐는지.
+    //   포화 중에는 입력이 얼마나 커도 출력이 같아서 조향 피드백이 사실상 개루프가 되므로,
+    //   호출부에서 진단 로그를 띄우는 데 쓴다(제어 개입은 아님).
+    double lookup_steer_angle(double accel, double vel, bool* saturated = nullptr) {
+        if (saturated) *saturated = false;
         if (!is_loaded_ || lu_vs_.empty()) return 0.0;
 
         double sign_accel = (accel > 0.0) ? 1.0 : -1.0;
         accel = std::abs(accel);
 
-        // find closest velocity column index c_v_idx
-        auto [c_v, c_v_idx] = find_nearest(lu_vs_, vel);
-        (void)c_v;
+        // 속도축 범위 밖은 끝 열로 클램프한다. ⚠️ 축 상한은 7.0 m/s이므로 그보다 빠르면
+        //    이 클램프가 걸린다 — 호출부(control_map_node)가 자전거모델로 초과분을 보정한다.
+        const double v_lo = lu_vs_.front(), v_hi = lu_vs_.back();
+        const double vc = std::clamp(vel, std::min(v_lo, v_hi), std::max(v_lo, v_hi));
 
-        // 해당 속도 열의 "그립 내 단조 구간"(load() 사전계산). 비어 있으면 유효한
-        // 조향 해가 없는 열이므로 조향축 첫 값으로 떨어진다(기존 동작 유지).
-        const std::vector<double>& col_accel = cols_[c_v_idx];
-        if (col_accel.empty()) {
-            return lu_steers_.empty() ? 0.0 : lu_steers_[0] * sign_accel;
+        // 브래키팅 두 열 찾기(축은 오름차순 균일이지만 방어적으로 탐색).
+        size_t j1 = lu_vs_.size() - 1;
+        for (size_t j = 0; j < lu_vs_.size(); ++j) {
+            if (lu_vs_[j] >= vc) { j1 = j; break; }
         }
+        const size_t j0 = (j1 == 0) ? 0 : (j1 - 1);
 
-        // Find two closest accelerations to target accel
-        auto neighbors = find_closest_neighbors(col_accel, accel);
-        double steer_angle = 0.0;
+        bool sat0 = false, sat1 = false;
+        const double s0 = column_lookup(j0, accel, sat0);
+        const double s1 = column_lookup(j1, accel, sat1);
+        if (saturated) *saturated = (sat0 || sat1);
 
-        if (neighbors.c_a_idx == neighbors.s_a_idx) {
-            steer_angle = lu_steers_[neighbors.c_a_idx];
-        } else {
-            // Linear interpolation between the two closest accelerations
-            double c_steer = lu_steers_[neighbors.c_a_idx];
-            double s_steer = lu_steers_[neighbors.s_a_idx];
-            double denom = neighbors.s_a - neighbors.c_a;
-            if (std::abs(denom) > 1e-6) {
-                steer_angle = c_steer + (accel - neighbors.c_a) / denom * (s_steer - c_steer);
-            } else {
-                steer_angle = c_steer;
-            }
+        double steer_angle = s0;
+        const double v_span = lu_vs_[j1] - lu_vs_[j0];
+        if (std::abs(v_span) > 1e-9) {
+            const double t = std::clamp((vc - lu_vs_[j0]) / v_span, 0.0, 1.0);
+            steer_angle = s0 + t * (s1 - s0);
         }
 
         return steer_angle * sign_accel;
     }
 
+    // 속도축 상한 [m/s] — 호출부가 축 범위 초과를 알고 보정할 수 있게 노출.
+    double max_velocity() const { return lu_vs_.empty() ? 0.0 : lu_vs_.back(); }
+
 private:
+    // 단일 속도 열(그립 내 단조 구간) 안에서 |accel| → 조향각 보간. 요청이 그 열의 그립
+    // 피크를 넘으면 피크 조향각으로 saturate하고 sat=true를 돌려준다.
+    double column_lookup(size_t j, double accel, bool& sat) const {
+        sat = false;
+        // 유효한 조향 해가 없는 열이면 조향축 첫 값으로 떨어진다(기존 동작 유지).
+        const std::vector<double>& col_accel = cols_[j];
+        if (col_accel.empty()) return lu_steers_.empty() ? 0.0 : lu_steers_[0];
+
+        if (accel >= col_accel.back()) sat = true;
+
+        auto neighbors = find_closest_neighbors(col_accel, accel);
+        if (neighbors.c_a_idx == neighbors.s_a_idx) return lu_steers_[neighbors.c_a_idx];
+
+        // 두 최근접 횡가속도 사이 선형보간
+        const double c_steer = lu_steers_[neighbors.c_a_idx];
+        const double s_steer = lu_steers_[neighbors.s_a_idx];
+        const double denom = neighbors.s_a - neighbors.c_a;
+        if (std::abs(denom) <= 1e-6) return c_steer;
+        return c_steer + (accel - neighbors.c_a) / denom * (s_steer - c_steer);
+    }
+
     struct NeighborResult {
         double c_a; size_t c_a_idx;
         double s_a; size_t s_a_idx;

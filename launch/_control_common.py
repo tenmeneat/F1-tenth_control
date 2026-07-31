@@ -72,9 +72,17 @@ def declare_common_args():
         # 속도를 recovery_speed로 낮춰 라인 복귀를 우선한다. 0이면 비활성.
         # ⚠️ 트랙 반폭보다 조금 크게 잡을 것 — 넓은 트랙에서 회피/추월 라인이 글로벌 대비
         #    이 값 넘게 벌어지면 정상 주행 중에 가드가 걸려 불필요하게 감속한다.
+        # ⚠️ 2026-07-30: 0.0(비활성) → 1.2로 켰다. 이 가드가 막는 limit cycle(호 길이로 고른
+        #    목표점의 직선거리가 L1보다 짧아져 요구 선회반경이 최소 선회반경보다 작아지고,
+        #    목표점 주위를 계속 도는 상태 — 시뮬에서 헤딩 360° 연속 회전으로 재현됨)이
+        #    그동안 무방비였다. 같은 시기에 lat_err_scale(항상 1.0이던 죽은 감쇠)을 제거했으므로,
+        #    이제 큰 횡오차 상황의 보호는 이 가드 + heading 오차 감속 둘뿐이다.
+        #    값 근거: ifac_track_v2의 d_left/d_right = 0.6 → 트랙 반폭 0.6m. 1.2 = 그 2배로,
+        #    이미 트랙을 벗어난 상태에서만 발동한다(회피/추월 라인 오차로는 안 걸림).
         DeclareLaunchArgument(
-            'recovery_lat_error', default_value='0.0',
-            description='경로 이탈 복구 가드 발동 횡오차 [m] (0=비활성). 트랙 반폭보다 크게 잡을 것'
+            'recovery_lat_error', default_value='1.2',
+            description='경로 이탈 복구 가드 발동 횡오차 [m] (0=비활성). 트랙 반폭(0.6)의 2배 = '
+                        '트랙을 실제로 벗어났을 때만 발동'
         ),
         DeclareLaunchArgument(
             'recovery_speed', default_value='2.0',
@@ -157,14 +165,19 @@ def declare_common_args():
         ),
 
         # ── L1 Guidance 룩어헤드 거리 ──
-        # 공식: L1 = clamp(l1_gain + v*l1_distance, max(t_clip_min, sqrt2*lat_err), t_clip_max)
+        # 공식: L1 = clamp(l1_offset + v*l1_speed_gain, max(t_clip_min, sqrt2*lat_err), t_clip_max)
+        # ⚠️ 2026-07-30 개명: l1_gain → l1_offset, l1_distance → l1_speed_gain.
+        #    구 이름이 역할과 정반대였다(gain이 절편, distance가 기울기). 구 이름을 명령줄에
+        #    넘기면 노드가 경고와 함께 여전히 받아주지만(호환 shim), 새 이름을 쓸 것.
         DeclareLaunchArgument(
-            'l1_gain', default_value='0.5',
-            description='L1 룩어헤드 거리 베이스 오프셋 [m] (공식: l1_gain + v*l1_distance)'
+            'l1_offset', default_value='0.5',
+            description='L1 룩어헤드 거리의 **절편** [m] (공식: l1_offset + v*l1_speed_gain). '
+                        '구 이름 l1_gain'
         ),
         DeclareLaunchArgument(
-            'l1_distance', default_value='0.3',
-            description='L1 룩어헤드 거리 속도 게인 [s] (공식: l1_gain + v*l1_distance)'
+            'l1_speed_gain', default_value='0.3',
+            description='L1 룩어헤드 거리의 **속도 계수** [s] (공식: l1_offset + v*l1_speed_gain). '
+                        '구 이름 l1_distance'
         ),
         DeclareLaunchArgument(
             't_clip_min', default_value='0.6',
@@ -174,6 +187,50 @@ def declare_common_args():
         DeclareLaunchArgument(
             't_clip_max', default_value='5.0',
             description='L1 룩어헤드 거리 상한 [m]'
+        ),
+        # ⚠️ 예전엔 t_clip_min을 횡가속 분모 하한으로 재사용했다 — t_clip_min은 룩어헤드
+        #    튜닝 노브라, 낮추면 조용히 횡가속 명령 상한이 올라갔다(0.6이면 6 m/s에서
+        #    최대 lat_acc 120 m/s²). 수치 발산 방지용 하한은 별도 파라미터로 분리했다.
+        DeclareLaunchArgument(
+            'l1_min_denom', default_value='0.6',
+            description='L1 횡가속 분모 하한 [m] (목표점이 차량에 붙었을 때 발산 방지). '
+                        't_clip_min과 무관하게 튜닝'
+        ),
+
+        # ── 조향 체인 (2026-07-30 신설) ──
+        # 명령각 중 바퀴가 실제로 내는 비율. 0.41 명령 → 실측 ~0.30(74%, 07-28 3회 재현,
+        # 횡가속 1.09 m/s²라 슬립으론 설명 불가 = 기계적).
+        # ⚠️ 이 값 하나가 두 곳을 지배한다: 조향 명령 보상(×1/ratio)과 조향 권한 속도 캡의
+        #    δ_avail(×ratio). 예전엔 전자가 `clamp(1+v/10,1,1.4)` 하드코딩(≈1/0.74지만 속도
+        #    램프 모양), 후자는 보상을 아예 모르는 상태로 어긋나 있었다.
+        # 1.0 = 보상·캡 모두 구 낙관 거동. 각도기 실측 후 조정할 값.
+        DeclareLaunchArgument(
+            'steering_reach_ratio', default_value='0.74',
+            description='명령 조향각 중 바퀴가 실제 도달하는 비율. 보상(1/ratio)과 조향권한 캡을 '
+                        '동시 지배. 1.0이면 보상 없음(구 낙관 거동)'
+        ),
+        # 50Hz에서 20 rad/s = 사이클당 0.4 rad = 풀락까지 2 사이클 = 구 하드코딩과 동일(무제한).
+        # 서보 물리 속도(~7 rad/s 추정)로 낮추면 고주파 채터링을 막지만 실측 전이라 중립 유지.
+        DeclareLaunchArgument(
+            'max_steering_rate', default_value='20.0',
+            description='조향 rate limit [rad/s] (dt 비례). 20.0 = 구 거동(사이클당 0.4rad)'
+        ),
+        # 가감속 조향 스케일러가 완전히 적용되는 기준 |종가속| [m/s²]. 예전엔 ±1.0 하드 임계라
+        # 넘는 순간 조향이 5% 계단 점프했고, 실측 coast 감속 −0.4에선 감속측이 급제동
+        # 스파이크에서만 드물게 튀었다. 0~ref 선형 블렌딩으로 바꿨다(ref 이상은 구 거동).
+        DeclareLaunchArgument(
+            'steering_scaler_accel_ref', default_value='1.0',
+            description='가감속 조향 스케일러 완전 적용 기준 |a_x| [m/s²] (0~이 값 선형 블렌딩)'
+        ),
+
+        # ── odom 워치독 (2026-07-30 신설) ──
+        # /local_waypoints·/drive_mode·장애물엔 다 있던 신선도 검사가 odom만 없었다. 위치추정이
+        # 죽으면 pose·속도가 stale로 얼고 램프는 계속 감기며 노드는 정상처럼 발행한다.
+        # 0이면 비활성. NaN pose(MCL 붕괴)도 같은 경로로 안전 정지.
+        DeclareLaunchArgument(
+            'odom_timeout', default_value='0.5',
+            description='odom 신선도 타임아웃 [s]. 초과 시 안전 정지(0=비활성). '
+                        '미수신 상태에서는 아예 출발하지 않음'
         ),
 
         # ── 종방향 감속: 두 개의 서로 다른 감속도 (튜닝 방향이 정반대라 분리했다) ──
@@ -211,7 +268,7 @@ def declare_common_args():
             description='곡률 룩어헤드 스캔 거리 하한 (×0.1m). 80 = 8m'
         ),
         DeclareLaunchArgument(
-            'min_speed', default_value='1.0',
+            'min_speed', default_value='2.0',
             description='최저 순항 속도 [m/s] (곡률 감속 하한). 장애물 정지엔 미적용(0까지 허용)'
         ),
 
@@ -305,7 +362,7 @@ def declare_common_args():
         # ⚠️ s_pid_ramp_erpms_s가 2000→21160으로 오른 뒤로는 이 킥이 훨씬 사납다(즉시 큰 ERPM
         #    오차 → 큰 전류). 부스트 속도를 올릴 땐 반드시 잭업 상태에서 먼저 볼 것.
         DeclareLaunchArgument(
-            'launch_boost_enable', default_value='true',
+            'launch_boost_enable', default_value='false',
             description='런치 킥 on/off (자율 정지출발 데드존 관통 펀치)'
         ),
         DeclareLaunchArgument(
@@ -447,11 +504,13 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
         parameters=[{
             'odom_topic': odom_topic,
             'wheelbase': 0.33,
-            'l1_gain': LaunchConfiguration('l1_gain'),
-            'l1_distance': LaunchConfiguration('l1_distance'),
+            'l1_offset': LaunchConfiguration('l1_offset'),
+            'l1_speed_gain': LaunchConfiguration('l1_speed_gain'),
             't_clip_min': LaunchConfiguration('t_clip_min'),
             't_clip_max': LaunchConfiguration('t_clip_max'),
-            'lateral_error_coeff': 1.0,
+            'l1_min_denom': LaunchConfiguration('l1_min_denom'),
+            # ⚠️ lateral_error_coeff는 2026-07-30에 폐지됐다 — 소비처인 lat_err_scale이
+            #    항상 1.0인 죽은 코드였다(control_map_node.cpp control_loop 4 주석 참고).
             'max_speed': max_speed,
             'min_speed': LaunchConfiguration('min_speed'),
             'max_lateral_accel': max_lateral_accel,
@@ -486,6 +545,11 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'idx_jump_confirm_cycles': ParameterValue(
                 LaunchConfiguration('idx_jump_confirm_cycles'), value_type=int),
             'pose_suspect_speed': LaunchConfiguration('pose_suspect_speed'),
+            'odom_timeout': LaunchConfiguration('odom_timeout'),
+            # 조향 체인 (2026-07-30)
+            'steering_reach_ratio': LaunchConfiguration('steering_reach_ratio'),
+            'max_steering_rate': LaunchConfiguration('max_steering_rate'),
+            'steering_scaler_accel_ref': LaunchConfiguration('steering_scaler_accel_ref'),
             # 자율 미체결 중 램프 고정 (2026-07-28)
             'engage_gate_enable': ParameterValue(
                 LaunchConfiguration('engage_gate_enable'), value_type=bool),

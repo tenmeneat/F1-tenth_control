@@ -93,6 +93,11 @@ ros2 launch f1tenth_control dashboard.launch.py mode:=calib # odom 거리 스케
 50 Hz 제어 루프. **L1 Guidance + Steering Lookup Table(LUT)** 기반.
 - 구독: `<odom_topic>`(기본 `/ego_racecar/odom`), `/imu/data`, `/scan`, `/global_waypoints`(`f110_msgs/WpntArray`, transient_local QoS), `/drive_mode`(`std_msgs/String` — 2026-07-28 신설, 자율 미체결 중 속도 램프 와인드업 차단. 발행자 없으면 자동 비활성이라 시뮬 무영향)
 - 발행: `/drive_autonomous` (`ackermann_msgs/AckermannDriveStamped`) — Mux를 거쳐 최종 `/drive`로 전달됨
+  - ⚠️ `drive.acceleration`은 **명령 속도의 시간미분**이다(2026-07-30 수정). 예전엔
+    `(명령 − 실측)/dt`, 즉 추종오차를 dt로 나눈 값을 가속도라고 발행했다 — VESC 속도 PID는
+    명령이 실측보다 앞서야 전류가 나오는 구조라 정상 가속 중에도 200 m/s²급이 나오고 odom
+    노이즈가 ×50 증폭됐다. 젯슨 `ackermann_to_vesc` 서비스 브레이크 패치가 이 필드로 제동을
+    중재하면 그대로 오작동한다(그 패치는 현재 기본 꺼짐)
 - 분리된 알고리즘 모듈(별도 .cpp/.hpp):
   - `GapFollower` — 글로벌 경로 미수신 시 순수 LiDAR 갭 추종 폴백
   - `StabilityController` — IMU 요레이트 LPF + 카운터스티어 보정. **헤더 전용**(`.hpp`)이라
@@ -229,7 +234,8 @@ graph TD
 5. **동적 스케일러** — 가감속/속도/곡률 FF 보정
 6. **요레이트 피드백 카운터스티어** (2026-07-11 배선) — IMU 실측 요레이트와 기하학적 기대
    요레이트(`v·tanδ/L`) 오차만큼 조향 보정, `use_imu` 게이트. rate limit·클리핑 이전에 적용
-7. **rate limit(0.4) + 좌우 물리 한계 클리핑**(real 좌 0.41 / 우 0.379, sim ±0.41)
+7. **도달각 보상**(`steering_reach_ratio`, ②-e) → **rate limit**(`max_steering_rate`, dt 비례)
+   → 좌우 물리 한계 클리핑(real 좌 0.41 / 우 0.379, sim ±0.41)
 8. **기동 실패(탈조) 안티와인드업 가드** (2026-07-22 실차 증상 대응, 기본 꺼짐) — 속도 램프의 증분은
    실측과 무관하게 매 사이클 쌓이므로, VESC 센서리스 탈조로 차가 안 움직이는 동안 명령만
    프로파일 속도까지 감겨 올라가 모터가 물리는 순간 급발진한다. 실측 < `stall_speed_threshold`
@@ -246,6 +252,11 @@ graph TD
     램프 상태(`final_speed`)는 안 건드리고 **발행값만** 덮으므로 킥 종료 후 램프가 이어진다
 11. **최근접 인덱스 견고화** — 전역 재탐색 헤딩 게이트 + 인덱스 점프 확인 대기. 보류 중에는
     조향을 직전값으로 홀드하고 감속한다 (MCL pose 붕괴 대응)
+12. **odom 워치독**(2026-07-30, `odom_timeout` 0.5s) — 위치추정이 없거나 끊기면 안전 정지.
+    NaN/Inf pose는 콜백에서 버려 파이프라인 오염을 막는다. **미수신 상태에서는 출발도 안 한다**
+13. **dt 클램프**(2026-07-30, [0.001, 0.1]) — `wall_timer`는 실시간 보장이 없다. dt는 램프
+    증분·런치 킥 타이머·발행 가속도에 전부 곱해지므로, 젯슨에서 한 사이클 0.2s 밀리면 램프가
+    한 스텝에 1.6 m/s 튄다(= 계단 명령 = 07-27 급발진과 같은 형태)
 
 ### 제어 이론 상세
 
@@ -259,9 +270,11 @@ a_{lat} = \frac{2\,v_{lu}^2}{\lVert \mathbf{p}_t - \mathbf{p}\rVert}\sin\eta
 \qquad
 \delta = \mathrm{LUT}(a_{lat},\ v_{lu})$$
 
-- $q$ = `l1_gain`(0.5) = **상수항**, $m$ = `l1_distance`(0.3) = **속도 계수** → $L_1 = 0.5 + 0.3v$
-  > ⚠️ **이름이 역할과 반대다.** `l1_gain`이 기울기가 아니라 절편이고 `l1_distance`가 기울기다
-  > (원본 Python MAP의 `q_l1`/`m_l1` 대응). 2026-07-28 이전 문서는 이걸 거꾸로 적어놨었다.
+- $q$ = `l1_offset`(0.5) = **절편 [m]**, $m$ = `l1_speed_gain`(0.3) = **속도 계수 [s]**
+  → $L_1 = 0.5 + 0.3v$ (원본 Python MAP의 `q_l1`/`m_l1` 대응)
+  > ℹ️ **2026-07-30 개명**: 구 이름 `l1_gain`/`l1_distance`는 역할과 정반대였다(gain이 절편,
+  > distance가 기울기). 노드에 호환 shim이 있어 구 이름을 넘기면 **경고와 함께** 여전히
+  > 먹지만, 새 이름을 쓸 것.
 - $s_\kappa$: $|\kappa_{closest}|>0.3$이면 최대 25% 축소(코너 반응성), $t_{min}$=`t_clip_min`(0.6), $t_{max}$=`t_clip_max`(5.0)
 - $\sin\eta$: 차량 좌표계에서 목표점 방향의 횡성분 / 실제 거리 (+면 목표가 왼쪽)
 - **목표점 $\mathbf{p}_t$는 `closest_idx`로부터 경로 호 길이 $L_1$만큼 전진한 점**(`walk_forward`).
@@ -325,15 +338,20 @@ $$\delta \mathrel{+}= k_{\dot\psi} \cdot \left(\frac{v \tan\delta}{L} - \dot\psi
 | `use_imu` | true | IMU 보정 on/off (요레이트 카운터스티어 + 조향 스케일러용 종가속). 조향 채터링 시 false로 순수 L1+LUT 회귀 |
 | `odom_topic` | `/pf/pose/odom` | 위치추정 odom 소스 (real만 인자, sim은 `/ego_racecar/odom` 고정) |
 | `lookup_table_file` | `''` | 보정 LUT CSV 경로 (`lut_calibrator_node` 결과 적용 시, real만) |
-| `acceleration_scaler_for_steering` | 1.0 | 가속 중(acc_mean≥1.0) 조향각 스케일러 |
+| `acceleration_scaler_for_steering` | 1.0 | 가속 중 조향각 스케일러 (acc_mean 0→`steering_scaler_accel_ref` 구간 선형 블렌딩) |
+| `steering_scaler_accel_ref` | 1.0 | 위 두 스케일러가 완전 적용되는 기준 \|a_x\| [m/s²]. 2026-07-30 신설 — 예전엔 ±1.0 하드 임계라 넘는 순간 조향이 5% 계단 점프했다 |
+| `steering_reach_ratio` | **0.74** | 명령 조향각 중 **바퀴가 실제 도달하는 비율**. 2026-07-30 신설. 조향 명령 보상(×1/ratio)과 조향 권한 캡의 δ_avail(×ratio)을 **한 상수로 지배**. 1.0 = 보상 없음(구 낙관 거동). ⚠️ 아래 "하드코딩 게인 제거" 참고 |
+| `max_steering_rate` | 20.0 | 조향 rate limit [rad/s], dt 비례. 2026-07-30 신설 — 예전엔 "사이클당 0.4 rad" 하드코딩(50Hz에서 20 rad/s = 사실상 무제한, dt 무관). 기본값은 구 거동과 동일 |
+| `odom_timeout` | **0.5** | odom 신선도 타임아웃 [s]. 초과 시 안전 정지, 미수신 상태에서는 출발 자체를 안 함(0=비활성). 2026-07-30 신설 — 다른 입력엔 다 있던 검사가 odom만 없었다 |
 | `deceleration_scaler_for_steering` | 0.95 | 감속 중(acc_mean≤-1.0) 조향각 스케일러 |
 | `start_scale_speed` / `end_scale_speed` | 7.0 / 8.0 | 속도 비례 조향 다운스케일 구간 [m/s] |
 | `downscale_factor` | 0.10 | 고속 구간 조향각 다운스케일 최대 비율 |
 | `speed_lookahead` / `speed_lookahead_for_steering` | 0.15 / 0.0 | 종방향/조향용 속도 예측 룩어헤드 시간 [s] |
-| `l1_gain` / `l1_distance` | 0.5 / 0.3 | L1 = `l1_gain` + v·`l1_distance`. ⚠️ 이름이 역할과 반대(위 L1 절 참고) |
+| `l1_offset` / `l1_speed_gain` | 0.5 / 0.3 | L1 = `l1_offset`[m] + v·`l1_speed_gain`[s]. 2026-07-30 `l1_gain`/`l1_distance`에서 개명(구 이름은 경고 후 호환 동작) |
 | `t_clip_min` / `t_clip_max` | **0.6** / 5.0 | L1 룩어헤드 거리 하한/상한 [m] |
+| `l1_min_denom` | 0.6 | L1 횡가속 분모 하한 [m]. 2026-07-30 신설 — 예전엔 `t_clip_min`을 재사용해서, **룩어헤드 노브**를 낮추면 횡가속 명령 상한이 조용히 올라갔다(0.6이면 6 m/s에서 최대 lat_acc 120 m/s²) |
 | `local_fresh_timeout` | 0.3 | `/local_waypoints` 신선도 타임아웃 [s] |
-| `recovery_lat_error` / `recovery_speed` | **0.0** / 2.0 | 경로 이탈 복구 가드 발동 횡오차 [m] / 복구 중 속도 상한. **0 = 비활성**. 트랙 반폭보다 크게 잡을 것 |
+| `recovery_lat_error` / `recovery_speed` | **1.2** / 2.0 | 경로 이탈 복구 가드 발동 횡오차 [m] / 복구 중 속도 상한. 0 = 비활성. 2026-07-30에 0.0→1.2로 **켰다**(트랙 반폭 0.6의 2배 = 트랙을 실제로 벗어났을 때만 발동). 이 가드가 막는 limit cycle이 그동안 무방비였다 |
 | `gap_follower_failsafe` | false | 경로가 아예 없을 때 GapFollower 자율주행 허용. 🔴 실차에서는 켜지 말 것(플래닝 없이 차가 스스로 출발) |
 | `obstacle_avoid_enable` | **false** | GapFollower 장애물 회피 폴백. 기본 꺼짐 — 앞차를 장애물로 오인해 추월을 방해하는 것 차단 |
 | `obstacle_cone_halfangle` / `obstacle_trigger_dist` / `obstacle_margin` | 0.14 / 1.5 / 0.3 | 장애물 차단 판정 콘 각도[rad]/거리[m]/여유[m] |
@@ -350,8 +368,8 @@ $$\delta \mathrel{+}= k_{\dot\psi} \cdot \left(\frac{v \tan\delta}{L} - \dot\psi
 | `base_max_decel` | 8.0 | **명령 속도 하강 rate limit** [m/s²]. 낮추면 감속 명령이 늦게 도달 → 높게 유지 (②-a) |
 | `prebrake_decel` | **2.5** | **곡률 사전감속 제동거리 산출용 감속 권한** [m/s²]. 낮을수록 코너를 일찍 봄. 2026-07-30 1.0→2.5 상향(고속 세팅) — 실측 coast ~0.4 대비 상당한 낙관치라, 코너 진입 언더스티어 시 **가장 먼저 되돌릴 값** (②-a) |
 | `curvature_lookahead_count` | **80** | 곡률 룩어헤드 스캔 거리 하한 (×0.1m → **8m**) |
-| `understeer_gradient` | **0.0** | **조향 권한 속도 캡**의 K_us [rad/(m/s²)]. **0 = 캡 비활성**(현재 기본). bag 회귀 실측치는 0.019 — 켤 때 쓸 값. ②-b 참고 |
-| `steer_authority_ratio` | 0.85 | δ_max 중 곡률 추종에 배정할 비율. 나머지는 횡오차·요레이트 보정 여유 |
+| `understeer_gradient` | **0.0** | **조향 권한 속도 캡**의 K_us [rad/(m/s²)]. **0 = 캡 비활성**(현재 기본). bag 회귀 실측치는 0.019 — 켤 때 쓸 값. 🔴 켜기 전 ②-b의 "지금 켜면 안 되는 이유" 필독 |
+| `steer_authority_ratio` | 0.85 | δ 중 곡률 추종에 배정할 비율. 나머지는 횡오차·요레이트 보정 여유. ⚠️ 2026-07-30부터 δ_avail = `steer_authority_ratio` × min(좌,우) × **`steering_reach_ratio`** (명령각이 아니라 도달각 기준) |
 | `l1_use_actual_distance` | true | L1 횡가속 분모로 목표점까지의 **실제 직선거리** 사용. false면 구 거동(명목 L1 거리) |
 | `closest_idx_max_heading_err` | 1.75 | 최근접 전역 재탐색 시 경로접선-차량헤딩 허용오차 [rad]. 0이면 비활성 |
 | `idx_jump_confirm_dist` / `idx_jump_confirm_cycles` | 2.0 / 5 | 이 거리[m] 초과 인덱스 점프는 연속 N사이클 유지될 때만 채택. cycles=0이면 비활성 |
@@ -363,8 +381,8 @@ $$\delta \mathrel{+}= k_{\dot\psi} \cdot \left(\frac{v \tan\delta}{L} - \dot\psi
 ### ② `launch/_control_common.py` 수정 필요 (sim/real 둘 다 반영, 재빌드는 파일 복사라 가벼움)
 `build_control_map_node()` 안에 고정 정의된 공통 파라미터 — 여기 고치면 시뮬·실차 둘 다 바뀜:
 
-`wheelbase`(0.33), `lateral_error_coeff`(1.0), `wall_safety_margin`(0.6), `curvature_ff_blend`(0.0),
-`heading_damping_gain`(0.0)
+`wheelbase`(0.33), `wall_safety_margin`(0.6), `curvature_ff_blend`(0.0), `heading_damping_gain`(0.0)
+(⚠️ `lateral_error_coeff`는 2026-07-30 폐지 — 아래 "제거한 조향 로직" 참고)
 
 ### ②-a 감속도 파라미터가 두 개인 이유 (2026-07-25 분리)
 전엔 `base_max_decel` 하나가 두 역할을 겸했는데, **튜닝 방향이 정반대**라 반드시 한쪽이 손해를 봤다.
@@ -408,9 +426,62 @@ $\delta \le r\cdot\delta_{max}$ 로 푼 것 (`r` = `steer_authority_ratio`).
   `max(min_speed, cap)`을 하기 때문. 위 헤어핀(0.87)은 현재 `min_speed=1.0`으로도 못 돈다.
   이 상황이면 노드가 2초 throttle로 `조향 권한 한계 ... < min_speed — 하한이 캡을 무력화 중`
   경고를 띄운다. 고곡률 트랙에선 `min_speed`를 함께 낮출 것.
-- ⚠️ `r·δ_max/L`보다 큰 κ는 **기구학적으로 불가능**(r=0.85면 κ>1.06, R<0.94m)하다.
-  이때 `v_cap=0`이 되고 backward-pass가 최대한 감속시킨 뒤 `min_speed`가 정지를 막는다.
-  근본 해결은 플래너 쪽에서 그 코너의 반경을 키우는 것.
+- ⚠️ `δ_avail/L`보다 큰 κ는 **기구학적으로 불가능**하다. 이때 `v_cap=0`이 되고 backward-pass가
+  최대한 감속시킨 뒤 `min_speed`가 정지를 막는다. 근본 해결은 플래너 쪽에서 반경을 키우는 것.
+  - 🔴 **2026-07-30 수정**: 예전 코드는 이 경우(`steer_budget <= 0`) 캡을 **통째로 건너뛰어서**,
+    가장 급한 코너만 조향 캡을 못 받고 그립 캡만 받았다(문서는 위처럼 "v_cap=0"이라 적어놨는데
+    코드가 반대였다). `v_steer = 0`으로 이어 붙여 연속화했다 — budget→0에서 √항도 0이므로
+    수학적으로도 이게 맞는 접합이다.
+- ⚠️ **δ_avail은 명령각이 아니라 도달각이다**(2026-07-30):
+  δ_avail = `steer_authority_ratio` × min(좌,우) × `steering_reach_ratio` = 0.85 × 0.379 × 0.74
+  = **0.238 rad**. 예전엔 0.322(도달각 무시)로 잡아 코너 진입 속도를 그만큼 과대 허용했다.
+
+#### 🔴 지금 `understeer_gradient`를 켜면 안 되는 이유 (2026-07-30 실측)
+
+`ifac_track_v2`(187점)에 위 수정을 반영해 캡을 계산해 보면:
+
+| 구성 | 최소 캡 | 2.0 m/s 미만 점수 | 0 m/s 점수 |
+|---|---|---|---|
+| 구(δ_avail 0.322, budget≤0 스킵) | 0.43 m/s | 8 | 0 |
+| 신(δ_avail 0.238, budget≤0 → 0) | 0.00 m/s | **34** | **20** |
+
+K_us=0.019로 켜면 187점 중 34점이 2 m/s 미만으로 눌린다 = 꼬인 구간 대부분에서 `min_speed`까지
+바닥을 친다. **캡이 옳아진 결과지 캡이 잘못된 게 아니다** — 아래가 진짜 원인이다.
+
+### ②-d 🔴 이 레이싱 라인은 차의 최소 선회반경보다 급하다 (2026-07-30 확인)
+
+컨트롤러 튜닝으로 못 고치는 문제라 여기 적어 둔다. 기구학 $R_{min} = L/\tan\delta$:
+
+| 조향각 | R_min | 그 이상 κ |
+|---|---|---|
+| 0.30 rad (**실측 도달각**) | **1.067 m** | κ > 0.937 |
+| 0.379 rad (우 명령 한계) | 0.829 m | κ > 1.207 |
+| 0.41 rad (좌 명령 한계) | 0.759 m | κ > 1.317 |
+
+그런데 `ifac_track_v2`가 요구하는 곡률은 **최대 κ=1.485(R=0.673 m)**, 평활 후에도
+**κ=1.419(R=0.705 m)**다. 즉:
+
+- 실측 도달각 0.30에서는 **187점 중 9점이 물리적으로 불가능**
+- **풀 명령 0.41을 다 낸다 해도 2점은 여전히 불가능** (0.759 > 0.705)
+- 그 지점의 프로파일 속도는 `vx = 8.0 m/s`다(프로파일이 그 코너를 곡률 제한하지 않았다)
+
+07-25 시케인·07-26 헤어핀 언더스티어 크래시(크로스트랙 0.11 → 2.07 m 발산)와 정합한다.
+**어떤 조향 게인·감속 튜닝으로도 이 점들은 돌 수 없다.** 해결 순서:
+1. **플래너/트랙 라인 쪽에서 최소 반경을 1.1 m 이상으로 제한** (가장 근본적. 오프라인
+   trajectory generator의 곡률 제약)
+2. 각도기로 풀락 도달각 실측 → 0.30이 맞으면 링키지/서보 트림 재정렬로 도달각 회복
+3. 그 다음에 `understeer_gradient`를 켜서 캡이 정상 동작하게 함
+
+### ②-e ❌ 제거한 조향 로직 (2026-07-30) — 다시 넣기 전에 읽을 것
+
+| 제거한 것 | 무엇이었나 | 왜 뺐나 |
+|---|---|---|
+| **하드코딩 속도 조향 게인** `*= clamp(1 + v/10, 1.0, 1.4)` | LUT 출력에 곱하던 이름 없는 게인 | 값 자체(1.4)는 **1/0.74 = 1.35 ≈ 도달각 보상**이라 의미가 있었지만, 기계적 손실인데 **속도 램프 모양**이라 4 m/s에서 천장에 붙었고(= 사실상 상시 +40% 상수), 바로 윗줄 `downscale_factor`(−10%)와 정면으로 싸웠고, 파라미터·문서가 없었고, 조향 권한 캡의 δ_avail과 어긋나 있었다 → `steering_reach_ratio` 상수 하나로 통합 |
+| **`lat_err_scale`** (`lateral_error_coeff` 외 곡률 게이트) | 횡오차·평균곡률로 조향용 속도와 target_speed를 감쇠 | ① **죽은 코드**였다 — 발동 조건이 랩 평균 \|κ\| ≥ 0.8 rad/m인데 `ifac_track_v2` 실측 평균은 **0.273**(2.9배 더 꼬여야 켜짐) → 항상 정확히 1.0. ② 모양이 레이싱에 부적합(완전 발동 시 횡오차 0.5m에서 속도 −63%, MCL 지터로도 랩타임 붕괴). ③ 라인 복귀 감속이 이미 둘 있다(heading 오차 감속 + 이탈 복구 가드) — 같은 신호에 셋을 걸면 서로 싸운다 |
+
+⚠️ 도달각 보상 위치는 **모든 보정항 뒤, pose 홀드/클리핑 앞**이 유일하게 맞는 자리다.
+pose 홀드 뒤에 두면 `last_steering_angle_`(이미 보상된 값)에 매 사이클 1/0.74가 다시 곱해져
+**100 사이클에 풀락(0.41)까지 발산한다** — 등가 모델로 실제 확인했다.
 
 ### ②-c 언더스티어는 왜 β가 아니라 요레이트 결손으로 봐야 하나 (2026-07-29, 가드는 제거됨)
 

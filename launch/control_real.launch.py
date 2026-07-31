@@ -26,7 +26,7 @@ def generate_launch_description():
     # 전제: 하드웨어 브링업(f1tenth_stack의 drive_mode_manager, ackermann_mux, vesc_driver,
     #       ackermann_to_vesc, LiDAR, joy_node)과 particle_filter, planning이 /scan, /joy,
     #       /pf/pose/odom, /global_waypoints 를 발행 중이어야 함.
-    # 공통 파라미터(wheelbase, l1_gain 등)는 _control_common.py 참고 — 시뮬과 겹치는 부분은
+    # 공통 파라미터(wheelbase, l1_offset 등)는 _control_common.py 참고 — 시뮬과 겹치는 부분은
     # 거기 한 곳만 고치면 됨. 아래는 실차 전용 인자/노드만.
 
     # 파티클필터 odom 토픽 (로컬라이제이션 스택에 맞춰 변경 가능)
