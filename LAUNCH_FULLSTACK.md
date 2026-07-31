@@ -76,15 +76,96 @@ ros2 run nav2_map_server map_saver_cli -f ~/slam_toolbox/map --fmt png \
 ℹ️ `--fmt png`를 주면 pgm→png 수동 변환이 필요 없다. yaml의 `image:`도 자동으로
 `map.png`가 되므로 아래 "yaml 확인" 단계도 통과한다.
 
+### 글로벌 패스 생성 (**랩탑**에서. 젯슨은 CPU가 좁아 여기서 만드는 게 맞다)
+
+**① 새 지도를 로컬 워크스페이스에 넣는다**
+```bash
+cp ~/slam_toolbox/map.png ~/slam_toolbox/map.yaml \
+   ~/2026_IFAC/src/monte_carlo_localization/maps/
+```
+
+**② GUI로 라인 확인하며 생성** (새 트랙이면 이쪽. 라인을 눈으로 보고 조정)
+```bash
+cd ~/2026_IFAC
+python3 offline_trajectory_generator/trajectory_gui.py \
+  --map-yaml src/monte_carlo_localization/maps/map.yaml
+```
+- 파라미터를 만지면 `offline_trajectory_generator/gui_params.yaml`에 **자동 저장**된다
+- `Save`를 누르면 `output/map/`에 `global_waypoints.json` / `global_waypoints.csv` /
+  `centerline.csv` / `metadata.json` (+`debug_overlay.png`)가 생성된다
+
+**③ 헤드리스로 생성** (같은 결과를 재현하거나 파라미터를 스윕할 때)
+```bash
+cd ~/2026_IFAC
+python3 offline_trajectory_generator/generate_global_trajectory.py \
+  --map-yaml src/monte_carlo_localization/maps/map.yaml \
+  --output-dir offline_trajectory_generator/output/map \
+  --optimizer mincurv --width-mode hybrid \
+  --waypoint-step 0.25 --optimizer-step 0.46 \
+  --safety-width 0.5 --boundary-margin 0.5 --max-width-distance 2.0 \
+  --max-speed 6.5 --min-speed 4.0 \
+  --max-lateral-accel 6.0 --max-accel 3.5 --max-decel 2.5 \
+  --max-curvature 1.18 \
+  --smooth-sigma 3.7 --raceline-smooth-sigma 1.0
+```
+전체 인자는 `python3 offline_trajectory_generator/generate_global_trajectory.py --help`.
+`--output-dir`을 생략하면 `output/<지도이름>`이 기본이다.
+
+#### ⚠️ 생성기 인자를 **차량 실측 한계**에 맞출 것 (2026-07-31 측정)
+
+생성기가 차보다 낙관적인 값을 쓰면 **컨트롤러가 못 따라가는 프로파일**이 나오고,
+곡률 사전감속이 매 코너에서 그걸 깎느라 싸운다.
+
+| 생성기 인자 | GUI 저장값 | 차량 실측 한계 | 권장 |
+|---|---|---|---|
+| `--max-curvature` | 1.2 | **1.286** (조향 23°, R 0.777 m) | **1.18** (R 0.85 m, 여유 15%) |
+| `--max-lateral-accel` | 10.0 | 컨트롤러 캡 **6.0** | **6.0** |
+| `--max-accel` | 3.7 | VESC 램프 `s_pid_ramp_erpms_s` 15600 = **3.69** | **3.5** |
+| `--max-decel` | 2.0 | 브레이크 하드웨어 4.8 / 현 튜닝 **2.5** | **2.5** |
+| `--max-speed` | 6.5 | 실제 도달 7.4 (직선 13.3 m라 8.0엔 못 닿음) | 6.5~7.0 |
+
+🔴 **`--max-curvature`가 실제로 지켜졌는지 반드시 확인할 것.** `ifac_track_v2`는 이 값이
+1.2인데도 결과 κ가 **1.485**까지 나와 있어서, 187점 중 2점이 차량 최소 선회반경보다 급하다
+(= 어떤 제어 튜닝으로도 못 도는 코너. 07-25 시케인·07-26 헤어핀 크래시의 근본 원인).
+```bash
+cd ~/2026_IFAC && python3 -c "
+import csv
+r=[x for x in list(csv.reader(open('offline_trajectory_generator/output/map/global_waypoints.csv')))[1:] if x]
+k=[abs(float(x[5])) for x in r]
+print('최대 kappa %.3f -> R_min %.3f m  (차량 한계 R 0.777 m = kappa 1.286)' % (max(k), 1/max(k)))
+print('차량 한계 초과 점: %d / %d' % (sum(1 for v in k if v > 1.286), len(k)))
+"
+```
+초과 점이 0이 아니면 `--max-curvature`를 더 낮추거나 `--safety-width`를 키워 다시 뽑는다.
+
 ### 본체 → 젯슨 전송
 ```bash
+# 지도 (MCL용) — 재빌드 필요
 scp ~/slam_toolbox/map.png ~/slam_toolbox/map.yaml \
     miru@10.1.1.3:~/2026_IFAC/src/monte_carlo_localization/maps/
 
+# 글로벌 패스 — 재빌드 불필요
 ssh miru@10.1.1.3 'mkdir -p ~/2026_IFAC/offline_trajectory_generator/output/map'
 scp -r ~/2026_IFAC/offline_trajectory_generator/output/map \
     miru@10.1.1.3:~/2026_IFAC/offline_trajectory_generator/output/
 ```
+
+ℹ️ **둘의 재빌드 여부가 다르다.**
+- **지도**는 MCL이 `install/.../share`의 **실제 복사본**에서 읽으므로 §2 재빌드가 필요하다
+- **글로벌 패스**는 `output_base_dir: "offline_trajectory_generator/output"`이 **런치 cwd 기준
+  상대경로**라 소스 트리를 직접 읽는다 → 재빌드 없이 즉시 반영(단 `~/2026_IFAC`에서 launch)
+
+🔴 **`F1_MAP`과 지도 이름이 어긋나면 조용히 실패한다.** 지도 이름은 **`map`이 기본**인데
+젯슨 `~/.zshrc`는 `export F1_MAP=ifac_track`으로 되어 있다(2026-07-31 확인). 이러면
+`global_planning`이 없는 `output/ifac_track`을 본다 — 젯슨 `output/`에는 `map`뿐이다. 둘 중 하나:
+```bash
+# (a) 젯슨 F1_MAP을 map으로 고친다  ← 권장
+ssh miru@10.1.1.3 "sed -i 's/^export F1_MAP=.*/export F1_MAP=map/' ~/.zshrc"
+
+# (b) 매번 인자로 넘긴다
+ros2 launch global_planning global_planning.launch.py map_name:=map
+```
+MCL은 어차피 `F1_MAP`을 안 읽으므로(§0-1) `map_name:=map`을 계속 명시한다.
 
 ### yaml 확인 — `image:`를 `.png`로
 ```yaml
