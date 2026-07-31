@@ -39,7 +39,9 @@ def generate_launch_description():
     # 직선 최대 속도 [m/s] — 2026-07-30 5.0→8.0 상향(사용자 결정, 고속 주행 세팅).
     # ⚠️ 하드웨어 ERPM(40000) 상한 = 바퀴 ~9 m/s. 8.0은 그 약 89% 수준 — 여유가 작으므로
     #    직선 끝 제동 여력과 프로파일 vx가 실제 상한을 결정한다.
-    # ⚠️ base_max_accel이 2.5로 묶여 있어(아래) 짧은 직선에서는 8.0에 도달하지 못할 수 있다.
+    # ⚠️ 실제 도달 최고속은 7.4 m/s다(전방-후방 패스 시뮬). 트랙 최장 직선이 13.3 m라
+    #    8.0에 닿기 전에 다음 코너 제동이 시작된다 — max_speed를 올려도 이득이 없고,
+    #    최고속 레버는 base_max_accel(아래)과 제동 권한이다.
     max_speed_arg = DeclareLaunchArgument(
         'max_speed',
         default_value='8.0',
@@ -113,12 +115,26 @@ def generate_launch_description():
     )
 
     # 종방향 최대 가속도 한계 [m/s^2]. base_max_decel은 sim/real 동일이라 _control_common.py에 공용.
-    # ⚠️ sim 승리값과 동일한 공격적 값 — 속도는 프로파일이 캡하므로 최고속은 안 변하나 램프가
-    # 급해짐. 실차 모터/구동 여유와 저속 출발 안정성 실측 확인 후 유지할 것(급가속으로 휠스핀/
-    # 앞들림 시 하향).
+    #
+    # 🔑 **천장은 컨트롤러가 아니라 VESC다.** mcconf의 `s_pid_ramp_erpms_s`가 속도 setpoint의
+    #    상승률을 하드 제한한다: 15600 ERPM/s ÷ 4232 = **3.69 m/s²**(2026-07-31 VESC Tool 확인).
+    #    이보다 크게 주면 VESC가 깎을 뿐이고, 명령만 실측보다 더 앞서 나가 와인드업 위험만
+    #    커진다(07-27 급발진과 같은 구조). 그래서 천장의 95%인 3.5로 둔다 —
+    #    **컨트롤러가 제한을 쥐고 있어야** 곡률 사전감속의 전방-후방 패스 예측이 실제와 맞는다.
+    #    ⚠️ VESC에서 s_pid_ramp_erpms_s를 바꾸면 이 값도 같이 재검토할 것.
+    #
+    # 2026-07-31 2.5 → 3.5. 전방-후방 패스 시뮬(ifac_track_v2, a_lat 6.0 / decel 2.5 / v_max 8.0):
+    #   랩타임 11.97 → 11.63 s (−0.34 s, −2.8%), 최고 도달속 6.93 → 7.44 m/s.
+    #   ℹ️ `max_speed`는 8.0이지만 실제 도달은 7.4다 — 트랙이 46.9 m(최장 직선 13.3 m)라
+    #      8.0에 닿기 전에 다음 코너 제동이 시작된다. **max_speed를 더 올려도 무의미하고**,
+    #      최고속을 올리는 유일한 레버가 이 가속도다.
+    #   ℹ️ 더 큰 레버는 제동 쪽에 있다 — 젯슨 brake_max_current 8.0A ≈ 4.8 m/s²가 하드웨어
+    #      한계인데 brake_gain은 −2.5 목표로만 튜닝돼 있다. 제동을 4.8까지 쓰면 −0.62 s,
+    #      가속·제동 둘 다 올리면 −1.32 s(−11%)다. 단 brake_gain과 prebrake_decel은 한 쌍.
     base_max_accel_arg = DeclareLaunchArgument(
-        'base_max_accel', default_value='2.5',
-        description='종방향 최대 가속도 한계 [m/s^2] (⚠️ sim 승리값, 실차 급가속 검증 필요)'
+        'base_max_accel', default_value='3.5',
+        description='종방향 최대 가속도 한계 [m/s^2]. VESC s_pid_ramp_erpms_s(15600 = 3.69)의 95% — '
+                    '이 값을 넘겨 주면 VESC가 깎고 와인드업 위험만 커진다'
     )
 
     steering_control = common.build_control_map_node(
