@@ -63,9 +63,18 @@ ros2 launch slam_toolbox online_async_launch.py use_sim_time:=false \
 ### 저장 (다른 터미널)
 ```bash
 cd ~/slam_toolbox && source /opt/ros/jazzy/setup.zsh && source install/setup.zsh
-ros2 run nav2_map_server map_saver_cli -f ~/slam_toolbox \
+ros2 run nav2_map_server map_saver_cli -f ~/slam_toolbox/map --fmt png \
   --ros-args -p save_map_timeout:=30.0 -p map_subscribe_transient_local:=true
 ```
+
+⚠️ **`-f`는 디렉터리가 아니라 "파일 이름 접두사"다.** 예전 문서는 `-f ~/slam_toolbox`라
+적어놨는데, 그러면 폴더 안이 아니라 홈에 **`~/slam_toolbox.pgm` / `.yaml` 파일**이 생긴다
+(같은 이름의 폴더가 있어서 헷갈린다 — 2026-07-31에 실제로 헤맸다).
+위처럼 `-f ~/slam_toolbox/map`으로 줘야 아래 전송 단계가 기대하는
+`~/slam_toolbox/map.png` + `map.yaml`이 나온다.
+
+ℹ️ `--fmt png`를 주면 pgm→png 수동 변환이 필요 없다. yaml의 `image:`도 자동으로
+`map.png`가 되므로 아래 "yaml 확인" 단계도 통과한다.
 
 ### 본체 → 젯슨 전송
 ```bash
