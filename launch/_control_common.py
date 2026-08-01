@@ -171,7 +171,7 @@ def declare_common_args():
         #    ⚠️ 풀락 부근은 링키지 기하가 비선형이라 좌 0.871(25.3° 명령 → 22°)로 떨어지지만,
         #       상수 보상은 중간각 기준이 맞다(끝단은 어차피 클리핑되고, 과보상이 더 위험).
         DeclareLaunchArgument(
-            'steering_reach_ratio', default_value='1.0',
+            'steering_reach_ratio', default_value='0.85',
             description='명령 조향각 중 바퀴가 실제 도달하는 비율. 보상(1/ratio)과 조향권한 캡을 '
                         '동시 지배. 1.0 = 보상 없음(2026-07-31 실측: 링키지 정상)'
         ),
@@ -211,7 +211,7 @@ def declare_common_args():
         # ⚠️ 2026-07-30 1.0→2.5 상향(사용자 결정, 고속 주행 세팅). 실측 coast(-0.4)보다 제동거리를
         #    낙관적으로 보므로, 코너 진입이 늦게 느껴지면(언더스티어) 가장 먼저 되돌릴 값이다.
         DeclareLaunchArgument(
-            'prebrake_decel', default_value='2.5',
+            'prebrake_decel', default_value='1.0',
             description='곡률 사전감속 제동거리 산출용 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
         ),
         # ── 조향 권한 속도 캡 ──
@@ -306,7 +306,7 @@ def declare_common_args():
         #    증상이 나왔고, 데드존 자체는 VESC 오픈루프 전류 상향으로 근본 해결됐다.
         #    다만 끄면 와인드업 급발진 보호가 사라진다 — 출발이 더듬거리면 즉시 true로 되돌릴 것.
         DeclareLaunchArgument(
-            'stall_guard_enable', default_value='false',
+            'stall_guard_enable', default_value='true',
             description='기동 실패(탈조) 시 속도 명령 와인드업 차단 가드 on/off. 07-27부터 기본 꺼짐'
         ),
         DeclareLaunchArgument(
