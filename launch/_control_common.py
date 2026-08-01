@@ -9,9 +9,9 @@ from launch.substitutions import LaunchConfiguration
 # 런치파일이 아니라 순수 헬퍼 모듈 — ros2 launch 진입점으로 직접 실행되지 않는다.
 # 두 환경에서 100% 동일한 파라미터/노드 정의를 여기 한 곳에만 두어 드리프트를 막는다.
 #
-# IMU 단위 보정 계수 — 하드웨어 상수, 여기가 유일한 정의 위치.
-# control_map_node(카운터스티어)와 lut_calibrator_node(a_lat = v*yaw_rate)가 공유하며
-# lut_calibration.launch.py도 import 해서 쓰므로 두 곳이 어긋날 일이 구조적으로 없다.
+# IMU 단위 보정 계수 — 하드웨어 상수, 여기가 유일한 정의 위치. control_map_node(카운터스티어)가
+# 소비한다. (lut_calibrator_node는 2026-08-01 제거됨 — LUT 보정은 tools/lut_calibrator/의
+# rosbag 오프라인 웹앱으로 대체)
 IMU_ANGULAR_SCALE_REAL = 0.0174533   # = pi/180. VESC가 deg/s로 발행(2026-07-19 확인)
 IMU_ANGULAR_SCALE_SIM  = 1.0         # sim_imu_bridge_node는 이미 rad/s로 중계
 IMU_LINEAR_SCALE_REAL = 9.80665      # g → m/s². VESC가 g로 발행(2026-07-19 소스 확인)
@@ -27,8 +27,7 @@ def declare_common_args():
     return [
         # ⚠️ force_autonomous·speed_to_erpm_gain 인자는 teleop 제거(2026-07-29)와 함께 폐지됐다 —
         #    유일한 소비처가 joy_teleop_monitor였다. 시뮬은 drive_source_selector가 자율 명령을
-        #    /drive로 직결하므로 기동 즉시 자율주행이고, ERPM 표시는 realcar_dashboard_node의
-        #    자체 파라미터 기본값(4232.0)을 쓴다.
+        #    /drive로 직결하므로 기동 즉시 자율주행이다.
         # 요레이트 카운터스티어 게인. 시뮬 스윕(0.0/0.08/0.15): 랩타임은 게인 무관, 0.15부터
         # 조향 채터링이 뚜렷(부호전환 0→3.32/s). 실차 오버스티어 검증 데이터가 없어 현재 0.
         DeclareLaunchArgument(
@@ -97,7 +96,7 @@ def declare_common_args():
         DeclareLaunchArgument(
             'gap_follower_failsafe', default_value='false',
             description='글로벌·로컬 웨이포인트가 둘 다 없을 때 GapFollower로 자율주행할지. '
-                        '기본 false=안전 정지 발행(control_mppi_node와 동일). '
+                        '기본 false=안전 정지 발행. '
                         '⚠️ true면 플래닝이 안 떠 있거나 죽었을 때 컨트롤러가 라이다 갭만 보고 '
                         '차를 스스로 몰기 시작한다(1.2~3.5 m/s) — 실차에서는 켜지 말 것'
         ),
@@ -122,46 +121,6 @@ def declare_common_args():
         DeclareLaunchArgument(
             'obstacle_avoid_hold_cycles', default_value='15',
             description='회피 폴백 유지 사이클 수(50Hz 기준, 채터링 방지)'
-        ),
-
-        # ── 장애물 종방향 감속 (opponent_detector raw 장애물 → 속도 캡) ──
-        DeclareLaunchArgument(
-            'obstacle_brake_enable', default_value='true',
-            description='통로 전방 장애물(opponent_detector raw)에 대해 정지 가능 속도로 감속. '
-                        '조향 미개입 종방향 soft 감속 — 최종 e-stop은 planning 소관. false로 비활성.'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_raw_topic', default_value='/perception/detection/raw_obstacles',
-            description='raw 장애물(추적 확정 전, 벽 제거+Frenet) 토픽 (f110_msgs/ObstacleArray)'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_brake_decel', default_value='6.0',
-            description='감속 캡 v=√(2·a·d) 산출용 감속도 [m/s²]. base_max_decel보다 낮게 잡아 보수적으로.'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_stop_gap', default_value='1.0',
-            description='장애물 앞 정지 여유 거리 [m]'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_corridor_halfwidth', default_value='0.35',
-            description='통로 반폭(차폭/2+여유) [m] — 장애물이 이 밴드와 겹칠 때만 감속'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_max_range', default_value='9.0',
-            description='이 전방거리[m] 밖 장애물은 무시(라이다 유효거리)'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_brake_hold_cycles', default_value='10',
-            description='장애물 소실 후 캡 유지 사이클 수(50Hz, 채터링 방지)'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_brake_timeout', default_value='0.3',
-            description='raw 장애물 토픽 신선도 타임아웃 [s]'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_avoid_min_speed', default_value='1.5',
-            description='로컬 회피경로 추종 중 감속캡 하한 [m/s] — 정지 대신 최소속도로 회피 관통. '
-                        '글로벌 대기(회피경로 없음) 중엔 미적용(정지까지 허용)'
         ),
 
         # ── L1 Guidance 룩어헤드 거리 ──
@@ -397,101 +356,6 @@ def declare_common_args():
                         '조향 채터링 시 false로 순수 L1+LUT 주행'
         ),
 
-        # ── MPPI 컨트롤러 튜너블 (control_mppi_node 전용) ──
-        # 나머지 MPPI 파라미터(차량/타이어)는 노드 코드 기본값 사용.
-        # 2026-07-22: 시뮬 튜닝 스윕을 위해 수평/샘플수/비용가중/평활화/가속한계를 전부 인자화
-        #   (control_map_node가 07-11에 밟은 것과 같은 경로 — 코드를 안 건드리고 터미널에서 스윕).
-        DeclareLaunchArgument(
-            'mppi_lambda_rel', default_value='0.02',
-            description='MPPI 적응 역온도 비율: λ_eff = mppi_lambda_rel·(J_mean − J_min). '
-                        'λ를 비용 스케일에 불변으로 만든다(w_*를 바꿔도 재조정 불필요). '
-                        '작을수록 저비용 샘플에 집중(ESS↓, 반응 빠르고 거칠다) — 0.02가 ESS≈K의 10%'
-        ),
-        DeclareLaunchArgument(
-            'mppi_lambda', default_value='1.0',
-            description='MPPI 고정 역온도 λ (mppi_lambda_rel:=0 으로 둘 때만 사용)'
-        ),
-        DeclareLaunchArgument(
-            'mppi_noise_beta', default_value='0.7',
-            description='MPPI 잡음 시간상관 AR(1) 계수 [0,1). 0=백색잡음(고주파 해가 뽑혀 채터링), '
-                        '0.6~0.8이 매끈한 기동'
-        ),
-        DeclareLaunchArgument(
-            'mppi_sigma_steer', default_value='0.15',
-            description='MPPI 조향 탐색 노이즈 σ [rad]'
-        ),
-        DeclareLaunchArgument(
-            'mppi_sigma_accel', default_value='1.5',
-            description='MPPI 종가속 탐색 노이즈 σ [m/s^2]'
-        ),
-        DeclareLaunchArgument(
-            'mppi_N', default_value='25',
-            description='MPPI 예측 수평 스텝 수 (수평시간 = N·dt, 기본 25×0.05=1.25s). '
-                        '수평이 코너 하나보다 짧으면 시케인에서 모드가 매 사이클 바뀐다'
-        ),
-        DeclareLaunchArgument(
-            'mppi_K', default_value='0',
-            description='MPPI 롤아웃 샘플 수. 0=솔버별 자동(GPU 2048 / CPU 512). '
-                        '키울수록 직선 미세 사행이 줄어든다(분산 ~1/ESS) — GPU에서는 사실상 공짜'
-        ),
-        DeclareLaunchArgument(
-            'mppi_u_smooth', default_value='0.3',
-            description='MPPI 출력 저역통과 계수 [0,1) — 클수록 부드럽지만 지연 증가'
-        ),
-        DeclareLaunchArgument(
-            'mppi_w_lat', default_value='150.0',
-            description='MPPI 경로 **횡**오차(컨투어링) 비용 가중 — 경로 추종의 주력'
-        ),
-        DeclareLaunchArgument(
-            'mppi_w_lon', default_value='1.0',
-            description='MPPI 경로 **진행방향**(lag) 오차 비용 가중 — 시간정합용, 작게 둘 것'
-        ),
-        DeclareLaunchArgument(
-            'mppi_w_dsteer', default_value='100.0',
-            description='MPPI 조향 변화율(Δδ) 비용 — 채터링 억제의 본체'
-        ),
-        DeclareLaunchArgument(
-            'mppi_w_daccel', default_value='0.5',
-            description='MPPI 종가속 변화율(Δa) 비용'
-        ),
-        DeclareLaunchArgument(
-            'mppi_w_yaw', default_value='5.0',
-            description='MPPI 헤딩 추종 비용 가중'
-        ),
-        DeclareLaunchArgument(
-            'mppi_w_v', default_value='0.5',
-            description='MPPI 속도 추종 비용 가중'
-        ),
-        DeclareLaunchArgument(
-            'mppi_ref_max_lat_accel', default_value='8.0',
-            description='MPPI 기준속도 곡률 클램프 a_lat [m/s²] (0=플래너 프로파일 그대로). '
-                        '플래너 프로파일은 이상적 라인 기준이라, 라인에서 조금만 벗어나면 같은 '
-                        '속도로 마찰한계를 넘는다. ⚠️ 모델 마찰한계(μ·g≈10.3)보다 낮게 잡을 것'
-        ),
-        DeclareLaunchArgument(
-            'mppi_w_terminal', default_value='20.0',
-            description='MPPI 종단(마지막 스테이지) 위치·헤딩 가중 배수. 수평은 속도에 비례해 '
-                        '길어지므로, 이 값이 크면 먼 종단점이 비용을 지배해 **직선에서 속도가 '
-                        '스스로 눌린다**(가속할수록 더 먼 코너를 끌어옴)'
-        ),
-        DeclareLaunchArgument(
-            'mppi_margin', default_value='0.15',
-            description='MPPI 트랙 경계 여유 [m] (차 반폭 + 안전여유)'
-        ),
-        DeclareLaunchArgument(
-            'mppi_w_boundary', default_value='500.0',
-            description='MPPI 트랙 경계 소프트 페널티 가중'
-        ),
-        DeclareLaunchArgument(
-            'mppi_speed_cmd_horizon', default_value='0.21',
-            description='MPPI (종가속→속도명령) 변환 지평 [s]. 하위 속도루프 P게인의 역수로 '
-                        '두어야 계획한 가속이 실제로 전달된다(gym kp≈4.75 → 약 0.21)'
-        ),
-        DeclareLaunchArgument(
-            'mppi_accel_max', default_value='9.0',
-            description='MPPI 종가속 상한 [m/s^2] '
-                        '(control_map_node의 base_max_accel과 정렬 — 기준궤적 램프 속도도 이 값을 쓴다)'
-        ),
     ]
 
 
@@ -585,57 +449,13 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'obstacle_margin': LaunchConfiguration('obstacle_margin'),
             'obstacle_avoid_hold_cycles': ParameterValue(
                 LaunchConfiguration('obstacle_avoid_hold_cycles'), value_type=int),
-            'obstacle_brake_enable': LaunchConfiguration('obstacle_brake_enable'),
-            'obstacle_raw_topic': LaunchConfiguration('obstacle_raw_topic'),
-            'obstacle_brake_decel': LaunchConfiguration('obstacle_brake_decel'),
-            'obstacle_stop_gap': LaunchConfiguration('obstacle_stop_gap'),
-            'obstacle_corridor_halfwidth': LaunchConfiguration('obstacle_corridor_halfwidth'),
-            'obstacle_max_range': LaunchConfiguration('obstacle_max_range'),
-            'obstacle_brake_hold_cycles': ParameterValue(
-                LaunchConfiguration('obstacle_brake_hold_cycles'), value_type=int),
-            'obstacle_brake_timeout': LaunchConfiguration('obstacle_brake_timeout'),
-            'obstacle_avoid_min_speed': LaunchConfiguration('obstacle_avoid_min_speed'),
         }]
     )
 
-
-def build_control_mppi_node(*, odom_topic, max_speed, remappings=None):
-    """control_mppi_node — control_map_node와 나란히 상시 구동되는 MPPI 컨트롤러.
-    /drive_mppi로 발행하며, Mux가 RB 상태에 따라 /drive_autonomous(MAP)와 라우팅한다.
-    솔버(CPU/GPU)는 빌드타임 자동선택 — 런치는 무관.
-    max_speed는 노드의 v_max(직선 최고속도 캡)로 매핑. Pacejka/차량 파라미터는 노드
-    기본값(gym) — 실차 보정 전까지 노출 최소화. remappings: 실차 /imu/data→sensors/imu/raw."""
-    return Node(
-        package='f1tenth_control',
-        executable='control_mppi_node',
-        name='control_mppi_node',
-        output='screen',
-        remappings=remappings,
-        parameters=[{
-            'odom_topic': odom_topic,
-            'v_max': max_speed,
-            'lambda': LaunchConfiguration('mppi_lambda'),
-            'lambda_rel': LaunchConfiguration('mppi_lambda_rel'),
-            'noise_beta': LaunchConfiguration('mppi_noise_beta'),
-            'sigma_steer': LaunchConfiguration('mppi_sigma_steer'),
-            'sigma_accel': LaunchConfiguration('mppi_sigma_accel'),
-            'N': LaunchConfiguration('mppi_N'),
-            'K': LaunchConfiguration('mppi_K'),
-            'u_smooth': LaunchConfiguration('mppi_u_smooth'),
-            'w_lat': LaunchConfiguration('mppi_w_lat'),
-            'w_lon': LaunchConfiguration('mppi_w_lon'),
-            'w_dsteer': LaunchConfiguration('mppi_w_dsteer'),
-            'w_daccel': LaunchConfiguration('mppi_w_daccel'),
-            'w_yaw': LaunchConfiguration('mppi_w_yaw'),
-            'w_v': LaunchConfiguration('mppi_w_v'),
-            'w_boundary': LaunchConfiguration('mppi_w_boundary'),
-            'w_terminal': LaunchConfiguration('mppi_w_terminal'),
-            'ref_max_lateral_accel': LaunchConfiguration('mppi_ref_max_lat_accel'),
-            'margin': LaunchConfiguration('mppi_margin'),
-            'accel_max': LaunchConfiguration('mppi_accel_max'),
-            'speed_cmd_horizon': LaunchConfiguration('mppi_speed_cmd_horizon'),
-        }]
-    )
+# ⚠️ build_control_mppi_node()는 2026-08-01 MPPI 노드/솔버 전체 제거와 함께 삭제됐다 —
+#    대회 준비 기간 동안 MAP(control_map_node) 하나에만 집중하기로 함. 되살리려면 git
+#    이력에서 control_code/control_mppi_{node,solver_cpu.cpp,solver_gpu.cu}와
+#    include/f1tenth_control/mppi_{gpu,types_gpu}.hpp를 함께 복원할 것.
 
 # ⚠️ build_joy_teleop_monitor()는 teleop 제거(2026-07-29)와 함께 삭제됐다. 수동/자율/E-stop
 #    Mux는 이 저장소 담당이 아니다 — 실차는 f1tenth_stack(drive_mode_manager + ackermann_mux),

@@ -21,7 +21,7 @@ EXPECT = {
     "/car_state/frenet/odom": 30, "/state": 20, "/debug/l1_lookahead": 50,
 }
 # 이 토픽들은 이벤트성이라 레이트 판정 대상이 아니다
-SKIP = {"/tf_static", "/global_waypoints", "/mppi_active",
+SKIP = {"/tf_static", "/global_waypoints",
         "/commands/motor/brake", "/avoid_waypoints", "/overtake_waypoints",
         "/perception/detection/raw_obstacles"}
 THRESH = 0.90

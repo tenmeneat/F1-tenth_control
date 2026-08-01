@@ -15,6 +15,11 @@
 #      그 토픽이 필요하면 --remote 를 쓸 것.
 #
 # 녹화가 끝나면 토픽별 달성률을 자동 검사한다 — 무선 유실 여부를 매번 숫자로 남기기 위함.
+#
+# ℹ️ 시작 시점: control 을 다 띄운 **뒤에 시작해도 된다**. /global_waypoints·/tf_static·
+#    /mppi_active 는 transient_local(latched)이고 rosbag2 가 발행자 QoS 에 맞춰 구독하므로
+#    늦게 붙어도 과거 발행분을 받아온다(07-31 실측: tf_static 1개 / global_waypoints 5개).
+#    실제 제약은 "조이스틱 A(자율) 를 누르기 전"이다 — 자율 진입 과도구간을 놓치면 안 된다.
 
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -56,11 +61,17 @@ if [ "$MODE" = "remote" ]; then
 fi
 
 # ── 랩탑 녹화 ───────────────────────────────────────────────────────────────
+# ⚠️ set -u 를 켠 채로 ROS setup.bash 를 소싱하면 안 된다 — 그 안의
+#    AMENT_TRACE_SETUP_FILES 참조가 unbound variable 로 걸려 스크립트가 **그 자리에서
+#    조용히 종료**한다(아랫줄 2>/dev/null 이 에러 메시지까지 삼켜서 화면엔 아무것도 안 남는다).
+#    2026-07-31에 실제로 겪음. 소싱 구간만 -u 를 풀고 끝나면 다시 켠다.
+set +u
 . /opt/ros/jazzy/setup.bash 2>/dev/null || . /opt/ros/humble/setup.bash
 [ -f "$HOME/2026_IFAC/install/setup.bash" ] && . "$HOME/2026_IFAC/install/setup.bash"
 # /sensors/core(vesc_msgs)용 최소 워크스페이스. 정의는 젯슨 bag의 message_definitions에서
 # 추출해 재구성했고 타입 해시가 젯슨과 일치함을 확인했다(RIHS01_9a9543e6…444c).
 [ -f "$HOME/vesc_msgs_ws/install/setup.bash" ] && . "$HOME/vesc_msgs_ws/install/setup.bash"
+set -u
 export ROS_DOMAIN_ID="$DOMAIN"
 
 if ! ros2 interface show vesc_msgs/msg/VescStateStamped >/dev/null 2>&1; then
@@ -91,8 +102,19 @@ fi
 
 echo "🔴 랩탑에서 녹화: $DEST"
 echo "   Ctrl+C 로 종료 → 달성률 자동 검사"
-trap '' INT
-ros2 bag record -s sqlite3 -o "$DEST" "${TOPICS[@]}"
+# 🔴 trap '' INT (무시)로 두면 Ctrl+C 가 레코더에 안 먹는다 — 화면에 ^C 만 찍히고 녹화가
+#    안 멈춘다. 2026-07-31에 pty를 물려 A/B로 실측:
+#      trap '' INT       → 20초 지나도 레코더 생존 (사용자가 겪은 증상)
+#      trap 없음          → 0.2초 종료. 단 부모까지 같이 죽어 아래 달성률 검사가 안 돌아감
+#      trap 'echo' INT   → 0.3초 종료 + 달성률 검사 정상 실행  ← 이것만 둘 다 만족
+#    ⚠️ /proc/<pid>/status 의 SigIgn 으로는 이 차이가 안 보인다(세 경우 모두 0x4=SIGQUIT).
+#       신호 disposition 이 아니라 **실제 종료 여부**로 판정할 것.
+# ⚠️ --max-cache-size 기본값은 100 MiB이고 이중 버퍼라 최악 200 MiB가 RAM에 떠 있다가
+#    **종료할 때 한꺼번에** 디스크로 쏟아진다 → Ctrl+C 후 한참 안 끝나는 원인.
+#    10 MiB로 낮추면 주행 중에 조금씩 쓰고 종료가 즉시 끝난다. 우리 데이터율은
+#    ~1 MB/s(26토픽, /scan 40Hz 포함)라 10 MiB면 쓰기 횟수도 부담이 아니다.
+trap 'echo' INT
+ros2 bag record -s sqlite3 --max-cache-size 10485760 -o "$DEST" "${TOPICS[@]}"
 trap - INT
 
 echo

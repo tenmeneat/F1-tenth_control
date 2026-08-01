@@ -12,8 +12,9 @@ import _control_common as common
 def generate_launch_description():
     # teleop(조이스틱 수동/자율/E-stop Mux)은 이 저장소 담당이 아니다(2026-07-29 제거) —
     # 실차는 f1tenth_stack(drive_mode_manager + ackermann_mux), 시뮬은 Mux 없이
-    # drive_source_selector가 자율 명령(/drive_autonomous 또는 /drive_mppi)을 /drive로
-    # 직결한다. 기동 즉시 자율주행이며 별도 인자가 필요 없다(구 force_autonomous 폐지).
+    # drive_source_selector가 자율 명령(/drive_autonomous)을 /drive로 직결한다.
+    # 기동 즉시 자율주행이며 별도 인자가 필요 없다(구 force_autonomous 폐지).
+    # (MPPI 컨트롤러 노드는 2026-08-01 제거 — 대회 준비 기간 동안 MAP에만 집중)
 
     # 종방향 최대 가속도 한계 [m/s^2] — real과 값이 갈릴 수 있어 진입점 파일에 각자 둔다.
     # 공격적 속도 프로파일(fuck_f1 재생성분)을 직선에서 놓치지 않도록 상향된 값(폐루프 6.97s
@@ -37,7 +38,7 @@ def generate_launch_description():
     # 속도를 낮춰 원인분리를 하려다 발견 — 두 컨트롤러 모두에 같은 값이 가야 비교가 성립한다.
     max_speed_arg = DeclareLaunchArgument(
         'max_speed', default_value='12.0',
-        description='직선 최고속도 캡 [m/s] (control_map_node의 max_speed = control_mppi_node의 v_max)'
+        description='직선 최고속도 캡 [m/s] (control_map_node의 max_speed)'
     )
 
     steering_control = common.build_control_map_node(
@@ -57,13 +58,6 @@ def generate_launch_description():
         imu_linear_scale=common.IMU_LINEAR_SCALE_SIM,
     )
 
-    # MPPI 컨트롤러 노드 — control_map_node와 나란히 상시 구동(/drive_mppi 발행).
-    # 실차 전 시뮬 검증용. 조이스틱 RB로 MAP↔MPPI 즉시 전환.
-    mppi_control = common.build_control_mppi_node(
-        odom_topic='/ego_racecar/odom',
-        max_speed=LaunchConfiguration('max_speed'),
-    )
-
     # 시뮬 전용: odom 요레이트 → /imu/data 중계 (gym_bridge는 IMU를 발행하지 않음)
     sim_imu_bridge = Node(
         package='f1tenth_control',
@@ -76,10 +70,8 @@ def generate_launch_description():
         }]
     )
 
-    # MAP/MPPI 슬림 셀렉터 — 자율 명령을 /drive로 포워딩(gym_bridge가 구독).
-    # 시뮬엔 /joy 발행자가 없으므로 항상 기본 알고리즘 [MAP]로 동작한다. MPPI를 시험하려면
-    # /joy를 발행하는 조이스틱 드라이버를 따로 띄워 RB(5)로 전환하면 된다(teleop 아님 — 셀렉터는
-    # 수동 조종/E-stop 기능이 없다).
+    # 자율 명령(/drive_autonomous) → /drive 포워딩(gym_bridge가 구독).
+    # (2026-08-01: MPPI 제거로 MAP/MPPI 셀렉터 기능도 걷어냄 — 순수 포워더)
     drive_source_selector = Node(
         package='f1tenth_control',
         executable='drive_source_selector',
@@ -94,6 +86,5 @@ def generate_launch_description():
         max_speed_arg,
         sim_imu_bridge,
         steering_control,
-        mppi_control,
         drive_source_selector,
     ])

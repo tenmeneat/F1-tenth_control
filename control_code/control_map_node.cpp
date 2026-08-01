@@ -22,7 +22,6 @@
 #include "f1tenth_control/imu_stability_controller.hpp"
 #include "f1tenth_control/steering_lookup_table.hpp"
 #include "f110_msgs/msg/wpnt_array.hpp"
-#include "f110_msgs/msg/obstacle_array.hpp"
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
 
@@ -351,24 +350,6 @@ public:
         obstacle_margin_ = declare_parameter<double>("obstacle_margin", 0.3);
         obstacle_avoid_hold_cycles_ = declare_parameter<int>("obstacle_avoid_hold_cycles", 15);
 
-        // 장애물 종방향 감속 — opponent_detector의 raw 클러스터로 통로 전방 물체 앞에서
-        // 멈출 수 있는 속도로 target_speed를 캡한다. 조향 미개입 soft 감속이며, 최종 e-stop은
-        // planning 파트 소관.
-        // ⚠️ obstacle_brake_decel(6.0)은 prebrake_decel과 같은 성격인데 아직 실측(~0.4)보다
-        //    훨씬 낙관적이다. 회피/추월 거동에 직접 영향이 있어 별도 실차 검증 후 조정할 것.
-        obstacle_brake_enable_ = declare_parameter<bool>("obstacle_brake_enable", true);
-        obstacle_raw_topic_ = declare_parameter<std::string>(
-            "obstacle_raw_topic", "/perception/detection/raw_obstacles");
-        obstacle_brake_decel_ = declare_parameter<double>("obstacle_brake_decel", 6.0);
-        obstacle_stop_gap_ = declare_parameter<double>("obstacle_stop_gap", 1.0);
-        obstacle_corridor_halfwidth_ = declare_parameter<double>("obstacle_corridor_halfwidth", 0.35);
-        obstacle_max_range_ = declare_parameter<double>("obstacle_max_range", 9.0);
-        obstacle_brake_hold_cycles_ = declare_parameter<int>("obstacle_brake_hold_cycles", 10);
-        obstacle_brake_timeout_ = declare_parameter<double>("obstacle_brake_timeout", 0.3);
-        // 로컬 회피경로 추종 중엔 캡을 0(완전정지)이 아니라 이 하한에서 바닥 처리 — planner가
-        // 커밋한 회피 라인을 신뢰해 정지 대신 관통. 글로벌 대기 중엔 하한 없이 정지까지 허용.
-        obstacle_avoid_min_speed_ = declare_parameter<double>("obstacle_avoid_min_speed", 1.5);
-
         acc_now_ = std::vector<double>(10, 0.0);
 
         // ── 2. LUT 로드 (다중 경로 Fallback — 전부 ament 경로, 하드코딩 홈 경로 없음) ──
@@ -409,14 +390,6 @@ public:
         scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
             "/scan", 10, std::bind(&ControlMapNode::scan_callback, this, std::placeholders::_1));
 
-        if (obstacle_brake_enable_) {
-            obstacle_sub_ = this->create_subscription<f110_msgs::msg::ObstacleArray>(
-                obstacle_raw_topic_, 10,
-                std::bind(&ControlMapNode::obstacle_callback, this, std::placeholders::_1));
-            RCLCPP_INFO(this->get_logger(), "장애물 감속 활성 — raw 장애물 토픽(%s) 구독",
-                        obstacle_raw_topic_.c_str());
-        }
-        obstacle_last_recv_time_ = this->now();
         odom_last_recv_time_ = this->now();
 
         // 자율 체결 상태(실차 f1tenth_stack drive_mode_manager가 estop/manual/autonomous 발행).
@@ -495,11 +468,6 @@ private:
 
     void scan_callback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg) { latest_scan_ = msg; }
 
-    void obstacle_callback(const f110_msgs::msg::ObstacleArray::ConstSharedPtr msg) {
-        latest_obstacles_ = msg;
-        obstacle_last_recv_time_ = this->now();
-    }
-
     void drive_mode_callback(const std_msgs::msg::String::ConstSharedPtr msg) {
         bool engaged = (msg->data == engaged_mode_value_);
         if (engaged != is_engaged_) {
@@ -524,85 +492,6 @@ private:
     bool engage_gate_active() const {
         if (!engage_gate_enable_ || !drive_mode_seen_) return false;
         return (this->now() - drive_mode_last_recv_time_).seconds() < drive_mode_timeout_;
-    }
-
-    // 에고를 글로벌 raceline에 투영해 Frenet (s, d)를 얻는다. 장애물이 글로벌 raceline 프레임의
-    // (s,d)라 감속 판정도 반드시 같은 프레임에서 해야 한다 — 로컬 회피경로를 추종 중이어도
-    // 에고 기준은 글로벌로 고정한다. 반환 true = 유효 투영.
-    bool project_ego_to_global(double& ego_s, double& ego_d) {
-        const size_t n = waypoints_.size();
-        if (n == 0) return false;
-        if (last_global_proj_idx_ >= n) last_global_proj_idx_ = 0;
-
-        const double spacing = std::max(0.01, avg_waypoint_spacing_);
-        int win = std::min(std::max(8, static_cast<int>(std::ceil(3.0 / spacing))),
-                           static_cast<int>(n / 2));
-
-        double min_dist = std::numeric_limits<double>::max();
-        size_t g = last_global_proj_idx_;
-        for (int i = -win; i <= win; ++i) {
-            size_t idx = (last_global_proj_idx_ + i + n) % n;
-            double dist = std::hypot(waypoints_[idx].x - current_x_, waypoints_[idx].y - current_y_);
-            if (dist < min_dist) { min_dist = dist; g = idx; }
-        }
-        if (min_dist > 2.5) {
-            std::tie(min_dist, g) = scan_closest(waypoints_, current_x_, current_y_);
-        }
-        last_global_proj_idx_ = g;
-
-        ego_s = waypoints_[g].s;
-        // 부호 있는 횡거리 d: 진행방향 좌측 법선(-sin ψ, cos ψ)에 (에고−wp)를 투영.
-        const double nx = -std::sin(waypoints_[g].yaw);
-        const double ny =  std::cos(waypoints_[g].yaw);
-        ego_d = (current_x_ - waypoints_[g].x) * nx + (current_y_ - waypoints_[g].y) * ny;
-        return true;
-    }
-
-    // 통로 전방 장애물에 대한 속도 상한(없으면 +inf). latch-on 즉시 / release는 hold로 느리게.
-    // following_local=true면 캡을 obstacle_avoid_min_speed에서 바닥 처리해 정지 대신 회피 관통
-    // (planner 라인 신뢰). 글로벌 대기 중이면 하한 없이 정지까지 허용.
-    double compute_obstacle_speed_limit(bool following_local) {
-        const double kInf = std::numeric_limits<double>::max();
-        if (!obstacle_brake_enable_) return kInf;
-
-        bool fresh = latest_obstacles_ &&
-                     (this->now() - obstacle_last_recv_time_).seconds() < obstacle_brake_timeout_;
-
-        double cap = kInf;
-        if (fresh && track_length_s_ > 1e-3) {
-            double ego_s = 0.0, ego_d = 0.0;
-            if (project_ego_to_global(ego_s, ego_d)) {
-                const double half_len = 0.5 * track_length_s_;
-                const double lane_lo = ego_d - obstacle_corridor_halfwidth_;
-                const double lane_hi = ego_d + obstacle_corridor_halfwidth_;
-                for (const auto& ob : latest_obstacles_->obstacles) {
-                    if (!ob.is_visible) continue;
-                    // 횡방향 통로 겹침 판정
-                    double od_lo = std::min(ob.d_right, ob.d_left);
-                    double od_hi = std::max(ob.d_right, ob.d_left);
-                    if (od_hi < lane_lo || od_lo > lane_hi) continue;
-                    // 전방거리(s-wrap): 장애물 근단까지
-                    double ds = ob.s_start - ego_s;
-                    while (ds > half_len)  ds -= track_length_s_;
-                    while (ds < -half_len) ds += track_length_s_;
-                    if (ds <= 0.0 || ds > obstacle_max_range_) continue;  // 뒤/너무 먼 것 제외
-                    double free = ds - obstacle_stop_gap_;
-                    double v_cap = (free <= 0.0) ? 0.0
-                                                 : std::sqrt(2.0 * obstacle_brake_decel_ * free);
-                    if (v_cap < cap) cap = v_cap;
-                }
-            }
-        }
-
-        if (cap < kInf) {
-            obstacle_held_cap_ = cap;
-            obstacle_brake_hold_counter_ = obstacle_brake_hold_cycles_;
-        } else if (obstacle_brake_hold_counter_ > 0) {
-            obstacle_brake_hold_counter_--;
-            cap = obstacle_held_cap_;
-        }
-        if (following_local && cap < kInf) cap = std::max(cap, obstacle_avoid_min_speed_);
-        return cap;
     }
 
     void global_path_callback(const f110_msgs::msg::WpntArray::ConstSharedPtr msg) {
@@ -665,7 +554,6 @@ private:
         }
         avg_waypoint_spacing_ =
             waypoints_.empty() ? 0.36 : std::max(0.01, total_path_length / waypoints_.size());
-        track_length_s_ = total_path_length;   // 장애물 s-wrap 기준(닫힌 루프 전제)
 
         smooth_curvature(waypoints_, /*closed=*/true);
 
@@ -1229,10 +1117,6 @@ private:
         // pose 튐 보류 중에는 기하를 못 믿는 상태로 고속 주행하지 않는다.
         if (pose_suspect_)   target_speed = std::min(target_speed, pose_suspect_speed_);
 
-        // 8-a. 장애물 종방향 감속 캡. min_speed 하한을 무시하고 0(정지)까지 눌러야 하므로
-        //      모든 스케일링 뒤 램프 직전이 마지막 게이트다. 실제 감속률은 램프가 제한한다.
-        target_speed = std::min(target_speed, compute_obstacle_speed_limit(following_local));
-
         // 8. 명령 속도 램프
         double final_speed = ramp_speed(last_target_speed_, target_speed, dt,
                                         base_max_accel_, base_max_decel_);
@@ -1465,9 +1349,7 @@ private:
     std::vector<Waypoint> local_waypoints_;  // 로컬 (회피/추월 포함, 신선하면 우선)
     // (mean_track_curvature_는 lat_err_scale 제거와 함께 삭제됨 — 유일한 소비처였다)
     double avg_waypoint_spacing_ = 0.36;     // 수신 전 보수적 기본값
-    double track_length_s_ = 0.0;            // 장애물 s-wrap 기준 트랙 총길이 [m]
     size_t last_target_idx_ = 0, last_local_idx_ = 0;
-    size_t last_global_proj_idx_ = 0;        // 에고 글로벌 투영 추적기
     bool waypoints_initialized_ = false;
     bool local_is_closed_ = false, last_logged_local_closed_ = false;
     rclcpp::Time local_last_recv_time_;
@@ -1495,17 +1377,6 @@ private:
     double obstacle_cone_halfangle_ = 0.14, obstacle_trigger_dist_ = 1.5, obstacle_margin_ = 0.3;
     int obstacle_avoid_hold_cycles_ = 15, avoid_hold_counter_ = 0;
 
-    // 장애물 종방향 감속
-    bool obstacle_brake_enable_ = true;
-    std::string obstacle_raw_topic_;
-    double obstacle_brake_decel_ = 6.0, obstacle_stop_gap_ = 1.0;
-    double obstacle_corridor_halfwidth_ = 0.35, obstacle_max_range_ = 9.0;
-    int obstacle_brake_hold_cycles_ = 10, obstacle_brake_hold_counter_ = 0;
-    double obstacle_brake_timeout_ = 0.3, obstacle_avoid_min_speed_ = 1.5;
-    double obstacle_held_cap_ = std::numeric_limits<double>::max();
-    f110_msgs::msg::ObstacleArray::ConstSharedPtr latest_obstacles_ = nullptr;
-    rclcpp::Time obstacle_last_recv_time_;
-
     std::unique_ptr<GapFollower> gap_follower_;
     std::unique_ptr<StabilityController> stability_controller_;
     sensor_msgs::msg::LaserScan::ConstSharedPtr latest_scan_ = nullptr;
@@ -1516,7 +1387,6 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
-    rclcpp::Subscription<f110_msgs::msg::ObstacleArray>::SharedPtr obstacle_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr drive_mode_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr global_path_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr local_path_sub_;

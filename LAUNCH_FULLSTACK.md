@@ -60,11 +60,24 @@ ros2 launch slam_toolbox online_async_launch.py use_sim_time:=false \
   학습된다(τ=10 s). 계속 굴러다니면 갱신이 안 돼 10분에 ~19°까지 쌓인다
 - 진행 확인: `ros2 topic hz /map` / `ros2 run tf2_ros tf2_echo map odom`
 
-### 저장 (다른 터미널)
+### 저장 (다른 터미널 — 🔴 **slam_toolbox를 끄기 전에**)
 ```bash
 cd ~/slam_toolbox && source /opt/ros/jazzy/setup.zsh && source install/setup.zsh
 ros2 run nav2_map_server map_saver_cli -f ~/slam_toolbox/map --fmt png \
   --ros-args -p save_map_timeout:=30.0 -p map_subscribe_transient_local:=true
+```
+
+🔴 **순서가 전부다: 저장 → 확인 → 그다음에 slam_toolbox에 Ctrl+C.**
+`map_saver_cli`는 `/map`을 **구독해서** 받아 적는 도구라 발행자(slam_toolbox)가 살아 있어야 한다.
+먼저 끄면 30초(`save_map_timeout`)를 기다렸다가 이렇게 죽고 **맵은 그대로 날아간다**:
+```
+[ERROR] [map_saver]: Failed to spin map subscription
+[ros2run]: Process exited with failure 1
+```
+(2026-07-31에 실제로 겪음 — slam Ctrl+C 4초 뒤 map_saver 실행, 정확히 30.0초 뒤 실패.
+매핑 주행을 통째로 다시 했다.) 저장되면 파일 시각으로 확인할 것:
+```bash
+ls -l --time-style=+%H:%M:%S ~/slam_toolbox/map.png ~/slam_toolbox/map.yaml
 ```
 
 ⚠️ **`-f`는 디렉터리가 아니라 "파일 이름 접두사"다.** 예전 문서는 `-f ~/slam_toolbox`라
@@ -357,28 +370,45 @@ ros2 launch f1tenth_control control_real.launch.py max_speed:=2.5 min_speed:=0.5
 ```bash
 ros2 topic echo /drive
 ```
-조이스틱: **A**=자율, **B**=E-stop, **X**=수동, **RB**=MAP↔MPPI.
+조이스틱: **A**=자율, **B**=E-stop, **X**=수동.
 수동/자율/E-stop Mux는 `f1tenth_stack`의 `drive_mode_manager`+`ackermann_mux` 담당,
-우리 `drive_source_selector`는 MAP↔MPPI 선택만 한다.
+우리 `drive_source_selector`는 `control_map_node`의 `/drive_autonomous`를 `/drive`로
+포워딩만 한다(2026-08-01 MPPI 제거로 RB 토글 없음).
 
 ---
 
-## 4. rosbag 녹화 (control 실행 **전에**, 젯슨에서)
+## 4. rosbag 녹화 — **랩탑에서 `f1rec`** (T7 이후에 시작해도 된다)
 
 ```bash
-source ~/f1tenth_ws/install/setup.zsh
-source ~/2026_IFAC/install/setup.zsh
-mkdir -p ~/rosbags && cd ~
-ros2 bag record -s sqlite3 -o ~/rosbags/run_$(date +%m%d_%H%M%S) \
-  /drive_autonomous /drive_mppi /drive /joy /drive_mode /mppi_active /estop_lock \
-  /pf/pose/odom /odom /tf /tf_static /scan /sensors/imu/raw /imu/data \
-  /global_waypoints /local_waypoints \
-  /commands/motor/speed /commands/motor/brake /commands/servo/position /sensors/core
+f1rec [태그]     # → ~/rosbag_log/MMDD/run_MMDD_HHMMSS[_태그]/
+                # 주행 끝나면 Ctrl+C → 토픽 달성률 자동 검사
 ```
+
+🔴 **`ROS_DISCOVERY_SERVER`를 export 하지 말 것.** 젯슨은 디스커버리 서버를 안 쓴다
+(2026-07-31 재확인: 11811 리스닝 없음, fastdds 프로세스 없음 — 평범한 도메인 67 멀티캐스트로 동작).
+이 변수가 있으면 없는 서버한테만 물어보게 돼서 **토픽이 하나도 안 잡힌다.** `.zshrc`에도
+안 들어 있으니 새 터미널은 그냥 쓰면 되고, 실수로 export 했으면 `unset ROS_DISCOVERY_SERVER`.
+(§7의 디스커버리 서버 안내는 젯슨에서 `fastdds discovery -i 0 -l 10.1.1.3 -p 11811`을
+**먼저 띄웠을 때만** 유효하다.)
+
+### 시작 시점 — "control 전"이 아니라 "**A(자율) 누르기 전**"이다
+
+예전 문서는 control 실행 전에 녹화를 걸라고 했는데, 실제 제약은 그게 아니다.
+`/global_waypoints`·`/tf_static`는 전부 **transient_local(latched)**이고
+rosbag2가 발행자 QoS에 맞춰 구독하므로, **늦게 붙어도 과거 발행분을 받아온다.**
+2026-07-31 실측(풀스택 가동 중에 새로 녹화 시작): `/tf_static` 1개 ✓ / `/global_waypoints` 5개 ✓.
+
+따라서 **control(T7)을 다 띄운 뒤에 `f1rec`을 시작해도 된다.** 진짜로 놓치면 안 되는 것은
+자율 진입 순간의 과도구간(engage 게이트·런치 킥)이므로 **조이스틱 A를 누르기 전에만**
+녹화가 돌고 있으면 된다.
+
+### 젯슨에서 직접 녹화해야 할 때
+랩탑 녹화의 달성률이 나쁘거나(무선 유실) `/sensors/core`가 꼭 필요하면:
 ```bash
-ros2 bag info "$(ls -td ~/rosbags/run_* | head -1)"
+f1rec --remote [태그]     # 젯슨에서 녹화 후 랩탑으로 자동 회수
+f1rate                    # 최신 bag 달성률 재검사
 ```
-⚠️ `-s sqlite3` 필수(`tools/bag_analyzer`는 `.db3`만 파싱). ⚠️ 녹화는 젯슨에서(무선이면 `/scan` 드롭).
+⚠️ `-s sqlite3` 고정(`tools/bag_analyzer`는 `.db3`만 파싱) — `f1rec`이 알아서 준다.
 
 ---
 
@@ -444,8 +474,13 @@ ros2 daemon stop && ros2 daemon start
 ros2 topic echo /network_test
 ```
 ⚠️ 젯슨은 멀티홈(`wlP1p1s0` 10.1.1.3 통신 / `enP8p1s0` 192.168.0.15 **라이다 전용** / `l4tbr0` USB).
-wifi AP가 멀티캐스트를 막으면 본체에서 Discovery Server를 쓴다:
+wifi AP가 멀티캐스트를 막으면 Discovery Server를 쓴다. ⚠️ **먼저 젯슨에서 서버를 띄워야 한다** —
+현재 젯슨에는 안 떠 있고(2026-07-31 확인), 서버 없이 아래 변수만 export 하면 **토픽이 하나도
+안 잡힌다**(있지도 않은 서버한테만 물어보게 된다). 실제로 07-20·07-31 두 번 이걸로 헤맸다.
 ```bash
+# 젯슨에서 먼저
+fastdds discovery -i 0 -l 10.1.1.3 -p 11811
+# 그 다음에야 본체에서
 export ROS_DISCOVERY_SERVER="10.1.1.3:11811"
 export ROS_SUPER_CLIENT=true     # ros2 topic list 열거까지 하려면
 ```

@@ -18,10 +18,11 @@ def generate_launch_description():
     #   - use_imu=True: VESC 내장 IMU 영점/세팅 완료 → 롤 인지 ESC 활성
     #   - 비상제동(AEB)은 제어 파트에서 제거됨 — 실제 비상정지는 planning 파트가 판단/발행
     #   - 수동/자율/E-stop Mux는 f1tenth_stack(drive_mode_manager + ackermann_mux)이 담당 →
-    #     우리 joy_teleop_monitor는 이 런치에서 제외(2026-07-17). 대신 MAP/MPPI만 고르는
-    #     drive_source_selector가 /joy(RB)를 구독해 /drive(navigation 채널)로 포워딩(아래 참고).
+    #     우리 joy_teleop_monitor는 이 런치에서 제외(2026-07-17). 대신 drive_source_selector가
+    #     control_map_node의 /drive_autonomous를 그대로 /drive(navigation 채널)로 포워딩한다
+    #     (2026-08-01 MPPI 제거 후 순수 포워더, 아래 참고).
     #   - joy_node(조이스틱 드라이버)도 이 런치에 없음 — f1tenth_stack이 라이다/조이스틱/vesc
-    #     드라이버를 함께 기동하므로 중복 방지 위해 제거(2026-07-14). 셀렉터는 그쪽 /joy를 구독.
+    #     드라이버를 함께 기동하므로 중복 방지 위해 제거(2026-07-14).
     #   - ackermann_to_vesc_node도 없음(f1tenth_stack이 자체 기동, 아래 참고)
     # 전제: 하드웨어 브링업(f1tenth_stack의 drive_mode_manager, ackermann_mux, vesc_driver,
     #       ackermann_to_vesc, LiDAR, joy_node)과 particle_filter, planning이 /scan, /joy,
@@ -155,48 +156,30 @@ def generate_launch_description():
         remappings=[('/imu/data', 'sensors/imu/raw')],
     )
 
-    # ── MPPI 노드 배선 제거 (2026-07-27) ─────────────────────────────────────
+    # ── MPPI 배선 완전 제거 (2026-08-01) ─────────────────────────────────────
     # 실차 bag 3건(07-26 20:41, 07-27 19:44/20:25) 모두에서 /drive_mppi가 50Hz 목표 대비
-    # **10Hz**밖에 못 나왔다 — solve 하나에 ~100ms로 실시간 예산(20ms)을 5배 초과한다.
-    # 그런데 실제로는 MAP만 쓰고 있어(RB 미사용) 출력은 셀렉터가 전부 버린다.
-    # 즉 젯슨 CPU만 먹는 순수 낭비였고, 07-27 19:44 bag에선 /odom·/pf/pose/odom·/scan이
-    # **동시에 ~140ms 멈추는** 시스템 전체 정지가 관측됐다(과부하 징후).
+    # 10Hz밖에 못 나왔고(solve ~100ms, 실시간 예산 20ms의 5배), 실제로는 MAP만 쓰고 있어
+    # 출력은 버려지는 순수 낭비였다(07-27부터 이 런치에서 배선 제외). 대회가 한 달 앞으로
+    # 다가와 MAP 하나에만 집중하기로 하고 2026-08-01에 MPPI 노드/솔버/셀렉터 로직 전체를
+    # 코드베이스에서 제거했다 — 되살리려면 git 이력에서
+    # control_code/control_mppi_{node,solver_cpu.cpp,solver_gpu.cu},
+    # include/f1tenth_control/mppi_{gpu,types_gpu}.hpp,
+    # _control_common.py의 build_control_mppi_node()를 함께 복원할 것.
     #
-    # 되살리려면: 아래 블록 주석 해제 + LaunchDescription에 `mppi_control,` 복원 +
-    # drive_source_selector의 algorithm_button을 99 → 5(RB)로 되돌릴 것. 세 곳 다 필요하다.
-    # (시뮬 control_sim.launch.py는 그대로 둔다 — 거긴 CPU 여유가 있고 MPPI 튜닝에 쓴다)
-    #
-    # mppi_control = common.build_control_mppi_node(
-    #     odom_topic=LaunchConfiguration('odom_topic'),
-    #     max_speed=LaunchConfiguration('max_speed'),
-    #     remappings=[('/imu/data', 'sensors/imu/raw')],
-    # )
-
     # 실차 수동/자율/E-stop Mux는 팀 공용 f1tenth_stack이 담당한다(drive_mode_manager +
     # ackermann_mux). 따라서 우리 joy_teleop_monitor는 이 런치에서 제외한다(2026-07-17) —
     # 띄우면 /drive를 이중 발행해 f1tenth_stack의 navigation 입력과 충돌한다.
     #
-    # 대신 MAP/MPPI 알고리즘 선택만 담당하는 슬림 셀렉터(drive_source_selector)를 띄운다.
-    # f1tenth_stack 스택엔 MAP/MPPI 개념이 없고 자율 입력은 mux의 navigation 채널 'drive'
-    # 하나뿐이라, 이 노드가 RB로 /drive_autonomous(MAP)↔/drive_mppi(MPPI)를 골라 /drive로
-    # 포워딩한다. /drive는 f1tenth_stack ackermann_mux의 navigation 입력(우선순위10)과
-    # 토픽명이 일치해 자동으로 흘러들어간다. RB(5)는 drive_mode_manager가 안 쓰는 버튼이라
-    # 충돌 없음. E-stop은 drive_mode_manager가 estop_lock으로 mux 전체를 마스킹하므로 이
-    # 노드가 계속 /drive를 내보내도 제동 중엔 차단된다(셀렉터는 E-stop을 몰라도 됨).
+    # drive_source_selector는 이제 MAP 출력(/drive_autonomous)을 그대로 /drive로 포워딩만
+    # 한다. /drive는 f1tenth_stack ackermann_mux의 navigation 입력(우선순위10)과 토픽명이
+    # 일치해 자동으로 흘러들어간다. E-stop은 drive_mode_manager가 estop_lock으로 mux 전체를
+    # 마스킹하므로 이 노드가 계속 /drive를 내보내도 제동 중엔 차단된다(셀렉터는 E-stop을
+    # 몰라도 됨).
     drive_source_selector = Node(
         package='f1tenth_control',
         executable='drive_source_selector',
         name='drive_source_selector',
         output='screen',
-        parameters=[{
-            # ⚠️ 2026-07-27: MPPI 노드를 뺐으므로 RB 토글을 **의도적으로 무효화**했다.
-            # 살려두면 RB를 누르는 순간 셀렉터가 MPPI를 활성 소스로 잡는데 /drive_mppi가
-            # 아무도 발행하지 않아 /drive가 침묵 → mux navigation 입력이 끊겨 차가 선다.
-            # drive_source_selector는 buttons.size() <= algorithm_button_ 이면 조기 반환하므로
-            # 패드 버튼 수(F710 11개)보다 큰 값을 주면 토글이 안전하게 죽는다.
-            # MPPI 복원 시 5(RB)로 되돌릴 것.
-            'algorithm_button': 99,
-        }]
     )
 
     # ackermann_to_vesc_node도 이 launch에 없다(2026-07-17 제거). f110(f1tenth_stack)이 이미
@@ -227,6 +210,5 @@ def generate_launch_description():
         lookup_table_file_arg,
         base_max_accel_arg,
         steering_control,
-        # mppi_control,   # 2026-07-27 제거 — 위 블록 참고
         drive_source_selector,
     ])
