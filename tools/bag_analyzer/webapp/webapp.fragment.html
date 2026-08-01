@@ -151,6 +151,10 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
     </div>
     <div class="tblscroll"><table id="bintbl" class="bintbl"></table></div>
 
+    <h2>코너별 통과 속도 <span class="hint">— 진입 → 에이펙스(최저속) → 탈출 · 그립 여유</span></h2>
+    <div class="tblscroll"><table id="cornertbl" class="bintbl"></table></div>
+    <div class="explain" id="ex_corner" style="margin-top:8px"></div>
+
     <h2>파트별 튜닝 가이드 <span class="hint">— 파트마다 무엇을 · 어떤 파라미터로 (🔧)</span></h2>
     <div id="guide"></div>
     <h3>권장 다음 셰이크다운</h3>
@@ -800,11 +804,24 @@ function segmentCorners(tr,grip){
   if(cur)segs.push(cur);
   return segs.filter(s=>s.i1-s.i0>=3).map(s=>{
     let peakAl=0,minRad=1e9,sat=false;const entryV=tr[s.i0][4];
+    // ── 에이펙스(코너 최저속) ──────────────────────────────────────────────
+    // "코너를 몇으로 통과했나"의 답. 전체 최저속(bag stats의 minV)은 정지출발 때문에
+    // 거의 항상 0이라 무의미하므로, 코너 구간 안에서만 최저를 잡는다.
+    // ⚠️ 구간 판정(κ>0.15 && v>1.0)에 걸린 표본만 보면 안 된다 — 코너에서 1.0 m/s
+    //    아래로 떨어지면 정작 진짜 에이펙스가 판정에서 빠진다. i0~i1 **전 구간**을 훑는다.
+    let apexV=Infinity,apexI=s.i0;
     for(let i=s.i0;i<=s.i1;i++){const a=Math.abs(tr[i][5]);if(a>peakAl)peakAl=a;
+      if(tr[i][4]<apexV){apexV=tr[i][4];apexI=i;}
       const rad=Math.abs(tr[i][7])>1e-3?tr[i][4]/Math.abs(tr[i][7]):1e9;if(rad<minRad)minRad=rad;
       if(rad<1.2*R_MIN&&tr[i][4]>1.5)sat=true;}
+    const exitV=tr[s.i1][4];
     const vSafe=peakAl>grip?entryV*Math.sqrt(grip/peakAl):null;
-    return {i0:s.i0,i1:s.i1,t0:tr[s.i0][0],t1:tr[s.i1][0],entryV,peakAl,minRad,sat,vSafe};});
+    // 이 코너 반경에서 그립상 낼 수 있었던 속도 √(a_lat·R). 에이펙스가 이보다 많이
+    // 낮으면 그립을 남기고 돈 것(= 사전감속 과다), 넘으면 그립 초과로 밀린 것.
+    const vGrip=isFinite(minRad)&&minRad<50?Math.sqrt(grip*minRad):null;
+    return {i0:s.i0,i1:s.i1,t0:tr[s.i0][0],t1:tr[s.i1][0],
+            entryV,apexV:isFinite(apexV)?apexV:entryV,apexT:tr[apexI][0],exitV,
+            peakAl,minRad,sat,vSafe,vGrip};});
 }
 
 // ══ 자동 진단 — 파트별(퍼셉션/로컬라이제이션/글로벌/로컬/컨트롤) + 적응형 ══
@@ -1012,7 +1029,15 @@ function diagnose(S){
   const notEstop=tr.map((_,i)=>{let es=false;for(const[et,ev]of S.estop){if(et<=t[i])es=ev;}return !es;});
   const speedBins=computeSpeedBins(t,vx,dvx,peakV,notEstop);
 
-  const stats={dur:S.dur,peakV,minV,minVMoving,peakAl,overFrac,minDecel,nCorners:corners.length,grip,gripReached:gi.reached,gripPeak:gi.peak,
+  // ── 코너 최저속(에이펙스) 집계 ──
+  // 전체 최저속은 정지출발이 지배해 항상 0이다. 실제로 알고 싶은 "코너를 몇으로 도나"는
+  // 코너 구간별 최저속의 분포다. 대표값은 중앙값(코너 하나의 이상치에 안 흔들림).
+  const apexAll=corners.map(c=>c.apexV).filter(v=>isFinite(v)).sort((a,b)=>a-b);
+  const slowest=corners.reduce((m,c)=>(m&&m.apexV<=c.apexV)?m:c,null);
+  const cornerV=apexAll.length?{min:apexAll[0],max:apexAll[apexAll.length-1],
+                                med:pct(apexAll,0.5),slowT:slowest?slowest.apexT:null}:null;
+
+  const stats={dur:S.dur,peakV,minV,minVMoving,peakAl,overFrac,minDecel,nCorners:corners.length,cornerV,grip,gripReached:gi.reached,gripPeak:gi.peak,
                alatSource:S.alatSource,peakAlCmd:absmax(alatCmd),usRatio,gainA,kUs,speedBins};
   return {findings,rec,stats,gripUsed:grip,corners};
 }
@@ -1095,6 +1120,16 @@ function drawChart(cv,series,opt){opt=opt||{};const c=cv.getContext('2d'),W=cv.c
   xt.ticks.forEach(dt=>{const x=X(T0+dt);if(x<M.l-1||x>W-M.r+1)return;c.strokeStyle='#1a212c';c.lineWidth=1;
     c.beginPath();c.moveTo(x,M.t);c.lineTo(x,Ht-M.b);c.stroke();
     c.fillStyle='#7d8795';c.fillText(dt.toFixed(0)+'s',x,Ht-M.b+3);});
+  // 코너 구간 음영 + 에이펙스(최저속) 점 — 어느 구간이 코너였고 몇까지 떨어졌는지
+  if(opt.corners&&opt.corners.length){
+    c.save();c.beginPath();c.rect(M.l,M.t,PW,PH);c.clip();
+    opt.corners.forEach(cn=>{
+      const x0=X(cn.t0),x1=X(cn.t1);
+      c.fillStyle='rgba(88,166,255,0.10)';c.fillRect(x0,M.t,Math.max(1.5,x1-x0),PH);
+      const bad=cn.sat||cn.peakAl>GRIP;
+      c.fillStyle=bad?'#e5484d':'#58a6ff';
+      c.beginPath();c.arc(X(cn.apexT),Y(cn.apexV),2.6,0,6.2832);c.fill();});
+    c.restore();}
   // grip 한계선
   if(opt.grip){c.strokeStyle='#f5a623';c.setLineDash([4,3]);[opt.grip,-opt.grip].forEach(g=>{if(g<mn||g>mx)return;c.beginPath();c.moveTo(M.l,Y(g));c.lineTo(W-M.r,Y(g));c.stroke();});c.setLineDash([]);}
   // 시리즈 (플롯 영역 클립)
@@ -1208,6 +1243,61 @@ function drawSpeedBinTable(){
       +`<td>${b.nDec?b.meanDec.toFixed(2):'—'}</td><td>${b.nDec?b.pkDec.toFixed(2):'—'}</td>`
       +`<td>${b.n}${b.n<BIN_MIN_N?' ⚠':''}</td></tr>`).join('')
     +'</tbody>';
+}
+
+// ── 코너별 통과 속도 ────────────────────────────────────────────────────────
+// "코너를 몇으로 도나"는 bag 전체 최저속으로는 절대 안 나온다(정지출발이 항상 0을 만든다).
+// 코너 구간마다 진입/에이펙스/탈출을 따로 내고, 그립상 가능했던 √(a_lat·R)과 비교해
+// **더 밟을 수 있었는지 / 이미 넘었는지**를 코너 단위로 판정한다.
+const CORNER_SLACK=0.85;   // 에이펙스가 v_grip의 이 비율 미만이면 '그립 남김'
+function drawCornerTable(){
+  const el=document.getElementById('cornertbl');if(!el)return;
+  const C=DATA.corners||[],L=DATA.laps;
+  if(!C.length){el.innerHTML='<tbody><tr><td class="thin">κ>0.15(반경 6.7m 미만) 코너가 검출되지 않았습니다 — 직선 주행 bag이거나 요레이트 신호 부재.</td></tr></tbody>';
+    setEx('ex_corner','코너별 진입·에이펙스·탈출 속도.','코너 미검출 — 판정 불가.','#9aa4b2');return;}
+  const hasLap=!!(L&&L.list.length);
+  const lapOfCorner=c=>{if(!hasLap)return null;const k=L.lapOf[c.i0];return k>=0?L.list[k].n:null;};
+  // 가장 느린 코너를 표에서 바로 찾을 수 있게 표시
+  let slowIdx=0;for(let i=1;i<C.length;i++)if(C[i].apexV<C[slowIdx].apexV)slowIdx=i;
+  el.innerHTML='<thead><tr>'+(hasLap?'<th>랩</th>':'')+'<th>#</th><th>시각</th><th>진입 [m/s]</th>'
+    +'<th>에이펙스(최저) [m/s]</th><th>탈출 [m/s]</th><th>최소반경 [m]</th>'
+    +'<th>피크 |a_lat|</th><th>그립상 가능 √(a·R)</th><th>판정</th></tr></thead><tbody>'
+    +C.map((c,i)=>{
+      const over=c.peakAl>GRIP||c.sat;
+      const slack=c.vGrip!=null&&!over&&c.apexV<c.vGrip*CORNER_SLACK;
+      const verdict=c.sat?'<b style="color:#e5484d">조향 포화</b>'
+        :over?`<b style="color:#e5484d">그립 초과 ${(c.peakAl/GRIP).toFixed(1)}×</b>`
+        :slack?`<span style="color:#f5a623">그립 남김 −${((1-c.apexV/c.vGrip)*100).toFixed(0)}%</span>`
+        :'<span style="color:#7ee787">적정</span>';
+      return `<tr>`+(hasLap?`<td>${lapOfCorner(c)??'—'}</td>`:'')
+        +`<td>${i+1}${i===slowIdx?' ◀':''}</td><td>${(c.t0-T0).toFixed(1)} s</td>`
+        +`<td>${c.entryV.toFixed(2)}</td>`
+        +`<td><b>${c.apexV.toFixed(2)}</b></td><td>${c.exitV.toFixed(2)}</td>`
+        +`<td>${c.minRad<50?c.minRad.toFixed(2):'—'}</td>`
+        +`<td>${c.peakAl.toFixed(1)}</td><td>${c.vGrip!=null?c.vGrip.toFixed(2):'—'}</td>`
+        +`<td>${verdict}</td></tr>`;}).join('')
+    +'</tbody>';
+
+  // 해설 — 표를 그냥 두면 "그래서 뭘 올리나"가 안 보인다
+  const apex=C.map(c=>c.apexV).sort((a,b)=>a-b);
+  const med=pct(apex,0.5),lo=apex[0];
+  const nOver=C.filter(c=>c.peakAl>GRIP||c.sat).length;
+  const nSlack=C.filter(c=>c.vGrip!=null&&!(c.peakAl>GRIP||c.sat)&&c.apexV<c.vGrip*CORNER_SLACK).length;
+  let conc,cc;
+  if(nOver){conc=`코너 ${C.length}개 중 <b>${nOver}개가 그립 초과·조향 포화</b>. 최저 에이펙스 ${lo.toFixed(2)} m/s(중앙 ${med.toFixed(2)}). `
+      +`이 코너들은 더 느리게 들어가야 하고, 튜닝이 아니라 <b>프로파일 감속</b>이 답입니다.`;cc='#e5484d';}
+  else if(nSlack>C.length*0.4){conc=`코너 ${C.length}개 중 <b>${nSlack}개에서 그립을 남기고</b> 돌았습니다(에이펙스가 √(a·R)의 ${(CORNER_SLACK*100).toFixed(0)}% 미만). `
+      +`최저 에이펙스 ${lo.toFixed(2)} m/s(중앙 ${med.toFixed(2)}) — 사전감속이 과하거나 프로파일 코너 속도가 보수적입니다. 랩타임 여유가 여기 있습니다.`;cc='#f5a623';}
+  else{conc=`코너 ${C.length}개 에이펙스 ${lo.toFixed(2)}~${apex[apex.length-1].toFixed(2)} m/s(중앙 ${med.toFixed(2)}) — 그립 대비 적정 범위. 오버스피드 0개.`;cc='#7ee787';}
+  // 그립 미도달 bag이면 '초과/남김' 판정은 가정값 기준이라 참고용이다 — 에이펙스 값 자체는 실측
+  if(!DATA.stats.gripReached)conc+=` <b>단, 이 bag은 그립 한계 미도달</b>이라 판정은 가정 그립 ${GRIP.toFixed(1)} 기준의 참고치입니다`
+    +` — 에이펙스 속도 자체는 실측이라 그대로 믿어도 됩니다.`;
+  setEx('ex_corner',
+    `코너(κ>0.15 = 반경 6.7m 미만) 하나하나의 통과 속도. <b>에이펙스</b>가 그 코너를 실제로 몇으로 돌았나입니다 — `
+    +`상단 '속도 범위'의 최저 0은 정지출발이라 이 값과 무관합니다. `
+    +`<b>그립상 가능 √(a·R)</b>은 ${DATA.stats.gripReached?'실측':'<b>가정</b>'} 그립 ${GRIP.toFixed(1)} m/s²와 그 코너 최소반경으로 계산한 이론 한계속도로, `
+    +`에이펙스가 이보다 낮으면 여유를 남긴 것, 높으면 밀린 것입니다. ◀ = 최저 에이펙스 코너.`,
+    conc,cc);
 }
 
 // ── 계기판 클러스터 (재생 시점 실시간) ──────────────────────────────────────
@@ -1401,7 +1491,7 @@ function drawCharts(){const T=track.map(p=>p[0]);
   const vs=[{t:T,v:track.map(p=>p[4]),color:'#39d353'}];
   if(DATA.cmd)vs.push({t:DATA.cmd.t,v:DATA.cmd.speed,color:'#e6edf3',dash:[5,3],w:1});
   if(DATA.plannedVx)vs.push({t:DATA.plannedVx.t,v:DATA.plannedVx.v,color:'#bc8cff',dash:[2,3],w:1});
-  drawChart(chV,vs,{playhead:true});
+  drawChart(chV,vs,{playhead:true,corners:DATA.corners});
   drawChart(chA,[{t:T,v:track.map(p=>p[9]),color:'#6b7280'},{t:T,v:track.map(p=>p[5]),color:'#e5484d'}],{zeroCenter:true,grip:GRIP,playhead:true});
   drawChart(chD,[{t:T,v:track.map(p=>p[6]),color:'#2dd4bf'}],{zeroCenter:true,playhead:true});}
 function drawStaticCharts(){drawSpeedBins();const T=track.map(p=>p[0]);
@@ -1585,8 +1675,13 @@ function renderReport(D,name){
   const gripTile=st.gripReached?`${st.grip.toFixed(1)} m/s²`:`≥ ${st.gripPeak.toFixed(1)}`;
   // 속도는 최저~최고 범위로. 생 최저는 정지 포함이라 거의 0이므로 '주행 중 최저'를 부기한다.
   const vRange=`${st.minV.toFixed(2)}–${st.peakV.toFixed(2)}`;
-  const vNote=st.minVMoving!=null?`주행 중 최저 ${st.minVMoving.toFixed(2)}`:null;
+  const vNote=st.minVMoving!=null?`주행 중 최저 ${st.minVMoving.toFixed(2)} (정지출발 포함)`:null;
+  // 코너 최저속: 위 '속도 범위'의 0은 정지출발이라 무의미 — 실제 궁금한 건 이쪽이다.
+  const cv=st.cornerV;
+  const cvVal=cv?`${cv.min.toFixed(2)}–${cv.max.toFixed(2)}`:"—";
+  const cvNote=cv?`중앙 ${cv.med.toFixed(2)} · 최저 @ ${cv.slowT!=null?(cv.slowT-T0).toFixed(1)+'s':'—'}`:null;
   const tiles=[["주행 시간",`${st.dur.toFixed(1)} s`],["속도 범위 [m/s]",vRange,vNote],
+    ["코너 최저속 [m/s]",cvVal,cvNote],
     [`최대 |a_lat| (${SRC_LABEL[st.alatSource]||'?'})`,`${st.peakAl.toFixed(1)} m/s²`],
     ["실측 그립",gripTile],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],
     ["요레이트 추종률",st.usRatio!=null?`${(st.usRatio*100).toFixed(0)} %`:"—"],
@@ -1609,7 +1704,8 @@ function renderReport(D,name){
   let recHtml=`<pre class="cmd">${cmd}</pre>`;if(r.note)recHtml+=`<p class="note">＋ 코드 안전망 권장: 측정 a_lat이 그립 초과하거나 조향이 ±0.41에 포화되면 target_speed를 하드컷(스핀/limit-cycle 차단), recovery_lat_error 1.0→0.5.</p>`;
   document.getElementById('reccmd').innerHTML=recHtml;
   document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] · 요레이트 출처 ${SRC_LABEL[st.alatSource]||'?'} (주황선 = ${st.gripReached?'실측':'가정'} 그립 ±${GRIP.toFixed(1)})`;
-  document.getElementById('lab_v').innerHTML='속도 vx [m/s] — 실측(초록)'+(D.cmd?` · 명령(흰 점선, ${D.cmd.src})`:'')+(D.plannedVx?' · 계획(보라 점선)':'');
+  document.getElementById('lab_v').innerHTML='속도 vx [m/s] — 실측(초록)'+(D.cmd?` · 명령(흰 점선, ${D.cmd.src})`:'')+(D.plannedVx?' · 계획(보라 점선)':'')
+    +(D.corners&&D.corners.length?' · <span style="color:#58a6ff">코너 구간(음영)·에이펙스(점, 빨강=그립초과)</span>':'');
   document.getElementById('lab_traj').textContent=`궤적 (map · 위치소스: ${D.poseSrc} · 속도색·빨강=그립초과)`;
   // 캔버스
   gl=document.getElementById('gl');ctx=gl.getContext('2d');
@@ -1623,7 +1719,7 @@ function renderReport(D,name){
   show('modestrip',anyMode);
   show('wrap_steer',!!D.cmd);show('wrap_x',!!D.xtrack);show('wrap_vesc',!!D.vesc);show('wrap_cmd',!!D.cmdBrake);
   show('h_extra',!!(D.cmd||D.xtrack||D.vesc||D.cmdBrake));
-  fillExplain(D);drawSpeedBinTable();renderLaps();computeClusterScales();
+  fillExplain(D);drawSpeedBinTable();drawCornerTable();renderLaps();computeClusterScales();
   computeBounds();defcam();cur=T0;playing=false;
   wireControls();
   const paint=()=>{resizeAll();drawTrajectory();drawStaticCharts();syncSeek();draw();};
