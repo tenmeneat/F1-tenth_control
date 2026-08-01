@@ -220,7 +220,7 @@ def declare_common_args():
         #   v ≤ √((ratio·δ_max − L·κ) / (K_us·κ))
         # 07-26 실차 κ=1.190(R=0.84m) 헤어핀에서 그립 2.11 m/s vs 조향 0.87 m/s — 조향이 먼저 걸린다.
         DeclareLaunchArgument(
-            'understeer_gradient', default_value='0.0',
+            'understeer_gradient', default_value='0.029',
             description='언더스티어 그래디언트 K_us [rad/(m/s^2)]. 0이면 조향 권한 캡 비활성'
         ),
         DeclareLaunchArgument(
