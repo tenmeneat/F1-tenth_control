@@ -11,7 +11,13 @@
 | 지도 이름 | **`map`** (slam_toolbox 기본 저장명 그대로 씀) |
 
 젯슨 `~/.zshrc`에 `ROS_DOMAIN_ID=67`, `F1_MAP`, `RMW_IMPLEMENTATION=rmw_fastrtps_cpp`가
-이미 있으므로 **젯슨에서는 export가 필요 없다.** 본체에서만 맞춰준다.
+이미 있다. 다만 🔴 **`F1_MAP` 값이 지금 `ifac_track`으로 잘못 박혀 있다**(2026-07-31 확인).
+지도 이름은 `map`이므로 **한 번 고쳐두고 시작할 것**:
+```bash
+ssh miru@10.1.1.3 "sed -i 's/^export F1_MAP=.*/export F1_MAP=map/' ~/.zshrc"
+# 이미 열어둔 터미널에는 반영 안 된다 → 새 터미널을 열거나 그 터미널에서: export F1_MAP=map
+```
+확인: `echo $F1_MAP` → `map`. 안 고치면 §0-1 대로 global/local이 통째로 엉뚱한 지도를 본다.
 
 ---
 
@@ -19,12 +25,40 @@
 
 | # | 함정 | 대응 |
 |---|---|---|
-| 1 | **MCL만 `F1_MAP`을 안 읽는다** (기본값 `map` 고정) | MCL 런치에 `map_name:=` 명시. 안 하면 "경로 ≠ 위치추정" |
+| 1 | **세 패키지가 지도 이름을 각각 다른 방식·다른 기본값으로 찾는다** | 아래 표. `F1_MAP=map` + MCL은 `map_name:=map` |
 | 2 | **지도를 넣었으면 재빌드** — MCL은 `src/`가 아니라 설치된 share에서 읽고, 지도는 심볼릭 링크가 아닌 실제 복사본 | §2 재빌드 |
-| 3 | 지도 yaml의 `image:`가 `.pgm`으로 써질 때가 있다 | `.png`로 고칠 것 |
+| 3 | 지도 yaml의 `image:`가 `.pgm`으로 써질 때가 있다 | 저장 시 `--fmt png` (§1) |
 | 4 | `odom→base_link` TF 이중 발행 | `mcl_launch.py`의 `publish_odom_base_tf` 기본 false로 분리 (§6) |
 
-`global_planning`/`local_planning`은 `F1_MAP`을 자동으로 읽으므로 yaml 수정도 인자 전달도 불필요.
+### 0-1. 🔴 지도 이름 해석이 패키지마다 다르다
+
+| 패키지 | 어디서 읽나 | 기본값 | 지금 필요한 것 |
+|---|---|---|---|
+| **MCL** (`particle_filter_cpp`) | `map_name:=` 인자만. **`F1_MAP`을 안 읽는다** | `map` | `map_name:=map` 명시 |
+| **global_planning** | `F1_MAP` 환경변수 | `map` | `F1_MAP=map` |
+| **local_planning** | `F1_MAP` 환경변수 | **`ifac_track`** ← 다르다 | `F1_MAP=map` |
+
+`state_machine` / `wpnt_publisher`는 지도 이름을 안 쓴다.
+
+**젯슨 `~/.zshrc`가 `F1_MAP=ifac_track`이라 지금 global·local이 둘 다 깨진다** (2026-07-31 확인):
+- global_planning → `offline_trajectory_generator/output/ifac_track` … 젯슨엔 `output/map`뿐 ❌
+- local_planning → `src/monte_carlo_localization/maps/ifac_track.yaml` … 젯슨엔 `map.yaml`뿐 ❌
+
+⚠️ 이게 **조용히** 실패한다는 게 문제다. 노드는 뜨는데 경로가 안 나오거나 엉뚱한 지도로 돈다.
+증상은 "스캔은 벽에 맞는데 경로만 어긋남"으로 보인다(§8).
+
+**해결(택1)**
+```bash
+# (a) 권장 — 젯슨 .zshrc를 한 번 고친다. 이후 T2~T4 전부 그냥 실행하면 된다
+ssh miru@10.1.1.3 "sed -i 's/^export F1_MAP=.*/export F1_MAP=map/' ~/.zshrc"
+
+# (b) 터미널마다 — 이미 열어둔 창이나 임시로 다른 지도를 쓸 때
+export F1_MAP=map
+
+# (c) 명령 앞에 붙이기 — 그 한 번만 적용
+F1_MAP=map ros2 launch global_planning global_planning.launch.py
+```
+MCL은 어느 경우에도 `F1_MAP`을 안 읽으므로 **`map_name:=map`을 항상 명시**한다.
 
 ### 2026-07-29 젯슨에서 바꾼 것
 - `vesc.yaml` `speed_min/max`: ±33856 → **±40000** (= 9.45 m/s). 허용 상한을 푼 것일 뿐
@@ -168,17 +202,9 @@ scp -r ~/2026_IFAC/offline_trajectory_generator/output/map \
 - **글로벌 패스**는 `output_base_dir: "offline_trajectory_generator/output"`이 **런치 cwd 기준
   상대경로**라 소스 트리를 직접 읽는다 → 재빌드 없이 즉시 반영(단 `~/2026_IFAC`에서 launch)
 
-🔴 **`F1_MAP`과 지도 이름이 어긋나면 조용히 실패한다.** 지도 이름은 **`map`이 기본**인데
-젯슨 `~/.zshrc`는 `export F1_MAP=ifac_track`으로 되어 있다(2026-07-31 확인). 이러면
-`global_planning`이 없는 `output/ifac_track`을 본다 — 젯슨 `output/`에는 `map`뿐이다. 둘 중 하나:
-```bash
-# (a) 젯슨 F1_MAP을 map으로 고친다  ← 권장
-ssh miru@10.1.1.3 "sed -i 's/^export F1_MAP=.*/export F1_MAP=map/' ~/.zshrc"
-
-# (b) 매번 인자로 넘긴다
-ros2 launch global_planning global_planning.launch.py map_name:=map
-```
-MCL은 어차피 `F1_MAP`을 안 읽으므로(§0-1) `map_name:=map`을 계속 명시한다.
+🔴 **전송 후 반드시 `F1_MAP`을 맞출 것** — 지도 이름이 어긋나면 조용히 실패한다.
+젯슨 `~/.zshrc`가 `F1_MAP=ifac_track`이라 global·local이 둘 다 없는 경로를 본다.
+해결과 패키지별 차이는 **§0-1**에 정리해 뒀다.
 
 ### yaml 확인 — `image:`를 `.png`로
 ```yaml
@@ -257,8 +283,10 @@ ros2 topic echo /drive_mode --field data     # estop → (X) manual
 ### T2 (젯슨) — MCL
 ```bash
 cd ~/2026_IFAC && source install/setup.zsh
+echo "F1_MAP=$F1_MAP"     # ← map 이어야 한다. 아니면 §0-1 먼저 고칠 것
 ros2 launch particle_filter_cpp mcl_launch.py mod:=real map_name:=map use_rviz:=false
 ```
+`map_name:=map` — MCL은 `F1_MAP`을 안 읽으므로 **항상 명시**한다(§0-1).
 `use_rviz:=false` — RViz는 본체에서 띄운다(젯슨 렌더 부하 0).
 
 검증:
@@ -294,16 +322,19 @@ Fixed Frame `map` / Map `/map` / LaserScan `/scan` / Odometry `/pf/pose/odom` / 
 ### T3 (젯슨) — global planning
 ```bash
 cd ~/2026_IFAC && source install/setup.zsh
+export F1_MAP=map        # §0-1 대로 .zshrc를 고쳐뒀으면 생략 가능
 ros2 launch global_planning global_planning.launch.py
 ```
 ⚠️ **반드시 `~/2026_IFAC`에서** — `output_base_dir`이 상대경로다.
 
 검증:
 ```bash
-ros2 param get /global_trajectory_publisher_node map_name
+ros2 param get /global_trajectory_publisher_node map_name   # ← 'map' 이어야 한다
 ros2 topic info /global_waypoints --verbose        # publisher 1개
 ros2 topic info /car_state/frenet/odom --verbose   # /frenet_odom_node
 ```
+`map_name`이 `ifac_track` 등으로 나오면 `F1_MAP`이 안 맞은 것이다(§0-1).
+그 상태로는 `output/<그 이름>/global_waypoints.json`을 찾다 실패한다.
 RViz MarkerArray 추가: `/global_waypoints/markers`, `/trackbounds/markers`, `/centerline_waypoints/markers` → 지도와 겹쳐야 한다.
 
 
@@ -311,9 +342,11 @@ RViz MarkerArray 추가: `/global_waypoints/markers`, `/trackbounds/markers`, `/
 ### T4 (젯슨) — local planning
 ```bash
 cd ~/2026_IFAC && source install/setup.zsh
+export F1_MAP=map        # §0-1 대로 .zshrc를 고쳐뒀으면 생략 가능
 ros2 launch local_planning local_planning.launch.py simulator:=false
 ```
-`reference_map`은 `F1_MAP`에서 자동으로 풀린다(인자 불필요).
+`reference_map`은 `F1_MAP`에서 `<이름>.yaml`로 풀린다. ⚠️ **여기 기본값만 `ifac_track`이라**
+`F1_MAP`이 비어 있으면 global(기본 `map`)과 **서로 다른 지도를 본다**(§0-1).
 ```bash
 ros2 node list | grep -i map      # map_server 실제 노드 이름 확인
 ```
@@ -496,7 +529,8 @@ export ROS_SUPER_CLIENT=true     # ros2 topic list 열거까지 하려면
 | 본체에서 젯슨 토픽이 안 보임 | `ROS_DOMAIN_ID` 양쪽 67 / 같은 서브넷 / `ros2 daemon stop && start` / AP client isolation / VPN·방화벽 |
 | 스캔이 벽과 안 맞음 | 지도, `2D Pose Estimate`, `base_link→laser` static TF, MCL |
 | 스캔은 맞는데 경로만 어긋남 | `global_waypoints.json`의 `map_info_str`, 지도 `origin`/`resolution` |
-| MCL만 다른 지도를 봄 | `map_name:=`을 안 넘겼다 (§0-1) |
+| MCL만 다른 지도를 봄 | `map_name:=map`을 안 넘겼다 — MCL은 `F1_MAP`을 안 읽는다 (§0-1) |
+| global/local이 경로를 못 찾거나 다른 지도를 봄 | `echo $F1_MAP` → `map`인지. local_planning은 기본값이 `ifac_track`이라 특히 잘 어긋난다 (§0-1) |
 | 지도를 넣었는데 없다고 함 | 재빌드 안 함 (§2) |
 | `/local_waypoints` 무발행 | `child_frame_id`가 정수 문자열인지 (T6) |
 | `/joy` 무발행 | F710 절전 — 로지텍 버튼. `input` 그룹은 새 로그인 세션에만 적용 |
