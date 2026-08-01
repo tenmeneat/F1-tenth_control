@@ -64,7 +64,15 @@ slam_toolbox:
     loop_search_space_smear_deviation: 0.03
 
     # Scan Matcher Parameters
-    distance_variance_penalty: 0.5      
+    # 2026-08-01 가설 적용(미스윕) — 0.5 -> 0.05. angle_variance_penalty와 같은 공식 구조
+    # (distancePenalty = max(1 - 0.2*ddist^2/distance_variance_penalty, minimum_distance_penalty))
+    # 라서, correlation_search_space_dimension=0.5 창 안에서 dvp=0.5는 ddist=0.05m에도
+    # penalty≈0.999 — odom 진행거리 사전정보가 사실상 스캔매처를 못 묶는 상태. avp가 1.0일 때
+    # 겪었던 것과 같은 "사전정보 무력화" 구조라, 가장 긴 직선 구간 지도에 찍히는 흐릿한 회색
+    # 점(=여러 랩에서 등록 위치가 진행방향으로 표류)의 원인 후보. ⚠️ avp처럼 실측 스윕
+    # 검증 전이니, replay_slam.sh + map_quality.py로 그 직선 구간 지도 품질을 확인하고
+    # 최종값을 정할 것 — 이 0.05는 스윕 시작점일 뿐 확정값 아님.
+    distance_variance_penalty: 0.05
     # 2026-07-28 오프라인 스윕 결과 1.0 -> 0.02. Karto 스캔매처의 각도 페널티는
     #   anglePenalty = max(1 - 0.2*dtheta^2/angle_variance_penalty, minimum_angle_penalty)
     # 라서 avp=1.0이면 탐색창 전체(+-20도)에서 페널티가 최대 2.4%뿐이다 =
