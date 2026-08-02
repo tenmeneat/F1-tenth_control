@@ -202,16 +202,15 @@ def declare_common_args():
         # ── 종방향 감속: 두 개의 서로 다른 감속도 (튜닝 방향이 정반대라 분리했다) ──
         #   base_max_decel = 명령 속도를 초당 얼마나 빨리 떨어뜨릴 수 있나(램프 rate limit) → 높게
         #   prebrake_decel = 차가 **실제로** 낼 수 있는 감속도(제동거리 v²/2a) → 실측값에 맞춤
-        # ⚠️ 07-25 실차 실측 감속은 -0.4 m/s²(VESC 속도모드는 회생제동이 거의 없어 사실상 coast).
-        #    8.0을 쓰면 4 m/s에서 제동거리를 1.0m로 착각(실제 ~8m)해 시케인 크래시로 이어졌다.
+        
         DeclareLaunchArgument(
-            'base_max_decel', default_value='8.0',
+            'base_max_decel', default_value='7.0',
             description='명령 속도 하강 rate limit [m/s^2]. 낮추면 감속 명령이 늦게 도달하므로 높게 유지'
         ),
         # ⚠️ 2026-07-30 1.0→2.5 상향(사용자 결정, 고속 주행 세팅). 실측 coast(-0.4)보다 제동거리를
         #    낙관적으로 보므로, 코너 진입이 늦게 느껴지면(언더스티어) 가장 먼저 되돌릴 값이다.
         DeclareLaunchArgument(
-            'prebrake_decel', default_value='1.0',
+            'prebrake_decel', default_value='2.6',
             description='곡률 사전감속 제동거리 산출용 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
         ),
         # ── 조향 권한 속도 캡 ──
@@ -220,7 +219,7 @@ def declare_common_args():
         #   v ≤ √((ratio·δ_max − L·κ) / (K_us·κ))
         # 07-26 실차 κ=1.190(R=0.84m) 헤어핀에서 그립 2.11 m/s vs 조향 0.87 m/s — 조향이 먼저 걸린다.
         DeclareLaunchArgument(
-            'understeer_gradient', default_value='0.029',
+            'understeer_gradient', default_value='0.028',
             description='언더스티어 그래디언트 K_us [rad/(m/s^2)]. 0이면 조향 권한 캡 비활성'
         ),
         DeclareLaunchArgument(
