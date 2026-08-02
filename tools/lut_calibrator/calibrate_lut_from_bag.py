@@ -23,12 +23,17 @@ calibrate_lut_from_bag.py — rosbag → Steering LUT 실측 보정 CSV (오프�
   python3 calibrate_lut_from_bag.py <bag> --fresh      # 누적 무시하고 새로 시작
 
 산출물(기본 ~/f1tenth_lut_calibration/):
-  NUC6_glc_pacejka_lookup_table_calibrated.csv   ← control_map_node에 넘길 LUT
-  calibration_state.csv                          ← 누적 상태(다음 실행에 이어짐)
+  LUT_calibrated.csv     ← control_map_node에 넘길 LUT. 이름이 control_code/LUT_calibrated.csv와
+                            같아서, 그대로 그 자리에 덮어쓰면 재시동만으로 디폴트가 바뀐다.
+  calibration_state.csv  ← 누적 상태(다음 실행에 이어짐)
 
-적용:
+적용 A) 임시로 이 파일만 켜보기:
   ros2 launch f1tenth_control control_real.launch.py \
-      lookup_table_file:=$HOME/f1tenth_lut_calibration/NUC6_glc_pacejka_lookup_table_calibrated.csv
+      lookup_table_file:=$HOME/f1tenth_lut_calibration/LUT_calibrated.csv
+
+적용 B) 디폴트로 확정(검증 끝난 뒤):
+  cp $HOME/f1tenth_lut_calibration/LUT_calibrated.csv <repo>/control_code/LUT_calibrated.csv
+  # → 동기화 + colcon build --symlink-install --packages-select f1tenth_control
 """
 import argparse
 import glob
@@ -171,15 +176,16 @@ def find_base_lut(explicit):
     here = os.path.dirname(os.path.abspath(__file__))
     cands = [
         # 저장소 원본 (이 도구와 같이 다니는 가장 확실한 경로)
-        os.path.join(here, "..", "..", "control_code", "NUC6_glc_pacejka_lookup_table.csv"),
+        os.path.join(here, "..", "..", "control_code", "LUT_calibrated.csv"),
     ]
-    # 설치된 ament share (control_map_node의 폴백 순서와 동일)
+    # 설치된 ament share (control_map_node의 폴백 순서와 동일 — f1tenth_control 우선.
+    # steering_lookup은 서드파티 패키지라 이 파일명을 갖고 있지 않다)
     for prefix in os.environ.get("AMENT_PREFIX_PATH", "").split(":"):
         if not prefix:
             continue
-        for pkg in ("steering_lookup", "f1tenth_control"):
+        for pkg in ("f1tenth_control", "steering_lookup"):
             cands.append(os.path.join(prefix, "share", pkg, "cfg",
-                                      "NUC6_glc_pacejka_lookup_table.csv"))
+                                      "LUT_calibrated.csv"))
     for c in cands:
         c = os.path.normpath(c)
         if os.path.exists(c):
@@ -388,7 +394,7 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     state_path = os.path.join(args.out_dir, "calibration_state.csv")
-    out_path = os.path.join(args.out_dir, "NUC6_glc_pacejka_lookup_table_calibrated.csv")
+    out_path = os.path.join(args.out_dir, "LUT_calibrated.csv")
 
     prior = None if args.fresh else load_state(state_path, n_steer, n_vel)
     if prior:

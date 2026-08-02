@@ -107,9 +107,10 @@ def generate_launch_description():
                     '(실제 도달 약 23.5°). 조향 권한 캡은 이 값(작은 쪽)을 씀'
     )
 
-    # 비워두면 기존 폴백 순서(steering_lookup share → f1tenth_control share)로 로드.
-    # lut_calibrator_node가 만든 보정 LUT를 쓰려면 그 출력 경로를 지정할 것
-    # (예: $HOME/f1tenth_lut_calibration/NUC6_glc_pacejka_lookup_table_calibrated.csv)
+    # 비워두면 기존 폴백 순서(f1tenth_control share → steering_lookup share)로 로드.
+    # tools/lut_calibrator가 만든 보정 LUT를 임시로 켜보려면 그 출력 경로를 지정할 것
+    # (예: $HOME/f1tenth_lut_calibration/LUT_calibrated.csv). 검증 끝나면 그 파일을
+    # control_code/LUT_calibrated.csv에 덮어써서 디폴트로 확정하는 편이 낫다(CLAUDE.md 참고).
     lookup_table_file_arg = DeclareLaunchArgument(
         'lookup_table_file', default_value='',
         description='Steering LUT CSV 경로 (비워두면 기본 폴백 사용, 캘리브레이션 결과 적용 시 지정)'

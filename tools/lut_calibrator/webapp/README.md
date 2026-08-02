@@ -30,7 +30,7 @@ python3 build.py       # app.html + sql.js + 베이스 LUT → webapp.html / web
 - `webapp.fragment.html` — 아티팩트 게시용 본문 조각
 - `vendor/` — bag_analyzer 웹앱의 sql.js를 심볼릭 링크로 재사용
 
-베이스 LUT(`control_code/NUC6_glc_pacejka_lookup_table.csv`)는 빌드 시 페이지에 인라인된다.
+베이스 LUT(`control_code/LUT_calibrated.csv`)는 빌드 시 페이지에 인라인된다.
 LUT 원본이 바뀌면 `build.py`를 다시 돌릴 것.
 
 ## 검증 (헤드리스 Chrome 엔드투엔드)

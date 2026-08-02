@@ -353,12 +353,17 @@ public:
         acc_now_ = std::vector<double>(10, 0.0);
 
         // ── 2. LUT 로드 (다중 경로 Fallback — 전부 ament 경로, 하드코딩 홈 경로 없음) ──
+        // f1tenth_control 자신의 cfg를 먼저 본다 — steering_lookup은 서드파티 패키지라
+        // 파일명이 우연히 겹치면(과거 NUC6_glc_pacejka_lookup_table.csv가 그랬다) 우리
+        // 보정본이 조용히 안 먹히고 그쪽의 미보정 원본이 로드된다. 이름을 LUT_calibrated.csv로
+        // 바꾼 것도 그 충돌을 피하기 위함(steering_lookup엔 이 이름의 파일이 없다) — 순서까지
+        // 같이 뒤집어 어느 한쪽만 믿어도 되게 한다.
         bool loaded = !lut_file.empty() && lookup_table_.load(lut_file);
-        for (const char* pkg : {"steering_lookup", "f1tenth_control"}) {
+        for (const char* pkg : {"f1tenth_control", "steering_lookup"}) {
             if (loaded) break;
             try {
                 lut_file = ament_index_cpp::get_package_share_directory(pkg)
-                           + "/cfg/NUC6_glc_pacejka_lookup_table.csv";
+                           + "/cfg/LUT_calibrated.csv";
                 loaded = lookup_table_.load(lut_file);
             } catch (...) {}
         }

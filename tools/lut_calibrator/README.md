@@ -30,13 +30,20 @@ python3 calibrate_lut_from_bag.py <bag> --fresh
 ```
 
 산출물(기본 `~/f1tenth_lut_calibration/`):
-- `NUC6_glc_pacejka_lookup_table_calibrated.csv` — control_map_node에 넘길 LUT
+- `LUT_calibrated.csv` — control_map_node에 넘길 LUT. `control_code/LUT_calibrated.csv`와
+  이름이 같아서, 그 자리에 그대로 덮어쓰면 디폴트 LUT가 바뀐다(재빌드/재시동만 필요)
 - `calibration_state.csv` — 누적 상태(다음 실행에 자동으로 이어짐)
 
-적용:
+적용 A) 임시로 켜보기(재빌드 불필요):
 ```bash
 ros2 launch f1tenth_control control_real.launch.py \
-    lookup_table_file:=$HOME/f1tenth_lut_calibration/NUC6_glc_pacejka_lookup_table_calibrated.csv
+    lookup_table_file:=$HOME/f1tenth_lut_calibration/LUT_calibrated.csv
+```
+
+적용 B) 검증 끝나서 디폴트로 확정:
+```bash
+cp $HOME/f1tenth_lut_calibration/LUT_calibrated.csv <repo>/control_code/LUT_calibrated.csv
+# → 2026_IFAC로 동기화 후 colcon build --symlink-install --packages-select f1tenth_control
 ```
 
 ## 온라인 노드 대비 이점

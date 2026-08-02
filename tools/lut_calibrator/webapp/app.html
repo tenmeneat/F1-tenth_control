@@ -70,6 +70,8 @@ h2{font-size:12px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
 #drop .s{font-size:13px;color:var(--ink-2);margin-top:8px;max-width:60ch;margin-inline:auto}
 #status{margin:16px 0;color:var(--ink-2);min-height:22px;font-size:14px}
 .err{color:var(--crit)}
+.ok{color:var(--good)}
+.warn{color:var(--warn)}
 
 /* ── 요약 타일: 상태를 숫자만이 아니라 형태(스트라이프)로도 인코딩 ── */
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin:0}
@@ -190,9 +192,9 @@ textarea{width:100%;height:190px;margin-top:9px;background:var(--sunk);color:var
       </div>
       <p class="note">적용: <code>ros2 launch f1tenth_control control_real.launch.py lookup_table_file:=&lt;내려받은 경로&gt;</code><br>
         누적 상태 CSV는 <code>lut_calibrator_node</code>(C++)와 포맷이 같아 서로 이어서 쌓을 수 있습니다.</p>
-      <details class="exp"><summary>다운로드가 막히면 — 텍스트로 열어 복사</summary>
+      <details class="exp"><summary>다운로드가 안 되면 — 복사해서 저장</summary>
         <div class="row" style="margin-top:9px">
-          <button id="showLut">LUT CSV</button><button id="showState">상태 CSV</button>
+          <button id="showLut">LUT CSV 복사</button><button id="showState">상태 CSV 복사</button>
         </div>
         <textarea id="csvbox" readonly spellcheck="false" aria-label="CSV 텍스트"></textarea>
       </details>
@@ -597,19 +599,49 @@ function finish(){
 }
 
 // ══ 내보내기 ══
+// claude.ai 아티팩트의 iframe 샌드박스는 <a download> 클릭과 Clipboard API 둘 다
+// 에러 없이 조용히 막을 수 있다. execCommand('copy')는 이미 선택된 textarea에 대해
+// 동작해서 상대적으로 덜 막힌다 — 그래서 매번 셋 다 순서대로 시도한다.
+function copyText(text){
+  const box=document.getElementById('csvbox');
+  box.value=text;
+  document.querySelector('details.exp').open=true;
+  box.focus();box.select();
+  let ok=false;
+  try{ok=document.execCommand('copy');}catch(e){}
+  if(ok){
+    statusEl.innerHTML='<span class="ok">클립보드에 복사했습니다 — 새 파일에 붙여넣기(Ctrl/Cmd+V)로 저장하세요.</span>';
+    return true;
+  }
+  navigator.clipboard?.writeText(text).then(()=>{
+    statusEl.innerHTML='<span class="ok">클립보드에 복사했습니다 — 새 파일에 붙여넣기(Ctrl/Cmd+V)로 저장하세요.</span>';
+  }).catch(()=>{
+    statusEl.innerHTML='<span class="warn">자동 복사가 막혔습니다 — 아래 텍스트 박스가 전체 선택돼 있으니 Ctrl/Cmd+C로 복사하세요.</span>';
+  });
+  return false;
+}
 function download(name,text){
   const b=new Blob([text],{type:'text/csv'});const u=URL.createObjectURL(b);
-  const a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();
-  setTimeout(()=>{URL.revokeObjectURL(u);a.remove();},1500);
+  try{
+    const a=document.createElement('a');a.href=u;a.download=name;a.rel='noopener';
+    document.body.appendChild(a);a.click();a.remove();
+  }catch(e){}
+  try{window.open(u,'_blank','noopener');}catch(e){}
+  setTimeout(()=>URL.revokeObjectURL(u),60000);
+  copyText(text);
 }
 document.getElementById('dlLut').addEventListener('click',()=>
-  download('NUC6_glc_pacejka_lookup_table_calibrated.csv',lutToCsv()));
+  download('LUT_calibrated.csv',lutToCsv()));
 document.getElementById('dlState').addEventListener('click',()=>
   download('calibration_state.csv',stateToCsv()));
-document.getElementById('showLut').addEventListener('click',()=>{
-  document.getElementById('csvbox').value=lutToCsv();});
-document.getElementById('showState').addEventListener('click',()=>{
-  document.getElementById('csvbox').value=stateToCsv();});
+document.getElementById('showLut').addEventListener('click',e=>{
+  copyText(lutToCsv());
+  const btn=e.currentTarget,t=btn.textContent;btn.textContent='복사됨 ✓';setTimeout(()=>btn.textContent=t,1400);
+});
+document.getElementById('showState').addEventListener('click',e=>{
+  copyText(stateToCsv());
+  const btn=e.currentTarget,t=btn.textContent;btn.textContent='복사됨 ✓';setTimeout(()=>btn.textContent=t,1400);
+});
 document.getElementById('again').addEventListener('click',()=>{
   results.style.display='none';drop.style.display='';statusEl.textContent='';});
 document.getElementById('reset').addEventListener('click',()=>{

@@ -589,9 +589,23 @@ VESC가 deg/s로 발행하므로 `π/180 = 0.0174533`. `control_map_node`(카운
 
 ## Steering Lookup Table (LUT)
 
-- 파일: `control_code/NUC6_glc_pacejka_lookup_table.csv` (행=조향각축, 열=속도축). CMake `install(FILES ...)`로 `share/f1tenth_control/cfg/`에도 설치됨.
+- 파일: `control_code/LUT_calibrated.csv` (행=조향각축, 열=속도축). CMake `install(FILES ...)`로 `share/f1tenth_control/cfg/`에도 설치됨.
+  이 파일이 **디폴트로 로드되는 실제 LUT**다 — 실측 보정 결과를 그대로 여기 덮어쓰면 된다
+  (`lookup_table_file:=` 없이 그냥 실행해도 이게 뜬다).
 - `control_map_node`의 LUT 로드 Fallback 순서(**모두 이식성 있는 ament 경로 — 하드코딩 홈 경로 제거됨**):
-  1. `lookup_table_file` 파라미터(기본 빈값→스킵) 2. `steering_lookup` 패키지 share/cfg 3. `f1tenth_control` 패키지 자체 share/cfg. 전부 실패 시 조향 0 고정+에러 로그.
+  1. `lookup_table_file` 파라미터(기본 빈값→스킵) 2. `f1tenth_control` 패키지 자체 share/cfg
+  3. `steering_lookup` 패키지 share/cfg. 전부 실패 시 조향 0 고정+에러 로그.
+  ⚠️ **2026-08-02 순서를 뒤집고 파일명을 개명했다**: 옛 이름 `NUC6_glc_pacejka_lookup_table.csv`가
+  서드파티 `steering_lookup` 패키지에도 **우연히 같은 이름**으로 있어서, `steering_lookup`이 먼저
+  걸리는 옛 순서에서는 `f1tenth_control`쪽에 보정 LUT를 넣어도 조용히 안 먹혔다(그쪽의 미보정
+  원본이 대신 로드됨). 이름을 `LUT_calibrated.csv`로 바꿔 그 충돌 자체를 없앴다.
+- **타이어 교체 등으로 재보정할 때** (`tools/lut_calibrator/`, 아래 "진단 도구" 전 항목):
+  1. 웹앱/CLI로 새로 보정 → 산출물 파일명이 이미 `LUT_calibrated.csv`(CLI 기본 출력, 웹앱
+     다운로드 파일명 둘 다 이 이름으로 통일돼 있음 — 리네임 불필요)
+  2. 이 dev repo의 `control_code/LUT_calibrated.csv`를 그 파일로 **그대로 교체**
+  3. `~/2026_IFAC/src/f1tenth_control/`로 동기화 → `colcon build --symlink-install --packages-select f1tenth_control`
+  4. `lookup_table_file:=` 없이 평소대로 실행하면 새 LUT가 디폴트로 뜸(로그에
+     `🟢 룩업 테이블(LUT) 로드 성공: .../cfg/LUT_calibrated.csv` 확인)
 - C++ `SteeringLookupTable`(steering_lookup_table.hpp)는 Python `lookup_steer_angle.py`(현재
   `docs/`, 아래 "참고/비활성 자산" 참고)를 포팅한 것
 

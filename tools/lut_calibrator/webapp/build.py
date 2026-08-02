@@ -15,7 +15,7 @@ REPO = os.path.normpath(os.path.join(HERE, "..", "..", ".."))
 app = open(os.path.join(HERE, "app.html")).read()
 glue = open(os.path.join(HERE, "vendor", "sql-wasm.js")).read()
 wasm_b64 = base64.b64encode(open(os.path.join(HERE, "vendor", "sql-wasm.wasm"), "rb").read()).decode()
-base_lut = open(os.path.join(REPO, "control_code", "NUC6_glc_pacejka_lookup_table.csv")).read().strip()
+base_lut = open(os.path.join(REPO, "control_code", "LUT_calibrated.csv")).read().strip()
 
 # LUT는 <script type="text/plain">에 그대로 들어가므로 종료 태그만 없으면 안전
 assert "</script" not in base_lut.lower(), "베이스 LUT에 </script>가 들어 있습니다"

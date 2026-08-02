@@ -114,7 +114,7 @@ install(DIRECTORY launch
 
 # Steering Lookup Table(LUT) CSV — 패키지 share에 설치해 이식성 있는 ament 경로로 로드
 # (control_map_node가 get_package_share_directory("f1tenth_control")+"/cfg/..."로 조회)
-install(FILES control_code/NUC6_glc_pacejka_lookup_table.csv
+install(FILES control_code/LUT_calibrated.csv
   DESTINATION share/${PROJECT_NAME}/cfg
 )
 
