@@ -38,7 +38,7 @@ ssh miru@10.1.1.3 "sed -i 's/^export F1_MAP=.*/export F1_MAP=map/' ~/.zshrc"
 | **global_planning** | `F1_MAP` 환경변수 | `map` | `F1_MAP=map` |
 | **local_planning** | `F1_MAP` 환경변수 | **`ifac_track`** ← 다르다 | `F1_MAP=map` |
 
-`state_machine` / `wpnt_publisher`는 지도 이름을 안 쓴다.
+`state_machine`(2026-08-02부터 `/local_waypoints` 선택 발행까지 겸함)은 지도 이름을 안 쓴다.
 
 **젯슨 `~/.zshrc`가 `F1_MAP=ifac_track`이라 지금 global·local이 둘 다 깨진다** (2026-07-31 확인):
 - global_planning → `offline_trajectory_generator/output/ifac_track` … 젯슨엔 `output/map`뿐 ❌
@@ -252,9 +252,16 @@ ls -lh "$(ros2 pkg prefix particle_filter_cpp)/share/particle_filter_cpp/maps/ma
 본체     RViz2            → 2D Pose Estimate → 스캔·벽 정합 확인
 젯슨 T3  global_planning  → 경로·지도 정합 확인
 젯슨 T4  local_planning
-젯슨 T5  state_machine    → /state
-젯슨 T6  wpnt_publisher   → /local_waypoints
-젯슨 T7  control_real     → 전부 통과한 뒤에만
+젯슨 T5  state_machine    → /state, /local_waypoints, /local_waypoints/path
+젯슨 T6  control_real     → 전부 통과한 뒤에만
+```
+⚠️ **2026-08-02**: 구 T6 `wpnt_publisher`는 패키지째 삭제되고 `state_machine`에 흡수됐다
+(팀 커밋 `a3ba410 "Integrate waypoint publisher into state machine"`). 토픽명(`/local_waypoints`,
+`/local_waypoints/path`)·메시지 타입·QoS(`KeepLast(1).reliable()`, volatile)는 그대로라
+`f1tenth_control` 쪽 코드 수정은 없었다 — 터미널이 하나 줄어든 것뿐. `~/2026_IFAC`에 남아있는
+`build/wpnt_publisher`·`install/wpnt_publisher`는 유령 패키지이니 지우고 재빌드할 것:
+```bash
+rm -rf ~/2026_IFAC/build/wpnt_publisher ~/2026_IFAC/install/wpnt_publisher
 ```
 
 ### T1 (젯슨) — 하드웨어 bringup
@@ -353,26 +360,18 @@ ros2 node list | grep -i map      # map_server 실제 노드 이름 확인
 
 
 
-### T5 (젯슨) — state machine
+### T5 (젯슨) — state machine (+ 로컬 웨이포인트 선택 발행, 2026-08-02부터 통합)
+`/state` 판정과 `/local_waypoints`·`/local_waypoints/path` 선택 발행을 이제 한 노드가 겸한다
+(구 `wpnt_publisher` 패키지는 삭제됨 — 별도 터미널 불필요).
 ```bash
 cd ~/2026_IFAC && source install/setup.zsh
 ros2 launch state_machine state_machine.launch.py
 ```
 ```bash
 ros2 topic echo /state
+ros2 topic hz /local_waypoints          # publisher = /state_machine_node 하나
 ```
-
-
-
-### T6 (젯슨) — wpnt_publisher
-```bash
-cd ~/2026_IFAC && source install/setup.zsh
-ros2 run wpnt_publisher wpnt_publisher
-```
-```bash
-ros2 topic hz /local_waypoints          # publisher = /wpnt_publisher 하나
-```
-**안 나올 때** — 세 입력이 다 있어야 GLOBAL 상태에서 발행된다:
+**`/local_waypoints`가 안 나올 때** — 세 입력이 다 있어야 GLOBAL 상태에서 발행된다:
 ```bash
 ros2 topic echo /global_waypoints --once
 ros2 topic echo /car_state/frenet/odom --once
@@ -383,7 +382,7 @@ ros2 topic echo /car_state/frenet/odom --field child_frame_id   # '0','125' 같�
 
 
 
-### T7 (젯슨) — control (마지막)
+### T6 (젯슨) — control (마지막)
 **실행 전**: 바퀴 들거나 스탠드 / E-stop 준비 / `/scan`·`/odom`·`/pf/pose/odom` 정상 /
 경로·지도 정합 / TF 정상(§6) / `/state` 정상.
 
@@ -410,7 +409,7 @@ ros2 topic echo /drive
 
 ---
 
-## 4. rosbag 녹화 — **랩탑에서 `f1rec`** (T7 이후에 시작해도 된다)
+## 4. rosbag 녹화 — **랩탑에서 `f1rec`** (T6 이후에 시작해도 된다)
 
 ```bash
 f1rec [태그]     # → ~/rosbag_log/MMDD/run_MMDD_HHMMSS[_태그]/
@@ -431,7 +430,7 @@ f1rec [태그]     # → ~/rosbag_log/MMDD/run_MMDD_HHMMSS[_태그]/
 rosbag2가 발행자 QoS에 맞춰 구독하므로, **늦게 붙어도 과거 발행분을 받아온다.**
 2026-07-31 실측(풀스택 가동 중에 새로 녹화 시작): `/tf_static` 1개 ✓ / `/global_waypoints` 5개 ✓.
 
-따라서 **control(T7)을 다 띄운 뒤에 `f1rec`을 시작해도 된다.** 진짜로 놓치면 안 되는 것은
+따라서 **control(T6)을 다 띄운 뒤에 `f1rec`을 시작해도 된다.** 진짜로 놓치면 안 되는 것은
 자율 진입 순간의 과도구간(engage 게이트·런치 킥)이므로 **조이스틱 A를 누르기 전에만**
 녹화가 돌고 있으면 된다.
 
@@ -532,7 +531,7 @@ export ROS_SUPER_CLIENT=true     # ros2 topic list 열거까지 하려면
 | MCL만 다른 지도를 봄 | `map_name:=map`을 안 넘겼다 — MCL은 `F1_MAP`을 안 읽는다 (§0-1) |
 | global/local이 경로를 못 찾거나 다른 지도를 봄 | `echo $F1_MAP` → `map`인지. local_planning은 기본값이 `ifac_track`이라 특히 잘 어긋난다 (§0-1) |
 | 지도를 넣었는데 없다고 함 | 재빌드 안 함 (§2) |
-| `/local_waypoints` 무발행 | `child_frame_id`가 정수 문자열인지 (T6) |
+| `/local_waypoints` 무발행 | `child_frame_id`가 정수 문자열인지 (T5) |
 | `/joy` 무발행 | F710 절전 — 로지텍 버튼. `input` 그룹은 새 로그인 세션에만 적용 |
 | 자율 진입 시 급발진 | `engage_gate_enable`(기본 true), `/drive_mode`가 실제로 발행되는지 |
 | odom 헤딩 이상 | 기동 로그 `yaw rate from MEASURED gyro` 유무, `IMU stale` 반복 여부 |
