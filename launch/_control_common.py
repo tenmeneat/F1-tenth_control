@@ -171,7 +171,7 @@ def declare_common_args():
         #    ⚠️ 풀락 부근은 링키지 기하가 비선형이라 좌 0.871(25.3° 명령 → 22°)로 떨어지지만,
         #       상수 보상은 중간각 기준이 맞다(끝단은 어차피 클리핑되고, 과보상이 더 위험).
         DeclareLaunchArgument(
-            'steering_reach_ratio', default_value='0.85',
+            'steering_reach_ratio', default_value='1.0',
             description='명령 조향각 중 바퀴가 실제 도달하는 비율. 보상(1/ratio)과 조향권한 캡을 '
                         '동시 지배. 1.0 = 보상 없음(2026-07-31 실측: 링키지 정상)'
         ),

@@ -236,7 +236,7 @@ public:
         //    ERPM 오차에 비례해 전류를 만들어 60A를 뽑으려면 ~4.7 m/s의 명령 선행이 물리적으로
         //    필요하다 — 선행을 좁히면 가속이 그대로 죽는다. 그래서 "실제로 안 움직이는 동안"에만
         //    발동하는 표적형 가드로 둔다.
-        stall_guard_enable_ = declare_parameter<bool>("stall_guard_enable", false);
+        stall_guard_enable_ = declare_parameter<bool>("stall_guard_enable", true);
         stall_speed_threshold_ = declare_parameter<double>("stall_speed_threshold", 0.7);
         stall_hold_speed_ = declare_parameter<double>("stall_hold_speed", 1.5);
         stall_hold_delay_ = declare_parameter<double>("stall_hold_delay", 1.0);
