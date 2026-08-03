@@ -340,6 +340,14 @@ public:
 
         // 경로 소스 중재 / GapFollower 폴백
         local_fresh_timeout_ = declare_parameter<double>("local_fresh_timeout", 0.3);
+        // "정지 토막" 판정 길이 [m]. 이보다 짧고 **전 구간 vx≈0**인 로컬 경로만 조향 기하에서
+        // 제외한다(속도 의도는 그대로 이행). 0 = 가드 비활성(구 거동). 아래 control_loop 0-b 참고.
+        // 기본 5.0 근거 — 0803 실차 bag 20,117개 /local_waypoints 전수 집계:
+        //   · 크래시를 만든 정지 토막 길이 1.28~2.87 m  → 5.0이면 2.1 m 여유
+        //   · vx=0 경로는 1~15 m, vx>0 경로는 0.22 m부터 — **길이로는 분리 불가**라
+        //     실제 판별자는 vx다. 길이는 가드 범위를 좁히는 보조 조건일 뿐이다.
+        //   · 5 m 넘는 vx=0 경로(173건)는 기하가 충분히 길어 L1 목표가 성립하므로 건드리지 않는다.
+        local_stop_stub_length_ = declare_parameter<double>("local_stop_stub_length", 5.0);
         obstacle_avoid_enable_ = declare_parameter<bool>("obstacle_avoid_enable", false);
         // ⚠️ gap_follower_failsafe=true면 플래닝 스택이 죽었을 때 컨트롤러가 라이다 갭만 보고
         //    **차를 스스로 몰기 시작한다**(1.2~3.5 m/s). 2026-07-22 실차에서 플래닝 없이 자율
@@ -575,6 +583,8 @@ private:
         if (msg->wpnts.empty()) {
             local_waypoints_.clear();   // 빈 로컬 → 다음 사이클에 글로벌로 폴백
             local_is_closed_ = false;
+            local_total_len_ = 0.0;
+            local_min_vx_ = local_max_vx_ = 0.0;
             return;
         }
         const size_t prev_size = local_waypoints_.size();
@@ -596,12 +606,23 @@ private:
         // 양 끝이 경로 길이만큼 떨어져 있어 확실히 구분된다.
         const size_t n = local_waypoints_.size();
         local_is_closed_ = false;
+
+        // 총 길이와 vx 범위는 n에 관계없이 항상 구한다 — 아래 "정지 토막" 가드가 8점 미만에서도
+        // 판정할 수 있어야 한다.
+        local_total_len_ = 0.0;
+        for (size_t i = 1; i < n; ++i) {
+            local_total_len_ += std::hypot(local_waypoints_[i].x - local_waypoints_[i - 1].x,
+                                           local_waypoints_[i].y - local_waypoints_[i - 1].y);
+        }
+        local_min_vx_ = std::numeric_limits<double>::max();
+        local_max_vx_ = -std::numeric_limits<double>::max();
+        for (const auto& w : local_waypoints_) {
+            local_min_vx_ = std::min(local_min_vx_, w.speed);
+            local_max_vx_ = std::max(local_max_vx_, w.speed);
+        }
+
         if (n >= 8) {
-            double total_len = 0.0;
-            for (size_t i = 1; i < n; ++i) {
-                total_len += std::hypot(local_waypoints_[i].x - local_waypoints_[i - 1].x,
-                                        local_waypoints_[i].y - local_waypoints_[i - 1].y);
-            }
+            const double total_len = local_total_len_;
             const double avg_spacing = total_len / static_cast<double>(n - 1);
             const double closing_gap = std::hypot(local_waypoints_[n - 1].x - local_waypoints_[0].x,
                                                   local_waypoints_[n - 1].y - local_waypoints_[0].y);
@@ -751,6 +772,31 @@ private:
             if (gap_follower_failsafe_) publish_gap_follower(dt);
             else                        publish_safe_stop();
             return;
+        }
+
+        // 0-b. 🔴 "정지 토막"은 조향 기하로 쓰지 않는다 (2026-08-03, 실차 크래시 대응).
+        //   상류가 비상정지를 지시할 때 **전 구간 vx=0인 짧은 경로**를 발행하는 경우가 있다
+        //   (run_0803_173630: 8점 / 총 1.75m). 그 토막을 그대로 추종하면 차가 토막 중앙에 놓여
+        //   **로컬 기준 횡오차가 ~0으로 계산되어 조향이 0으로 죽는다** — 같은 순간 글로벌 기준
+        //   횡오차는 +0.27m로 벌어지는 중이었다. 5.6 m/s에서 1.75m 안에 서려면 8.8 m/s²가
+        //   필요해 물리적으로 불가능하고(하드웨어 상한 4.8), 차는 토막을 지나쳐 **조향 0인 채
+        //   직진**해 좌코너 벽에 박았다.
+        //   → 기하는 글로벌을 쓰고, 로컬의 **속도 의도는 상한으로 그대로 이행**한다.
+        //     정지 명령은 지켜지되 차는 라인을 따라 감속한다.
+        //
+        //   ⚠️ 조건에 `vx≈0`이 반드시 들어가야 한다. "짧다"만으로 자르면 **짧은 회피 경로까지
+        //      버려져** 장애물로 직진하게 된다. 정지 경로는 따라갈 기하가 애초에 없지만(전부 0),
+        //      회피 경로는 vx>0이므로 길이와 무관하게 항상 추종된다.
+        //   ⚠️ 글로벌이 아직 없으면 개입하지 않는다 — 대체할 기하가 없다.
+        double local_speed_cap = -1.0;                        // <0 = 캡 없음
+        if (local_fresh && local_stop_stub_length_ > 0.0 && !waypoints_.empty() &&
+            local_total_len_ < local_stop_stub_length_ && local_max_vx_ <= 0.05) {
+            local_speed_cap = std::max(0.0, local_min_vx_);   // 보통 0.0 = 정지
+            local_fresh = false;                              // 기하에서만 제외
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "정지 토막 로컬 경로(%.2fm < %.2fm, vx 전부 0) — 조향 기하는 글로벌 유지, "
+                "속도 상한 %.2f m/s 적용(정지 지시는 이행)",
+                local_total_len_, local_stop_stub_length_, local_speed_cap);
         }
 
         const std::vector<Waypoint>& wps = local_fresh ? local_waypoints_ : waypoints_;
@@ -1121,6 +1167,9 @@ private:
         if (recovery_active) target_speed = std::min(target_speed, recovery_speed_);
         // pose 튐 보류 중에는 기하를 못 믿는 상태로 고속 주행하지 않는다.
         if (pose_suspect_)   target_speed = std::min(target_speed, pose_suspect_speed_);
+        // 정지 토막(위 0-b)의 속도 의도. min_speed 하한보다 **뒤에** 걸어야 vx=0이 실제 정지가
+        // 된다 — 앞에 두면 curvature_speed_limit의 max(min_speed, ...)가 도로 들어올린다.
+        if (local_speed_cap >= 0.0) target_speed = std::min(target_speed, local_speed_cap);
 
         // 8. 명령 속도 램프
         double final_speed = ramp_speed(last_target_speed_, target_speed, dt,
@@ -1352,6 +1401,11 @@ private:
     // 경로 & 인덱스 추적
     std::vector<Waypoint> waypoints_;        // 글로벌 (닫힌 루프)
     std::vector<Waypoint> local_waypoints_;  // 로컬 (회피/추월 포함, 신선하면 우선)
+    // 로컬 경로 요약 — "정지 토막" 판정용(control_loop 0-b). local_path_callback이 매번 갱신.
+    double local_total_len_ = 0.0;           // 총 호 길이 [m]
+    double local_min_vx_ = 0.0;              // 경로 내 최소 vx [m/s] (정지 토막의 속도 상한)
+    double local_max_vx_ = 0.0;              // 경로 내 최대 vx [m/s] (0이면 "따라갈 기하 없음")
+    double local_stop_stub_length_ = 5.0;    // 이보다 짧고 vx 전부 0이면 기하에서 제외 (0=비활성)
     // (mean_track_curvature_는 lat_err_scale 제거와 함께 삭제됨 — 유일한 소비처였다)
     double avg_waypoint_spacing_ = 0.36;     // 수신 전 보수적 기본값
     size_t last_target_idx_ = 0, last_local_idx_ = 0;
