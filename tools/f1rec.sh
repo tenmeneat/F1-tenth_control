@@ -39,17 +39,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-TOPICS=(/drive_autonomous /drive_mppi /drive /joy /drive_mode /mppi_active /estop_lock
-        /pf/pose/odom /odom /tf /tf_static /scan /sensors/imu/raw /imu/data
-        /global_waypoints /local_waypoints /state /avoid_waypoints /overtake_waypoints
-        /car_state/frenet/odom /commands/motor/speed /commands/motor/brake
-        /commands/servo/position /sensors/core
-        # control_map_node가 매 사이클 내는 L1 목표점·룩어헤드 벡터(MarkerArray, 표시 전용).
-        # 조향 명령의 "왜"를 사후에 재구성할 수 있는 유일한 토픽이라 넣어둔다.
-        /debug/l1_lookahead
-        # 장애물 종방향 감속(obstacle_brake)의 입력. 감속 캡이 왜 걸렸는지 추적용.
-        /perception/detection/raw_obstacles)
-
 if [ "$MODE" = "check" ]; then
   [ -n "$ARG" ] || ARG=$(ls -td "$LOCAL_ROOT"/*/run_* 2>/dev/null | head -1)
   [ -n "$ARG" ] || { echo "❌ 검사할 bag이 없습니다"; exit 1; }
@@ -75,9 +64,8 @@ set -u
 export ROS_DOMAIN_ID="$DOMAIN"
 
 if ! ros2 interface show vesc_msgs/msg/VescStateStamped >/dev/null 2>&1; then
-  echo "⚠️  vesc_msgs를 못 찾음 → /sensors/core는 녹화에서 빠집니다."
+  echo "⚠️  vesc_msgs를 못 찾음 → /sensors/core는 -a로 녹화해도 타입을 못 풀어 빠질 수 있습니다."
   echo "    cd ~/vesc_msgs_ws && colcon build --packages-select vesc_msgs"
-  TOPICS=("${TOPICS[@]/\/sensors\/core}")
 fi
 
 echo "ROS_DOMAIN_ID=$ROS_DOMAIN_ID  RMW=${RMW_IMPLEMENTATION:-기본}"
@@ -114,7 +102,23 @@ echo "   Ctrl+C 로 종료 → 달성률 자동 검사"
 #    10 MiB로 낮추면 주행 중에 조금씩 쓰고 종료가 즉시 끝난다. 우리 데이터율은
 #    ~1 MB/s(26토픽, /scan 40Hz 포함)라 10 MiB면 쓰기 횟수도 부담이 아니다.
 trap 'echo' INT
-ros2 bag record -s sqlite3 --max-cache-size 10485760 -o "$DEST" "${TOPICS[@]}"
+# -a(--all): 그 순간 그래프에 보이는 토픽 전부. 예전엔 26개 화이트리스트라 새 토픽(디버그용
+# 임시 발행 등)을 넣으려면 이 스크립트를 매번 고쳐야 했다 — 이제 안 그래도 된다.
+# ⚠️ 데이터율 가정(~1 MB/s, --max-cache-size 10MiB 근거)은 26토픽 기준이었다. -a로 바뀌면서
+#    더 많이 잡히면 캐시가 자주 차서 쓰기가 잦아질 수 있다 — 녹화 중 디스크 I/O가 눈에 띄게
+#    걸리면 --max-cache-size를 키우는 걸 고려할 것.
+#
+# 🔴 -a는 토픽 하나라도 typesupport를 못 찾으면 discovery 스레드 **전체**가 죽는다(개별
+#    스킵이 아님) — 2026-08-03 실측: /sensors/imu(vesc_msgs/msg/VescImuStamped)가 랩탑
+#    ~/vesc_msgs_ws에 없어서 "Failure in topics discovery"로 녹화가 그 이후 멈췄다.
+#    ~/vesc_msgs_ws엔 VescState(Stamped)만 재구성돼 있고 VescImuStamped는 아직 없다.
+#    근본 해결은 그것도 재구성해서 워크스페이스에 추가하는 것(VescStateStamped 했던 것과
+#    같은 방식 — 젯슨 bag의 message_definitions에서 추출 + 타입 해시 대조). 그 전까지는
+#    아래처럼 알려진 미빌드 타입의 토픽을 제외해야 -a가 안 죽는다. 새로 이런 게 또 나오면
+#    이 목록에 추가할 것(로그의 "Failure in topics discovery" 직전 줄이 범인 토픽이다).
+EXCLUDE_TYPES=(vesc_msgs/msg/VescImuStamped)
+ros2 bag record -s sqlite3 --max-cache-size 10485760 -o "$DEST" -a \
+  --exclude-topic-types "${EXCLUDE_TYPES[@]}"
 trap - INT
 
 echo
