@@ -1830,3 +1830,16 @@ ros2 launch f1tenth_control dashboard.launch.py mode:=calib   # odom 거리 스�
 | IMU | 종가속도로 조향 스케일만 | **+롤 인지형 ESC**, 요레이트 카운터스티어 |
 | 경로 끊김 시 | 정지 | GapFollower 폴백(⚠️ 07-22부터 기본 **비활성** — 실차에서 차가 스스로 출발) |
 | 구조 | 단일 631줄 클래스 | 기능별 모듈 분리 + MPPI 대안 컨트롤러 |
+
+---
+
+## 2026-08-04 — control_map_node 안전 레이어 전면 제거 (사용자 지시: "모든 안전장치를 제거해, 주행에 방핸 된다")
+
+파라미터 비활성화가 아니라 코드+파라미터+launch 인자까지 실제 삭제. 제거 항목:
+전역 재탐색 헤딩 게이트(B1), 인덱스 점프 확인 게이트·조향 홀드/감속(B2~B4), 경로 이탈
+복구 가드(C1), 헤딩 오차 감속(C2), wall_safety_margin 안전라인 시프트(C3), 정지 토막
+가드(C4), odom 워치독 타임아웃(A1 — 미수신 초기 대기와 NaN 게이트는 유지), stall
+guard(F1), GapFollower 장애물 회피 폴백+failsafe(D1/D2 — 호출부만 제거, 파일/빌드
+타겟은 유지). 유지: dt 클램프, 경로 신선도 중재+글로벌 폴백, 곡률 사전감속, max_speed,
+속도 램프, 조향 클램프/rate limit, engage 게이트, 런치 킥, yaw_rate_gain.
+`colcon build --packages-select f1tenth_control` 통과, 노드 기동 확인.

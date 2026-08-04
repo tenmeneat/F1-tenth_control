@@ -12,13 +12,11 @@
 #include "sensor_msgs/msg/imu.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "ackermann_msgs/msg/ackermann_drive_stamped.hpp"
-#include "sensor_msgs/msg/laser_scan.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "std_msgs/msg/string.hpp"
 
 #include "f1tenth_control/types.hpp"
-#include "f1tenth_control/gap_follower.hpp"
 #include "f1tenth_control/imu_stability_controller.hpp"
 #include "f1tenth_control/steering_lookup_table.hpp"
 #include "f110_msgs/msg/wpnt_array.hpp"
@@ -50,31 +48,6 @@ inline double wrap_pi(double a) {
     while (a > M_PI) a -= 2.0 * M_PI;
     while (a < -M_PI) a += 2.0 * M_PI;
     return a;
-}
-
-// 헤딩 정합 최근접 스캔. 순수 거리 최소화는 MCL pose가 깨진 직후 **차량 진행방향과 정반대인**
-// 웨이포인트를 고를 수 있고(07-27 bag: closest_idx 86→27→31→89, 접선-헤딩 오차 최대 173°),
-// 그 목표점은 차 뒤에 찍혀 sin_eta 부호가 뒤집힌다 = 조향 역전.
-// → 경로 접선이 차량 헤딩과 max_heading_err 이내인 후보만 본다. 후보가 전무하면 게이트를
-//   포기하고 무제한 스캔으로 폴백한다(재획득 불능 상황을 만들지 않는다).
-// 반환 {최단거리, 인덱스, 게이트 적용 여부}.
-std::tuple<double, size_t, bool> scan_closest_heading_gated(
-    const std::vector<Waypoint>& wps, double x, double y, double yaw, double max_heading_err) {
-    if (max_heading_err <= 0.0) {   // 0이면 게이트 비활성 = 구 거동
-        auto [d, i] = scan_closest(wps, x, y);
-        return {d, i, false};
-    }
-    double min_dist = std::numeric_limits<double>::max();
-    size_t closest_idx = 0;
-    bool found = false;
-    for (size_t i = 0; i < wps.size(); ++i) {
-        if (std::abs(wrap_pi(wps[i].yaw - yaw)) > max_heading_err) continue;
-        double dist = std::hypot(wps[i].x - x, wps[i].y - y);
-        if (dist < min_dist) { min_dist = dist; closest_idx = i; found = true; }
-    }
-    if (found) return {min_dist, closest_idx, true};
-    auto [d, i] = scan_closest(wps, x, y);
-    return {d, i, false};
 }
 
 // start_idx에서 경로를 따라 호 길이 max_dist만큼 전진하며 각 웨이포인트를 방문한다.
@@ -231,16 +204,6 @@ public:
         base_max_decel_ = declare_parameter<double>("base_max_decel", 8.0);
         prebrake_decel_ = declare_parameter<double>("prebrake_decel", 1.5);
 
-        // 기동 실패(VESC 센서리스 탈조) 가드 — control_loop 8-b.
-        // ⚠️ "명령이 실측보다 앞서지 못하게" 일반 clamp를 거는 방식은 금지. VESC 속도 PID가
-        //    ERPM 오차에 비례해 전류를 만들어 60A를 뽑으려면 ~4.7 m/s의 명령 선행이 물리적으로
-        //    필요하다 — 선행을 좁히면 가속이 그대로 죽는다. 그래서 "실제로 안 움직이는 동안"에만
-        //    발동하는 표적형 가드로 둔다.
-        stall_guard_enable_ = declare_parameter<bool>("stall_guard_enable", true);
-        stall_speed_threshold_ = declare_parameter<double>("stall_speed_threshold", 0.7);
-        stall_hold_speed_ = declare_parameter<double>("stall_hold_speed", 1.5);
-        stall_hold_delay_ = declare_parameter<double>("stall_hold_delay", 1.0);
-
         // 런치 킥(자율 정지출발 시 센서리스 데드존 관통) — control_loop 8-c
         launch_boost_enable_ = declare_parameter<bool>("launch_boost_enable", true);
         launch_boost_speed_ = declare_parameter<double>("launch_boost_speed", 2.2);
@@ -273,15 +236,6 @@ public:
         curvature_ff_blend_ = declare_parameter<double>("curvature_ff_blend", 0.0);
         odom_topic_ = declare_parameter<std::string>("odom_topic", "/ego_racecar/odom");
 
-        // 안전라인 시프트: 플래너 최적라인이 벽에 과도하게 붙은 구간에서 d_left/d_right로
-        // 웨이포인트를 트랙 중심 쪽으로 밀어 최소 벽 클리어런스를 확보. 0이면 원본 라인 그대로.
-        wall_safety_margin_ = declare_parameter<double>("wall_safety_margin", 0.6);
-
-        // 경로 이탈 복구 가드. 횡오차가 이 값을 넘으면 L1 목표점을 차량 기준 직선거리로
-        // 재선정하고 속도를 낮춰 라인 복귀를 우선한다. 0이면 비활성.
-        recovery_lat_error_ = declare_parameter<double>("recovery_lat_error", 1.0);
-        recovery_speed_ = declare_parameter<double>("recovery_speed", 2.0);
-
         // L1 횡가속 분모로 목표점까지의 **실제** 직선거리를 쓸지. 목표점은 호 길이 기준으로
         // 고르므로 |목표점−차량| != L1_distance다(07-27 bag 실측 비율 중앙 1.06~1.31, p95 1.72).
         // 명목값을 분모로 쓰면 횡가속 명령이 최대 +70% 과대해지고, 경로에서 벗어날수록
@@ -309,24 +263,6 @@ public:
                 max_steering_left_, max_steering_right_, steer_limit_min_);
         }
 
-        // 최근접 인덱스 견고화 (MCL pose 붕괴 대응).
-        //   closest_idx_max_heading_err: 전역 재탐색 헤딩 게이트 [rad]. 0이면 비활성.
-        //   idx_jump_*: 한 사이클(20ms)에 가능한 인덱스 이동은 몇 점뿐이다. 그보다 먼 점프는
-        //     연속 confirm_cycles 동안 유지될 때만 채택(= pose 1회성 튐 무시). 보류 중에는
-        //     pose를 못 믿으므로 조향을 직전값으로 홀드하고 감속한다.
-        closest_idx_max_heading_err_ = declare_parameter<double>("closest_idx_max_heading_err", 1.75);
-        idx_jump_confirm_dist_ = declare_parameter<double>("idx_jump_confirm_dist", 2.0);
-        idx_jump_confirm_cycles_ =
-            std::max<int>(0, static_cast<int>(declare_parameter<int>("idx_jump_confirm_cycles", 5)));
-        pose_suspect_speed_ = declare_parameter<double>("pose_suspect_speed", 5.0);
-
-        // odom 워치독. /local_waypoints·/drive_mode·장애물은 전부 신선도 타임아웃이 있는데
-        // **odom만 없었다** — 위치추정(MCL/파티클필터)이 죽으면 current_x_/y_/speed_가 stale
-        // 상태로 얼고, 속도 램프는 그 stale 실측을 기준으로 계속 감기며 조향은 마지막 기하로
-        // 고정된 채 노드는 정상처럼 계속 발행한다. pose 붕괴 이력이 있는 만큼 가장 큰 구멍이었다.
-        // 0이면 비활성. NaN pose(MCL 붕괴)도 같은 경로로 안전 정지시킨다.
-        odom_timeout_ = declare_parameter<double>("odom_timeout", 0.5);
-
         // 자율 미체결 중 속도 램프 고정 (bumpless transfer).
         // 이 노드는 /drive_mode를 모른 채 상시 돌기 때문에 MANUAL/E-stop으로 서 있는 동안에도
         // 램프가 감겨 올라가고, engage 순간 그 값이 계단으로 VESC에 꽂힌다(07-27 bag 8개 전부:
@@ -338,25 +274,8 @@ public:
         engaged_mode_value_ = declare_parameter<std::string>("engaged_mode_value", "autonomous");
         drive_mode_timeout_ = declare_parameter<double>("drive_mode_timeout", 1.0);
 
-        // 경로 소스 중재 / GapFollower 폴백
+        // 경로 소스 중재
         local_fresh_timeout_ = declare_parameter<double>("local_fresh_timeout", 0.3);
-        // "정지 토막" 판정 길이 [m]. 이보다 짧고 **전 구간 vx≈0**인 로컬 경로만 조향 기하에서
-        // 제외한다(속도 의도는 그대로 이행). 0 = 가드 비활성(구 거동). 아래 control_loop 0-b 참고.
-        // 기본 5.0 근거 — 0803 실차 bag 20,117개 /local_waypoints 전수 집계:
-        //   · 크래시를 만든 정지 토막 길이 1.28~2.87 m  → 5.0이면 2.1 m 여유
-        //   · vx=0 경로는 1~15 m, vx>0 경로는 0.22 m부터 — **길이로는 분리 불가**라
-        //     실제 판별자는 vx다. 길이는 가드 범위를 좁히는 보조 조건일 뿐이다.
-        //   · 5 m 넘는 vx=0 경로(173건)는 기하가 충분히 길어 L1 목표가 성립하므로 건드리지 않는다.
-        local_stop_stub_length_ = declare_parameter<double>("local_stop_stub_length", 5.0);
-        obstacle_avoid_enable_ = declare_parameter<bool>("obstacle_avoid_enable", false);
-        // ⚠️ gap_follower_failsafe=true면 플래닝 스택이 죽었을 때 컨트롤러가 라이다 갭만 보고
-        //    **차를 스스로 몰기 시작한다**(1.2~3.5 m/s). 2026-07-22 실차에서 플래닝 없이 자율
-        //    버튼을 누르자 바퀴가 즉시 우측 풀조향된 것이 이 경로였다. 기본은 안전 정지.
-        gap_follower_failsafe_ = declare_parameter<bool>("gap_follower_failsafe", false);
-        obstacle_cone_halfangle_ = declare_parameter<double>("obstacle_cone_halfangle", 0.14);
-        obstacle_trigger_dist_ = declare_parameter<double>("obstacle_trigger_dist", 1.5);
-        obstacle_margin_ = declare_parameter<double>("obstacle_margin", 0.3);
-        obstacle_avoid_hold_cycles_ = declare_parameter<int>("obstacle_avoid_hold_cycles", 15);
 
         acc_now_ = std::vector<double>(10, 0.0);
 
@@ -392,18 +311,12 @@ public:
             std::bind(&ControlMapNode::local_path_callback, this, std::placeholders::_1));
         local_last_recv_time_ = this->now();  // 노드 클럭 타입으로 초기화(clock mismatch 방지)
 
-        // 갭팔로워는 좌우 대칭 한계 하나만 받으므로 작은 쪽(= 확실히 낼 수 있는 각)을 준다.
-        gap_follower_ = std::make_unique<GapFollower>(180.0, 0.38, 3.0, steer_limit_min_);
         stability_controller_ = std::make_unique<StabilityController>(0.2);  // alpha_yaw_rate
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             odom_topic_, 10, std::bind(&ControlMapNode::odom_callback, this, std::placeholders::_1));
         imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
             "/imu/data", 10, std::bind(&ControlMapNode::imu_callback, this, std::placeholders::_1));
-        scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-            "/scan", 10, std::bind(&ControlMapNode::scan_callback, this, std::placeholders::_1));
-
-        odom_last_recv_time_ = this->now();
 
         // 자율 체결 상태(실차 f1tenth_stack drive_mode_manager가 estop/manual/autonomous 발행).
         if (engage_gate_enable_) {
@@ -443,7 +356,7 @@ private:
 
         // ⚠️ NaN/Inf 게이트. MCL이 붕괴하면 pose에 NaN이 실려 오고, 그게 들어오면 L1 기하부터
         //    조향·속도까지 전 파이프라인이 NaN이 되어 **NaN 조향각이 그대로 발행**된다.
-        //    받아들이지 않고 버려서 아래 워치독이 stale로 잡게 한다(= 안전 정지).
+        //    받아들이지 않고 버린다.
         if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(yaw) || !std::isfinite(v)) {
             RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                 "odom에 비유한값(NaN/Inf) 수신 — 이 샘플을 버린다(위치추정 붕괴 의심)");
@@ -454,7 +367,6 @@ private:
         current_y_ = y;
         current_yaw_ = yaw;
         current_speed_ = v;
-        odom_last_recv_time_ = this->now();
         odom_seen_ = true;
     }
 
@@ -478,8 +390,6 @@ private:
         std::rotate(acc_now_.rbegin(), acc_now_.rbegin() + 1, acc_now_.rend());
         acc_now_[0] = -msg->linear_acceleration.x * imu_linear_scale_;
     }
-
-    void scan_callback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg) { latest_scan_ = msg; }
 
     void drive_mode_callback(const std_msgs::msg::String::ConstSharedPtr msg) {
         bool engaged = (msg->data == engaged_mode_value_);
@@ -528,19 +438,6 @@ private:
             w.yaw = wp.psi_rad;
             w.s = wp.s_m;   // Frenet 호길이(장애물 감속의 에고 s 기준)
 
-            // 안전라인 시프트. d_left/d_right = 경로점에서 좌/우 경계까지 거리,
-            // normal_left=(-sin ψ, cos ψ). +방향 이동 시 우벽에서 멀어진다.
-            if (wall_safety_margin_ > 1e-3) {
-                const double C = wall_safety_margin_, dl = wp.d_left, dr = wp.d_right;
-                double shift = 0.0;
-                if (dr < C && dl > C)       shift =  std::min(C - dr, dl - C);  // 우벽 근접 → 좌로
-                else if (dl < C && dr > C)  shift = -std::min(C - dl, dr - C);  // 좌벽 근접 → 우로
-                else if (dr < C && dl < C)  shift = (dl - dr) / 2.0;            // 양쪽 좁음 → 중앙
-                if (std::abs(shift) > 1e-4) {
-                    w.x += shift * -std::sin(wp.psi_rad);
-                    w.y += shift *  std::cos(wp.psi_rad);
-                }
-            }
             waypoints_.push_back(w);
         }
 
@@ -550,8 +447,6 @@ private:
         if (first_reception || last_target_idx_ >= waypoints_.size()) {
             last_target_idx_ = scan_closest(waypoints_, current_x_, current_y_).second;
             waypoints_initialized_ = true;
-            // 추적기를 새로 잡았으므로 점프 게이트의 비교 기준도 무효화한다.
-            global_idx_valid_ = false;
         }
 
         // 평균 웨이포인트 간격 — 인덱스 윈도우/곡률 평활 창을 물리 거리 기준으로 잡는 데 쓴다
@@ -574,8 +469,7 @@ private:
                     waypoints_.size(), last_target_idx_);
     }
 
-    // 로컬 경로: 상류 플래너의 전방 구간을 그대로 저장(회피/추월 라인의 원본 기하 유지 —
-    // wall_safety_margin 시프트 미적용).
+    // 로컬 경로: 상류 플래너의 전방 구간을 그대로 저장한다.
     // ⚠️ "짧은 열린 구간"이라고 가정하지 않는다 — 팀 플래너 구성에 따라 글로벌과 같은
     //    풀랩(닫힌 루프)이 실려 올 수 있고, 그걸 열린 경로로 취급하면 배열 끝에서 룩어헤드가
     //    끊긴다. 소스가 아니라 **기하로 판정**한다.
@@ -583,8 +477,6 @@ private:
         if (msg->wpnts.empty()) {
             local_waypoints_.clear();   // 빈 로컬 → 다음 사이클에 글로벌로 폴백
             local_is_closed_ = false;
-            local_total_len_ = 0.0;
-            local_min_vx_ = local_max_vx_ = 0.0;
             return;
         }
         const size_t prev_size = local_waypoints_.size();
@@ -607,22 +499,14 @@ private:
         const size_t n = local_waypoints_.size();
         local_is_closed_ = false;
 
-        // 총 길이와 vx 범위는 n에 관계없이 항상 구한다 — 아래 "정지 토막" 가드가 8점 미만에서도
-        // 판정할 수 있어야 한다.
-        local_total_len_ = 0.0;
+        // 총 길이 (닫힘 판정용).
+        double total_len = 0.0;
         for (size_t i = 1; i < n; ++i) {
-            local_total_len_ += std::hypot(local_waypoints_[i].x - local_waypoints_[i - 1].x,
-                                           local_waypoints_[i].y - local_waypoints_[i - 1].y);
-        }
-        local_min_vx_ = std::numeric_limits<double>::max();
-        local_max_vx_ = -std::numeric_limits<double>::max();
-        for (const auto& w : local_waypoints_) {
-            local_min_vx_ = std::min(local_min_vx_, w.speed);
-            local_max_vx_ = std::max(local_max_vx_, w.speed);
+            total_len += std::hypot(local_waypoints_[i].x - local_waypoints_[i - 1].x,
+                                    local_waypoints_[i].y - local_waypoints_[i - 1].y);
         }
 
         if (n >= 8) {
-            const double total_len = local_total_len_;
             const double avg_spacing = total_len / static_cast<double>(n - 1);
             const double closing_gap = std::hypot(local_waypoints_[n - 1].x - local_waypoints_[0].x,
                                                   local_waypoints_[n - 1].y - local_waypoints_[0].y);
@@ -632,13 +516,7 @@ private:
         smooth_curvature(local_waypoints_, local_is_closed_);
 
         // 배열이 교체되면 로컬 추적기를 초기화.
-        // ⚠️ 점프 게이트의 비교 기준도 같이 무효화해야 한다 — 안 하면 다음 사이클에 wps[0] →
-        //    진짜 최근접점(191점 풀랩에선 최대 17m)이 "pose 튐"으로 오판돼 매 재발행마다
-        //    조향 홀드+감속이 걸린다.
-        if (n != prev_size) {
-            last_local_idx_ = 0;
-            local_idx_valid_ = false;
-        }
+        if (n != prev_size) last_local_idx_ = 0;
 
         if (local_is_closed_ != last_logged_local_closed_) {
             RCLCPP_INFO(this->get_logger(), "로컬 경로 기하: %s (웨이포인트 %zu개)",
@@ -660,51 +538,7 @@ private:
         //    처리를 안전정지에도 적용해, 복귀 명령이 실측 근처에서 이어지게 한다.
         last_target_speed_ = std::max(0.0, current_speed_);
         last_published_speed_ = 0.0;
-        stall_time_ = 0.0;   // 명령이 0이라 탈조 판정 자체가 무의미
         publish_drive(0.0, 0.0, 0.0);
-    }
-
-    // GapFollower 기반 순수 LiDAR 회피 주행 (failsafe + 장애물 차단 폴백 공용).
-    void publish_gap_follower(double dt) {
-        double avoid_steering_angle = 0.0;
-        double min_obstacle_dist = 999.0;
-        gap_follower_->process_scan(latest_scan_, avoid_steering_angle, min_obstacle_dist);
-
-        const double alpha = 0.70;
-        double steer = alpha * avoid_steering_angle + (1.0 - alpha) * last_steering_angle_;
-        last_steering_angle_ = steer;
-
-        const double gap_max_speed = 3.5, gap_min_speed = 1.2;
-        double speed_ratio = std::clamp((min_obstacle_dist - 1.0) / 3.0, 0.0, 1.0);
-        double target = gap_min_speed + speed_ratio * (gap_max_speed - gap_min_speed);
-        target *= (1.0 - 0.50 * std::abs(steer) / steer_limit_min_);
-
-        double cmd_speed = ramp_speed(last_target_speed_, target, dt, base_max_accel_, base_max_decel_);
-        last_target_speed_ = cmd_speed;
-        // acceleration = 명령 속도의 시간미분(추종오차/dt가 아니다 — control_loop 9 참고)
-        const double cmd_accel = (cmd_speed - last_published_speed_) / dt;
-        last_published_speed_ = cmd_speed;
-        publish_drive(steer, cmd_speed, cmd_accel);
-    }
-
-    // L1 목표점 방향의 좁은 콘 안에서, 목표점보다 (margin 이상) 가깝고 절대 근접 임계 이내인
-    // 물체가 잡히면 "경로가 막혔다"고 판단. 벽은 콘 밖이라 대체로 걸러지지만 헤어핀/잘록
-    // 구간에선 오검출 여지 → 콘 각도/트리거 거리로 튜닝.
-    bool is_path_blocked(double L1_vec_x, double L1_vec_y, double L1_norm) const {
-        if (!latest_scan_ || latest_scan_->ranges.empty() || L1_norm < 1e-3) return false;
-        double forward = std::cos(current_yaw_) * L1_vec_x + std::sin(current_yaw_) * L1_vec_y;
-        double left    = -std::sin(current_yaw_) * L1_vec_x + std::cos(current_yaw_) * L1_vec_y;
-        double bearing = std::atan2(left, forward);   // 차량 프레임 방위각(0 = 정면)
-
-        const auto& s = *latest_scan_;
-        double min_r = std::numeric_limits<double>::max();
-        for (size_t k = 0; k < s.ranges.size(); ++k) {
-            double da = wrap_pi(s.angle_min + static_cast<double>(k) * s.angle_increment - bearing);
-            if (std::abs(da) > obstacle_cone_halfangle_) continue;
-            double r = s.ranges[k];
-            if (std::isfinite(r) && r > 0.05 && r < min_r) min_r = r;
-        }
-        return min_r < std::min(L1_norm - obstacle_margin_, obstacle_trigger_dist_);
     }
 
     // 명령 속도 램프(rate limit).
@@ -747,62 +581,26 @@ private:
         dt = std::clamp(dt, 0.001, 0.1);
         last_time_ = current_time;
 
-        // 0-a. odom 워치독 — 위치추정이 없거나 끊기면 제어 자체가 성립하지 않는다.
-        //      ⚠️ 순서상 경로 중재보다 **먼저** 와야 한다. GapFollower 폴백은 라이다만 쓰지만
-        //         발행 속도를 실측 기준으로 램프하므로 stale 속도로는 그것도 못 믿는다.
+        // 0-a. odom 미수신 — 위치추정이 뜨기 전에는 주행하지 않는다.
         if (!odom_seen_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "odom(%s) 미수신 — 위치추정이 뜨기 전에는 주행하지 않는다", odom_topic_.c_str());
             publish_safe_stop();
             return;
         }
-        if (odom_timeout_ > 0.0 &&
-            (current_time - odom_last_recv_time_).seconds() > odom_timeout_) {
-            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                "odom(%s) %.2fs 끊김(> %.2fs) — 안전 정지. 위치추정/네트워크 확인",
-                odom_topic_.c_str(), (current_time - odom_last_recv_time_).seconds(), odom_timeout_);
-            publish_safe_stop();
-            return;
-        }
 
-        // 0. 경로 소스 3-tier 중재: 로컬(신선) → 글로벌 → GapFollower(둘 다 없고 failsafe on일 때만)
+        // 0. 경로 소스 중재: 로컬(신선) → 글로벌 → 둘 다 없으면 안전 정지
         bool local_fresh = !local_waypoints_.empty() &&
                            (current_time - local_last_recv_time_).seconds() < local_fresh_timeout_;
         if (!local_fresh && waypoints_.empty()) {
-            if (gap_follower_failsafe_) publish_gap_follower(dt);
-            else                        publish_safe_stop();
+            publish_safe_stop();
             return;
-        }
-
-        // 0-b. 🔴 "정지 토막"은 조향 기하로 쓰지 않는다 (2026-08-03, 실차 크래시 대응).
-        //   상류가 비상정지를 지시할 때 **전 구간 vx=0인 짧은 경로**를 발행하는 경우가 있다
-        //   (run_0803_173630: 8점 / 총 1.75m). 그 토막을 그대로 추종하면 차가 토막 중앙에 놓여
-        //   **로컬 기준 횡오차가 ~0으로 계산되어 조향이 0으로 죽는다** — 같은 순간 글로벌 기준
-        //   횡오차는 +0.27m로 벌어지는 중이었다. 5.6 m/s에서 1.75m 안에 서려면 8.8 m/s²가
-        //   필요해 물리적으로 불가능하고(하드웨어 상한 4.8), 차는 토막을 지나쳐 **조향 0인 채
-        //   직진**해 좌코너 벽에 박았다.
-        //   → 기하는 글로벌을 쓰고, 로컬의 **속도 의도는 상한으로 그대로 이행**한다.
-        //     정지 명령은 지켜지되 차는 라인을 따라 감속한다.
-        //
-        //   ⚠️ 조건에 `vx≈0`이 반드시 들어가야 한다. "짧다"만으로 자르면 **짧은 회피 경로까지
-        //      버려져** 장애물로 직진하게 된다. 정지 경로는 따라갈 기하가 애초에 없지만(전부 0),
-        //      회피 경로는 vx>0이므로 길이와 무관하게 항상 추종된다.
-        //   ⚠️ 글로벌이 아직 없으면 개입하지 않는다 — 대체할 기하가 없다.
-        double local_speed_cap = -1.0;                        // <0 = 캡 없음
-        if (local_fresh && local_stop_stub_length_ > 0.0 && !waypoints_.empty() &&
-            local_total_len_ < local_stop_stub_length_ && local_max_vx_ <= 0.05) {
-            local_speed_cap = std::max(0.0, local_min_vx_);   // 보통 0.0 = 정지
-            local_fresh = false;                              // 기하에서만 제외
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                "정지 토막 로컬 경로(%.2fm < %.2fm, vx 전부 0) — 조향 기하는 글로벌 유지, "
-                "속도 상한 %.2f m/s 적용(정지 지시는 이행)",
-                local_total_len_, local_stop_stub_length_, local_speed_cap);
         }
 
         const std::vector<Waypoint>& wps = local_fresh ? local_waypoints_ : waypoints_;
 
         // ⚠️ "경로 소스"와 "경로 기하"를 분리한다.
-        //   following_local : 로컬 경로 추종 중인가 (상류 회피 신뢰 여부 — 장애물 폴백 게이트용)
+        //   following_local : 로컬 경로 추종 중인가 (인덱스 추적기 선택용)
         //   path_closed     : 그 경로가 실제로 닫힌 루프인가 (wrap 여부 — walk_forward/윈도우용)
         // 예전엔 `closed = !local_fresh` 하나로 겸했는데, /local_waypoints가 191점 풀랩이라
         // 매 랩 배열 끝에서 walk_forward가 끊겨(룩어헤드 truncation) 오프닝 헤어핀의 곡률
@@ -815,11 +613,10 @@ private:
         double min_dist = std::numeric_limits<double>::max();
         size_t closest_idx = 0;
 
-        // 추적기와 점프 게이트 기준은 경로 소스별로 따로 둔다 — 로컬/글로벌은 배열 길이·인덱싱이
-        // 달라 하나를 공유하면 소스가 바뀔 때 엉뚱한 인덱스에서 시작하거나 정상 전환을 점프로 오판한다.
+        // 추적기는 경로 소스별로 따로 둔다 — 로컬/글로벌은 배열 길이·인덱싱이 달라 하나를
+        // 공유하면 소스가 바뀔 때 엉뚱한 인덱스에서 시작한다.
         size_t& idx_tracker = following_local ? last_local_idx_ : last_target_idx_;
-        bool& idx_valid = following_local ? local_idx_valid_ : global_idx_valid_;
-        if (idx_tracker >= n) { idx_tracker = 0; idx_valid = false; }
+        if (idx_tracker >= n) idx_tracker = 0;
 
         if (path_closed) {
             // 윈도우 크기는 고정 인덱스 개수가 아니라 물리 거리(후방 1m·전방 3m) 기준으로 잡는다.
@@ -838,59 +635,18 @@ private:
                 if (dist < min_dist) { min_dist = dist; closest_idx = idx; }
             }
             // Fail-safe: 경로와 2.5m 넘게 멀어지면 전역 재탐색.
-            // ⚠️ 이 전역 재탐색이 pose 붕괴 시 인덱스 텔레포트의 통로다 — 헤딩 게이트를 건다.
             if (min_dist > 2.5) {
-                auto [d, i, gated] = scan_closest_heading_gated(
-                    wps, current_x_, current_y_, current_yaw_, closest_idx_max_heading_err_);
-                min_dist = d; closest_idx = i;
-                if (!gated && closest_idx_max_heading_err_ > 0.0) {
-                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                        "전역 재탐색: 헤딩 정합(±%.0f°) 후보가 없어 게이트 없이 선택 — "
-                        "차량이 경로 반대 방향이거나 pose가 깨졌을 수 있음",
-                        closest_idx_max_heading_err_ * 180.0 / PI);
-                }
+                std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
             }
         } else {
             // 열린 구간(짧은 회피경로): 전체 최근접 스캔(저렴, wrap 인덱스 미사용)
-            std::tie(min_dist, closest_idx, std::ignore) = scan_closest_heading_gated(
-                wps, current_x_, current_y_, current_yaw_, closest_idx_max_heading_err_);
-        }
-
-        // 1-b. 인덱스 점프 확인 게이트. 한 사이클(20ms)에 물리적으로 가능한 경로 이동은
-        // v·dt(8m/s에서 16cm)뿐이므로, 그보다 먼 점프는 연속 confirm_cycles 유지될 때만 채택한다.
-        // 보류 중에는 직전 인덱스를 쓰고 pose_suspect_로 조향 홀드 + 감속한다.
-        // ⚠️ 최초 획득/배열 교체 때는 비교 대상이 없으므로 게이트를 건너뛴다(idx_valid).
-        pose_suspect_ = false;
-        if (idx_jump_confirm_cycles_ > 0 && idx_valid && closest_idx != idx_tracker && idx_tracker < n) {
-            double jump = std::hypot(wps[closest_idx].x - wps[idx_tracker].x,
-                                     wps[closest_idx].y - wps[idx_tracker].y);
-            if (jump > idx_jump_confirm_dist_) {
-                if (++idx_jump_count_ < idx_jump_confirm_cycles_) {
-                    closest_idx = idx_tracker;   // 보류: 직전 인덱스 유지(min_dist도 재측정)
-                    min_dist = std::hypot(wps[closest_idx].x - current_x_,
-                                          wps[closest_idx].y - current_y_);
-                    pose_suspect_ = true;
-                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                        "인덱스 점프 %.2fm 보류(%d/%d) — pose 튐 의심, 조향 홀드+감속",
-                        jump, idx_jump_count_, idx_jump_confirm_cycles_);
-                } else {
-                    RCLCPP_WARN(this->get_logger(),
-                        "인덱스 점프 %.2fm 확정 채택(%d 사이클 연속) — 경로 재획득",
-                        jump, idx_jump_count_);
-                    idx_jump_count_ = 0;
-                }
-            } else {
-                idx_jump_count_ = 0;
-            }
-        } else {
-            idx_jump_count_ = 0;
+            std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
         }
 
         // ⚠️ 추적기 갱신은 두 분기 공통이어야 한다. 예전엔 닫힌 분기에서만 되써서 로컬 추종 중
         //    last_target_idx_가 0에 얼어붙었고, 로컬→글로벌 폴백 시 stale 인덱스에서 탐색을
         //    시작해 2.5m failsafe에만 의존했다.
         idx_tracker = closest_idx;
-        idx_valid = true;
         const double lateral_error = min_dist;
 
         // 1.5 곡률 룩어헤드 사전 감속 —────────────────────────────────────────────────
@@ -966,28 +722,6 @@ private:
         size_t idx_a = walk_forward(wps, closest_idx, L1_distance, path_closed,
                                     [](size_t, double) { return true; });
 
-        // 2.5 경로 이탈 복구 가드. walk_forward는 **호 길이**로 목표점을 고르므로, 차량이 경로에서
-        // 크게 벗어나면 그 목표점의 직선거리가 L1_distance보다 훨씬 짧아진다. 그러면 요구 회전반경이
-        // 최소 선회반경보다 작아져 목표점 주위를 계속 도는 limit cycle에 빠진다(시뮬 재현: 헤딩이
-        // 360° 연속 회전하며 복귀 실패). → 직선거리가 L1_distance 이상이 될 때까지 목표점을
-        // 전진시켜 기하를 복원하고 속도도 낮춘다(아래 7). 임계 미만에서는 아무것도 하지 않는다.
-        bool recovery_active = false;
-        if (recovery_lat_error_ > 0.0 && lateral_error > recovery_lat_error_) {
-            recovery_active = true;
-            size_t idx = idx_a;
-            for (size_t k = 0; k < n; ++k) {
-                if (std::hypot(wps[idx].x - current_x_, wps[idx].y - current_y_) >= L1_distance) break;
-                size_t next = idx + 1;
-                if (next >= n) {
-                    if (!path_closed) break;
-                    next = 0;
-                }
-                if (next == closest_idx) break;   // 닫힌 경로 한바퀴 방지
-                idx = next;
-            }
-            idx_a = idx;
-        }
-
         const double L1_x = wps[idx_a].x, L1_y = wps[idx_a].y;
         publish_l1_marker(L1_x, L1_y);   // 표시 전용
 
@@ -1001,22 +735,6 @@ private:
             sin_eta = std::clamp(lat / L1_norm, -1.0, 1.0);
         }
 
-        // 3.5 장애물 차단 → GapFollower 회피 폴백. 로컬 추종 중이면 상류 회피를 신뢰해 끈다.
-        // ⚠️ 여기는 경로 "기하"가 아니라 "소스"(following_local)로 판정해야 한다 — 로컬 경로가
-        //    닫힌 루프여도 상류 회피를 신뢰하는 건 동일하다.
-        if (obstacle_avoid_enable_ && !following_local) {
-            if (is_path_blocked(L1_vector_x, L1_vector_y, L1_norm)) {
-                avoid_hold_counter_ = obstacle_avoid_hold_cycles_;   // 채터링 방지 홀드 재충전
-            }
-            if (avoid_hold_counter_ > 0) {
-                avoid_hold_counter_--;
-                publish_gap_follower(dt);
-                return;
-            }
-        } else {
-            avoid_hold_counter_ = 0;
-        }
-
         // 4. 조향용 속도(speed_for_lu): 룩어헤드 예측 위치의 프로파일 속도
         // ❌ 2026-07-30: 여기 있던 `lat_err_scale`(횡오차 기반 속도 감쇠)을 **제거**했다.
         //    이유 3가지 — 되살리기 전에 읽을 것:
@@ -1026,8 +744,7 @@ private:
         //       target_speed 두 곳 모두 무효였다. 즉 제거는 거동 변화 0.
         //    ② **모양이 레이싱에 못 쓴다.** 완전 발동 시 exp(−1) = 0.368, 횡오차 0.5m에서
         //       속도를 63% 깎는다. MCL 지터 수준의 오차로도 랩타임이 붕괴한다.
-        //    ③ **중복이다.** 라인 복귀 감속은 이미 전용 기구가 둘 있다 — heading 오차 감속
-        //       (아래 7)과 이탈 복구 가드(위 2.5). 같은 신호에 모양이 다른 감속을 셋씩 걸면
+        //    ③ 라인 복귀 감속 전용 기구와 같은 신호에 모양이 다른 감속을 둘씩 걸면
         //       서로 싸운다(yaw_rate_gain ↔ 언더스티어 가드로 이미 겪은 패턴).
         double speed_for_lu =
             wps[find_lookahead_wp_idx(wps, path_closed, closest_idx, speed_lookahead_for_steering_)].speed;
@@ -1122,17 +839,11 @@ private:
 
         // 6-6) 조향 도달각 보상 — 명령각 중 바퀴가 실제로 내는 비율이 74%(실차 3회 재현)라
         //      LUT/보정항이 의도한 각을 바퀴가 내도록 1/ratio를 곱한다.
-        //      ⚠️ **모든 보정항 뒤, 홀드/클리핑 앞**이 유일하게 맞는 자리다:
-        //        · 보정항(요레이트·heading·FF)도 같은 링키지를 통과하므로 함께 보상돼야 한다.
-        //        · 아래 pose 홀드보다 **먼저** 와야 한다 — last_steering_angle_은 이미 보상된
-        //          값이라, 홀드된 값에 다시 1/0.74를 곱하면 사이클마다 35% 불어나 발산한다.
+        //      ⚠️ **모든 보정항 뒤, 클리핑 앞**이 유일하게 맞는 자리다 — 보정항(요레이트·
+        //         heading·FF)도 같은 링키지를 통과하므로 함께 보상돼야 한다.
         if (steering_reach_ratio_ < 0.999) steering_angle /= steering_reach_ratio_;
 
-        // 6-7) pose 튐 보류 중 조향 홀드 (1-b 게이트와 한 쌍). closest_idx가 직전값으로 고정돼
-        //      있어 이번 사이클의 L1 기하 자체를 신뢰할 수 없다 → 새 값을 만들지 않는다.
-        if (pose_suspect_) steering_angle = last_steering_angle_;
-
-        // 6-8) rate limit → 좌우 물리 한계 (δ>0 = 좌). 하드웨어가 못 내는 각을 명령해봐야
+        // 6-7) rate limit → 좌우 물리 한계 (δ>0 = 좌). 하드웨어가 못 내는 각을 명령해봐야
         //      vesc_driver의 servo_limit이 조용히 자를 뿐이고 컨트롤러는 그걸 모른다.
         //      ⚠️ rate limit은 dt에 비례해야 한다 — 예전엔 "사이클당 0.4 rad" 하드코딩이라
         //         루프가 밀리면 실효 제한이 느슨해졌고, 50Hz에서 20 rad/s = 사실상 무제한이었다.
@@ -1151,25 +862,8 @@ private:
         // 유일한 상한이다 — 2026-07-19 이전엔 이 clamp가 빠져 max_speed:=X가 무효였다.
         global_speed = std::min(global_speed, max_speed_);
         // ❌ 2026-07-30: 여기 있던 `* lat_err_scale`을 제거했다(항상 1.0인 죽은 코드 + 모양이
-        //    레이싱에 부적합 + 라인 복귀 감속 중복 — 위 4 참고). 라인 복귀는 바로 아래 heading
-        //    오차 감속과 이탈 복구 가드가 담당한다.
+        //    레이싱에 부적합 — 위 4 참고).
         double target_speed = global_speed;
-
-        // 헤딩 오차 감속: 20° 이상 어긋나 있으면 최대 절반까지 줄인다(라인 복귀 우선).
-        double heading_error = std::abs(wrap_pi(current_yaw_ - wps[closest_idx].yaw));
-        if (heading_error >= PI / 9.0) {
-            target_speed *= (heading_error < PI / 2.0) ? (1.0 - 0.5 * heading_error / (PI / 2.0)) : 0.5;
-        }
-
-        // 이탈 복구 중에는 속도를 낮춰 선회반경을 줄인다(위 2.5와 한 쌍). min_speed 하한은 두지
-        // 않는다 — 이탈 상태에서 최저순항속도를 지키는 것보다 라인 복귀가 우선이고, 정지가
-        // 필요하면 상류 비상제동이 별도로 판단한다.
-        if (recovery_active) target_speed = std::min(target_speed, recovery_speed_);
-        // pose 튐 보류 중에는 기하를 못 믿는 상태로 고속 주행하지 않는다.
-        if (pose_suspect_)   target_speed = std::min(target_speed, pose_suspect_speed_);
-        // 정지 토막(위 0-b)의 속도 의도. min_speed 하한보다 **뒤에** 걸어야 vx=0이 실제 정지가
-        // 된다 — 앞에 두면 curvature_speed_limit의 max(min_speed, ...)가 도로 들어올린다.
-        if (local_speed_cap >= 0.0) target_speed = std::min(target_speed, local_speed_cap);
 
         // 8. 명령 속도 램프
         double final_speed = ramp_speed(last_target_speed_, target_speed, dt,
@@ -1181,35 +875,14 @@ private:
         if (disengaged) {
             final_speed = std::max(0.0, current_speed_);
             last_target_speed_ = final_speed;
-            // 탈조·런치 상태도 누적하지 않는다(둘 다 "출발하려는데 안 나간다"를 판정하는데,
-            // 애초에 출발 명령이 하류로 나가지 않는 구간이다).
+            // 런치 상태도 누적하지 않는다(애초에 출발 명령이 하류로 나가지 않는 구간이다).
             // ⚠️ launch_latched_off_는 건드리지 않는다 — 매 사이클 false로 되돌리면 아래 8-c의
             //    킥이 무한 재무장돼 미체결 중에도 발행값이 부스트 값으로 덮인다.
-            stall_time_ = 0.0;
             launch_active_ = false;
             launch_time_ = 0.0;
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "자율 미체결 — 속도 램프를 실측(%.2f m/s)에 고정 중(engage 시 무충격 전환)",
                 current_speed_);
-        }
-
-        // 8-b. 기동 실패(VESC 센서리스 탈조) 안티와인드업. 램프 증분은 실측과 무관하게 쌓이므로,
-        //      센서리스 FOC가 정지→출발 오픈루프 구간(~0.59 m/s)에서 수 초간 탈조하는 동안
-        //      명령만 프로파일 속도까지 감겨 올라가 모터가 물리는 순간 차가 튀어나간다.
-        if (stall_guard_enable_) {
-            if (std::abs(current_speed_) < stall_speed_threshold_ && final_speed > stall_hold_speed_) {
-                stall_time_ += dt;
-            } else {
-                stall_time_ = 0.0;
-            }
-            if (stall_time_ > stall_hold_delay_) {
-                final_speed = stall_hold_speed_;
-                last_target_speed_ = final_speed;
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "기동 실패 의심(%.1fs): 실측 %.2f m/s인데 명령이 감겨 올라감 → %.2f m/s로 제한. "
-                    "VESC 센서리스 오픈루프 확인 필요",
-                    stall_time_, current_speed_, stall_hold_speed_);
-            }
         }
 
         // 8-c. 런치 킥 — 자율 정지출발 시 VESC 센서리스 데드존 관통.
@@ -1218,9 +891,7 @@ private:
         //   속도 PID가 ERPM 오차에 비례해 큰 전류를 뽑아 매뉴얼 펀치와 같은 효과가 난다.
         //   (오픈루프 전류 상향·HFI·Coupled HFI는 이 모터의 저돌극성 때문에 부하서 실패 확인)
         //   ⚠️ final_speed(램프 상태)는 건드리지 않고 발행값만 덮는다 → 킥 종료 후 램프가 이어짐.
-        //   ⚠️ launch_boost_time(0.6s) < stall_hold_delay(1.0s)라 stall_guard와 안 싸운다:
-        //      킥 실패 시 포기하고 stall_guard가 급발진 안전망으로 인계(과열 방지 위해 차가 실제
-        //      움직일 때까지 재시도 안 함).
+        //   ⚠️ 킥 실패 시 포기한다(과열 방지 위해 차가 실제 움직일 때까지 재시도 안 함).
         //   ⚠️ 미체결 중에는 킥도 돌리지 않는다 — 킥은 발행값만 덮으므로 게이트가 램프를 눌러놔도
         //      킥이 켜져 있으면 정차 중 부스트 속도가 계속 발행된다.
         double publish_speed = final_speed;
@@ -1239,7 +910,7 @@ private:
                     } else if (launch_time_ > launch_boost_time_) {
                         launch_active_ = false; launch_latched_off_ = true;
                         RCLCPP_WARN(this->get_logger(),
-                            "런치 킥 %.2fs 관통 실패 → 포기(stall_guard 인계). 데드존 심함 — 푸시스타트 필요",
+                            "런치 킥 %.2fs 관통 실패 → 포기. 데드존 심함 — 푸시스타트 필요",
                             launch_time_);
                     } else {
                         publish_speed = std::max(publish_speed, launch_boost_speed_);
@@ -1356,10 +1027,7 @@ private:
     double prebrake_decel_ = 1.5;            // 곡률 사전감속용 실측 감속 권한 [m/s²]
     double max_speed_, min_speed_;
 
-    // 기동 실패 가드 / 런치 킥
-    bool stall_guard_enable_ = false;
-    double stall_speed_threshold_ = 0.7, stall_hold_speed_ = 1.5, stall_hold_delay_ = 1.0;
-    double stall_time_ = 0.0;                // 실측은 멈췄는데 명령만 커진 상태의 누적 시간 [s]
+    // 런치 킥
     bool launch_boost_enable_ = true;
     double launch_boost_speed_ = 2.2, launch_boost_time_ = 0.6;
     double launch_exit_speed_ = 0.8, launch_standstill_speed_ = 0.3;
@@ -1383,7 +1051,7 @@ private:
     // 좌우 조향 한계 [rad]. 둘 다 같으면 기존 대칭 거동과 동일.
     double max_steering_left_ = MAX_STEERING_ANGLE;
     double max_steering_right_ = MAX_STEERING_ANGLE;
-    double steer_limit_min_ = MAX_STEERING_ANGLE;   // 속도 캡·갭팔로워용 보수값
+    double steer_limit_min_ = MAX_STEERING_ANGLE;   // 속도 캡용 보수값
 
     SteeringLookupTable lookup_table_;
 
@@ -1393,37 +1061,18 @@ private:
     double last_published_speed_ = 0.0;      // 발행 acceleration(명령 속도 미분)의 기준
     rclcpp::Time last_time_;
 
-    // odom 워치독 — 위치추정 없이/끊긴 채로 주행하지 않는다
-    double odom_timeout_ = 0.5;
+    // odom 수신 여부 — 위치추정이 뜨기 전에는 주행하지 않는다
     bool odom_seen_ = false;
-    rclcpp::Time odom_last_recv_time_;
 
     // 경로 & 인덱스 추적
     std::vector<Waypoint> waypoints_;        // 글로벌 (닫힌 루프)
     std::vector<Waypoint> local_waypoints_;  // 로컬 (회피/추월 포함, 신선하면 우선)
-    // 로컬 경로 요약 — "정지 토막" 판정용(control_loop 0-b). local_path_callback이 매번 갱신.
-    double local_total_len_ = 0.0;           // 총 호 길이 [m]
-    double local_min_vx_ = 0.0;              // 경로 내 최소 vx [m/s] (정지 토막의 속도 상한)
-    double local_max_vx_ = 0.0;              // 경로 내 최대 vx [m/s] (0이면 "따라갈 기하 없음")
-    double local_stop_stub_length_ = 5.0;    // 이보다 짧고 vx 전부 0이면 기하에서 제외 (0=비활성)
-    // (mean_track_curvature_는 lat_err_scale 제거와 함께 삭제됨 — 유일한 소비처였다)
     double avg_waypoint_spacing_ = 0.36;     // 수신 전 보수적 기본값
     size_t last_target_idx_ = 0, last_local_idx_ = 0;
     bool waypoints_initialized_ = false;
     bool local_is_closed_ = false, last_logged_local_closed_ = false;
     rclcpp::Time local_last_recv_time_;
     double local_fresh_timeout_ = 0.3;
-    double wall_safety_margin_;
-    double recovery_lat_error_ = 1.0, recovery_speed_ = 2.0;
-
-    // 최근접 인덱스 견고화 (MCL pose 붕괴 대응)
-    double closest_idx_max_heading_err_ = 1.75;
-    double idx_jump_confirm_dist_ = 2.0;
-    int idx_jump_confirm_cycles_ = 5, idx_jump_count_ = 0;
-    bool pose_suspect_ = false;              // 이번 사이클 pose를 못 믿음(조향 홀드+감속)
-    double pose_suspect_speed_ = 5.0;
-    bool global_idx_valid_ = false, local_idx_valid_ = false;
-
     // 자율 체결 게이트 (bumpless transfer)
     bool engage_gate_enable_ = true;
     std::string drive_mode_topic_ = "/drive_mode", engaged_mode_value_ = "autonomous";
@@ -1431,21 +1080,13 @@ private:
     bool is_engaged_ = false, drive_mode_seen_ = false;
     rclcpp::Time drive_mode_last_recv_time_;
 
-    // GapFollower 회피 폴백
-    bool obstacle_avoid_enable_ = false, gap_follower_failsafe_ = false;
-    double obstacle_cone_halfangle_ = 0.14, obstacle_trigger_dist_ = 1.5, obstacle_margin_ = 0.3;
-    int obstacle_avoid_hold_cycles_ = 15, avoid_hold_counter_ = 0;
-
-    std::unique_ptr<GapFollower> gap_follower_;
     std::unique_ptr<StabilityController> stability_controller_;
-    sensor_msgs::msg::LaserScan::ConstSharedPtr latest_scan_ = nullptr;
 
     // ROS 2 통신
     std::string odom_topic_;
     std::string odom_frame_ = "map";   // odom header.frame_id (L1 마커 프레임)
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr drive_mode_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr global_path_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr local_path_sub_;
