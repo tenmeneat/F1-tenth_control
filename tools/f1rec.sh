@@ -5,6 +5,19 @@
 #   f1rec.sh --remote [태그] 젯슨에서 녹화 후 회수(무선 유실이 확인됐을 때의 대안)
 #   f1rec.sh --check <bag>   기존 bag의 토픽 달성률 검사
 #   옵션: --keep(--remote 시 젯슨 원본 유지)  --host <ssh호스트>
+#         --with-map(정적 /map도 녹화)  --full(아무것도 안 빼고 옛 동작)
+#
+# 📉 기본으로 **젯슨 송신 부하를 줄인다** (2026-08-04 run_0804_163639 실측 737 KB/s 기준):
+#   1) 시각화 전용/중복 토픽 제외 → 약 −45%. 분석에 쓰는 토픽은 하나도 안 뺀다.
+#        /map 200.7 KB/s(27.3%) — 정적 맵을 MCL이 5Hz로 재발행. 13.79 MB가 같은 맵 337장
+#        /local_waypoints/path 68.4(9.3%) — /local_waypoints의 RViz용 중복
+#        /pf/viz/* 43.1(5.9%) — 순수 시각화,  */markers — 순수 시각화
+#      ⚠️ /map은 MCL pose 오차 분석(스캔을 맵에 투영)에 쓰인다. 그 분석을 할 bag은
+#         --with-map으로 뜰 것. 맵은 정적이라 세션당 하나만 있으면 되고, 젯슨의 맵 파일을
+#         직접 읽어도 등가다.
+#   2) QoS를 best_effort로 낮춘다(f1rec_qos.yaml 참고). RELIABLE이면 젯슨 DDS가 랩탑 ACK를
+#      추적하고 유실분을 **재전송**한다 — 링크가 나쁠수록 젯슨 CPU를 더 쓰는 구조다.
+#      🔴 latched 토픽은 오버라이드에서 제외돼 있다. 이유는 아래 ℹ️ 항목과 같다.
 #
 # ⚠️ 랩탑 녹화의 전제 (하나라도 빠지면 토픽이 안 잡힌다):
 #   1) ROS_DOMAIN_ID가 젯슨과 같아야 한다(67).
@@ -26,7 +39,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 HOST="${JETSON_HOST:-jetson}"
 LOCAL_ROOT="${LOCAL_BAG_ROOT:-$HOME/rosbag_log}"
 DOMAIN="${ROS_DOMAIN_ID:-67}"
-MODE="local"; ARG=""; RM_REMOTE=1
+MODE="local"; ARG=""; RM_REMOTE=1; WITH_MAP=0; FULL=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,7 +47,11 @@ while [ $# -gt 0 ]; do
     --check)  MODE="check"; shift; ARG="${1:-}"; [ $# -gt 0 ] && shift ;;
     --keep)   RM_REMOTE=0; shift ;;
     --host)   HOST="$2"; shift 2 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    --with-map) WITH_MAP=1; shift ;;
+    --full)   FULL=1; shift ;;
+    # 헤더 주석(2행~첫 빈 줄)을 그대로 도움말로 쓴다. 줄 번호를 박아두면 헤더를 늘릴 때마다
+    # 조용히 잘려서, 끝을 빈 줄로 잡는다.
+    -h|--help) sed -n '2,/^$/p' "$0" | sed '$d'; exit 0 ;;
     *) ARG="$1"; shift ;;
   esac
 done
@@ -117,8 +134,31 @@ trap 'echo' INT
 #    아래처럼 알려진 미빌드 타입의 토픽을 제외해야 -a가 안 죽는다. 새로 이런 게 또 나오면
 #    이 목록에 추가할 것(로그의 "Failure in topics discovery" 직전 줄이 범인 토픽이다).
 EXCLUDE_TYPES=(vesc_msgs/msg/VescImuStamped)
-ros2 bag record -s sqlite3 --max-cache-size 10485760 -o "$DEST" -a \
-  --exclude-topic-types "${EXCLUDE_TYPES[@]}"
+
+# 시각화 전용/중복 토픽 제외 — 헤더의 📉 1) 참고. -a는 그대로 두므로 "새로 생긴 토픽이
+# 자동으로 잡힌다"는 성질(위 105행 주석)은 유지된다. 빼는 건 명시한 것뿐이다.
+EXCLUDE_TOPICS=(/local_waypoints/path /pf/viz/particles /pf/viz/inferred_pose)
+[ "$WITH_MAP" = 0 ] && EXCLUDE_TOPICS+=(/map)
+# */markers 는 개수가 늘어날 수 있어 정규식으로 한 번에 막는다(새 마커 토픽도 자동 적용).
+EXCLUDE_RE='.*/markers$'
+
+QOS_ARGS=()
+[ -f "$HERE/f1rec_qos.yaml" ] && QOS_ARGS=(--qos-profile-overrides-path "$HERE/f1rec_qos.yaml")
+
+if [ "$FULL" = 1 ]; then
+  echo "ℹ  --full: 제외·QoS 오버라이드 없이 전부 녹화합니다(옛 동작)."
+  ros2 bag record -s sqlite3 --max-cache-size 10485760 -o "$DEST" -a \
+    --exclude-topic-types "${EXCLUDE_TYPES[@]}"
+else
+  echo "ℹ  제외: ${EXCLUDE_TOPICS[*]} + 정규식 '$EXCLUDE_RE'"
+  [ "$WITH_MAP" = 1 ] && echo "ℹ  --with-map: /map 포함(MCL pose 오차 분석용)"
+  [ ${#QOS_ARGS[@]} -gt 0 ] && echo "ℹ  QoS: best_effort 오버라이드 적용(f1rec_qos.yaml)"
+  ros2 bag record -s sqlite3 --max-cache-size 10485760 -o "$DEST" -a \
+    --exclude-topic-types "${EXCLUDE_TYPES[@]}" \
+    --exclude-topics "${EXCLUDE_TOPICS[@]}" \
+    --exclude-regex "$EXCLUDE_RE" \
+    ${QOS_ARGS[@]+"${QOS_ARGS[@]}"}
+fi
 trap - INT
 
 echo

@@ -1,0 +1,95 @@
+# rosbag2 구독 QoS 오버라이드 — f1rec.sh 가 --qos-profile-overrides-path 로 넘긴다.
+#
+# 목적: **젯슨 송신 CPU 절감**. 기본(RELIABLE)이면 젯슨 DDS writer 가 랩탑 reader 의 ACK 를
+# 추적하고, 히스토리를 ACK 될 때까지 붙들고, 유실분을 NACK 기반으로 **재전송**한다.
+# wifi 가 나쁠수록 이 부기가 커진다 — 즉 "링크가 나쁘면 젯슨이 더 바빠지는" 구조다.
+# best_effort 로 낮추면 쏘고 잊으므로 재전송·heartbeat 가 통째로 사라진다.
+#
+# ⚠️ 대신 유실분이 복구되지 않는다. 어차피 지금도 유실되고 있으므로(0804 후반 런 달성률
+#    40~60%) 잃는 것보다 젯슨을 덜 괴롭히는 쪽이 낫다는 판단이다. 달성률 검사는 그대로
+#    돌아가니 실제로 나빠지면 bag_rates.py 숫자로 바로 보인다.
+#
+# 🔴 transient_local(latched) 토픽은 **여기 넣지 말 것** — /global_waypoints, /tf_static,
+#    /global_waypoints/shortest_path, /centerline_waypoints, /map, /map_infos 등.
+#    durability 를 volatile 로 덮으면 "늦게 붙어도 과거 발행분을 받아온다"는 성질이 깨져서
+#    녹화 시작이 늦으면 경로가 통째로 안 잡힌다(f1rec.sh 헤더의 ℹ️ 항목).
+#
+# 아래는 전부 고레이트·volatile 토픽이다. 0804 기준 volatile 대역폭의 ~95% 를 덮는다.
+
+/scan:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/odom:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/pf/pose/odom:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/local_waypoints:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/car_state/frenet/odom:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/sensors/imu/raw:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/sensors/core:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/tf:
+  history: keep_last
+  depth: 200
+  reliability: best_effort
+  durability: volatile
+
+/drive:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/drive_autonomous:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/debug/l1_lookahead:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/commands/motor/speed:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+
+/commands/servo/position:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
