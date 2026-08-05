@@ -16,10 +16,15 @@ vesc_msgs 없이 동작한다(/sensors/core를 CDR 직접 디코드) — 랩탑�
 import os, sys, glob, sqlite3, struct, argparse
 import numpy as np
 
-G = 4232.0          # speed_to_erpm_gain (07-20 줄자 실측)
+# speed_to_erpm_gain. 2026-08-04 세미슬릭 타이어 교체 재보정으로 4232.0 → 4336.0 (08-05 확정).
+# 젯슨 vesc.yaml과 반드시 같아야 한다 — 다르면 여기서 나오는 m/s² 가 통째로 어긋난다.
+G = 4336.0
 DMAX = 0.41         # 조향 물리한계 [rad]
 
 # ── ramp=2000 베이스라인 (run_0726_204116) ─────────────────────────────
+# ⚠️ 이 값들은 **오프로드 타이어 + G=4232** 시절에 뽑은 것이다. 세미슬릭으로 바뀌면서
+#    그립과 거리 스케일이 둘 다 달라졌으므로, 절대 비교가 아니라 **자릿수 감각**으로만 쓸 것.
+#    엄밀한 A/B를 하려면 세미슬릭으로 ramp를 한 번 되돌려 새 베이스라인을 떠야 한다.
 BASE = dict(
     ret_cur_p50=8.7, ret_cur_p90=15.9,      # brake→speed 복귀 0.3s 내 최대 전류 [A]
     ret_acc_p50=0.08, ret_acc_p90=0.38,     # 복귀 0.3s 내 최대 가속 [m/s²]

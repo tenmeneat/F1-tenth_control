@@ -134,11 +134,15 @@ def generate_launch_description():
     # 종방향 최대 가속도 한계 [m/s^2]. base_max_decel은 sim/real 동일이라 _control_common.py에 공용.
     #
     # 🔑 **천장은 컨트롤러가 아니라 VESC다.** mcconf의 `s_pid_ramp_erpms_s`가 속도 setpoint의
-    #    상승률을 하드 제한한다: 15600 ERPM/s ÷ 4232 = **3.69 m/s²**(2026-07-31 VESC Tool 확인).
+    #    상승률을 하드 제한한다: 21160 ERPM/s ÷ 4336 = **4.88 m/s²**(2026-08-05 상향).
     #    이보다 크게 주면 VESC가 깎을 뿐이고, 명령만 실측보다 더 앞서 나가 와인드업 위험만
-    #    커진다(07-27 급발진과 같은 구조). 그래서 천장의 95%인 3.5로 둔다 —
-    #    **컨트롤러가 제한을 쥐고 있어야** 곡률 사전감속의 전방-후방 패스 예측이 실제와 맞는다.
-    #    ⚠️ VESC에서 s_pid_ramp_erpms_s를 바꾸면 이 값도 같이 재검토할 것.
+    #    커진다(07-27 급발진과 같은 구조).
+    #    ⚠️ **3.5는 이제 천장(4.88)의 72%다** — 2026-08-05에 램프를 15600(3.60)에서 21160으로
+    #       올려 여유를 만들어 뒀다. 값을 올리는 건 `base_max_accel:=X` 인자로 즉시 되지만,
+    #       **컨트롤러가 제한을 쥐고 있어야** 곡률 사전감속의 전방-후방 패스 예측이 실제와
+    #       맞으므로 천장까지 다 열지는 말 것(천장 = VESC가 깎기 시작하는 지점).
+    #    ⚠️ 게인 4336은 2026-08-04 세미슬릭 타이어 교체 후 재보정값이다(구 4232). VESC에서
+    #       s_pid_ramp_erpms_s나 젯슨에서 speed_to_erpm_gain을 바꾸면 이 값도 같이 재검토할 것.
     #
     # 2026-07-31 2.5 → 3.5. 전방-후방 패스 시뮬(ifac_track_v2, a_lat 6.0 / decel 2.5 / v_max 8.0):
     #   랩타임 11.97 → 11.63 s (−0.34 s, −2.8%), 최고 도달속 6.93 → 7.44 m/s.
@@ -150,8 +154,9 @@ def generate_launch_description():
     #      가속·제동 둘 다 올리면 −1.32 s(−11%)다. 단 brake_gain과 prebrake_decel은 한 쌍.
     base_max_accel_arg = DeclareLaunchArgument(
         'base_max_accel', default_value='3.5',
-        description='종방향 최대 가속도 한계 [m/s^2]. VESC s_pid_ramp_erpms_s(15600 = 3.69)의 95% — '
-                    '이 값을 넘겨 주면 VESC가 깎고 와인드업 위험만 커진다'
+        description='종방향 최대 가속도 한계 [m/s^2]. VESC 천장은 s_pid_ramp_erpms_s(21160 ÷ 4336 '
+                    '= 4.88) — 3.5는 그 72%라 여유가 있다. 4.88을 넘겨 주면 VESC가 깎고 '
+                    '와인드업 위험만 커진다'
     )
 
     steering_control = common.build_control_map_node(

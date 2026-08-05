@@ -8,7 +8,7 @@
 
     이동거리_참 = |전방거리(시작) - 전방거리(끝)|
     이동거리_휠 = integral |odom.twist.linear.x| dt
-    speed_to_erpm_gain_새 = 4232 * (휠 / 참)
+    speed_to_erpm_gain_새 = 4336 * (휠 / 참)
     (odom_speed = erpm/gain 이므로 odom 이 과소보고면 gain 이 너무 높은 것 = 낮춰야 함)
 
 왜 줄자 방식을 버렸나 (2026-07-28)
@@ -34,7 +34,10 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 
-GAIN = 4232.0
+# 현재 젯슨 vesc.yaml의 speed_to_erpm_gain. 새 게인을 이 값 기준으로 산출하므로
+# 젯슨 값이 바뀌면 여기도 같이 바꿔야 한다.
+# 2026-08-04 세미슬릭 타이어 교체 재보정으로 4232.0 → 4336.0 (08-05 확정).
+GAIN = 4336.0
 HALF_CONE = math.radians(3.0)   # 정면 ±3도 빔의 중앙값
 
 

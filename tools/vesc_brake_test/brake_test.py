@@ -6,7 +6,9 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from vesc_msgs.msg import VescStateStamped
 from std_msgs.msg import Float64
 
-GAIN = 4232.0
+# 젯슨 vesc.yaml의 speed_to_erpm_gain과 같아야 한다 (다르면 ERPM 임계 판정이 어긋난다).
+# 2026-08-04 세미슬릭 타이어 교체 재보정으로 4232.0 → 4336.0 (08-05 확정).
+GAIN = 4336.0
 
 class T(Node):
     def __init__(self):

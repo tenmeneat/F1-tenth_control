@@ -16,11 +16,14 @@ a·D ≥ v²−v_corner² 를 만족해야 하므로 가감속 2.23 m/s² 이상
 **voltage_input이 선두일 거라는 흔한 가정이 틀리다** — 실차(Humble) 실제 순서는
 temp_fet, temp_motor, current_motor, current_input, avg_id, avg_iq, duty_cycle, speed,
 voltage_input 이다(2026-07-26 젯슨 echo로 확인·검증). 여러 후보를 시도해 전압/듀티
-타당성과 **odom 속도 대비 ERPM 비**(speed_to_erpm_gain 4232 부근)로 자동 판별한다.
+타당성과 **odom 속도 대비 ERPM 비**(speed_to_erpm_gain 4336 부근)로 자동 판별한다.
+
+⚠️ 게인은 2026-08-04 세미슬릭 타이어 교체로 4232 → 4336이 됐다(08-05 확정).
+   **그 이전에 녹화한 bag은 `--erpm-gain 4232`를 명시**해야 레이아웃 자동 판별이 맞는다.
 
 사용법:
   source /opt/ros/<distro>/setup.bash
-  python3 analyze_longitudinal.py <bag폴더 | .db3> [--odom /odom] [--erpm-gain 4232]
+  python3 analyze_longitudinal.py <bag폴더 | .db3> [--odom /odom] [--erpm-gain 4336]
 """
 import sys, os, glob, sqlite3, struct, math, argparse
 import numpy as np
@@ -118,7 +121,7 @@ def resolve_vesc(raw_list, t_odom, vx_odom, erpm_gain):
     """알려진 레이아웃을 모두 시도해 ERPM/vx 비가 erpm_gain에 가장 가까운 쪽을 채택한다.
 
     ⚠️ vesc_msgs 버전마다 필드 순서가 달라 하드코딩은 조용히 틀린다. 실측 vx와의
-       ERPM 비(=speed_to_erpm_gain, 4232 근처여야 함)를 지문으로 써서 자동 판별한다.
+       ERPM 비(=speed_to_erpm_gain, 4336 근처여야 함)를 지문으로 써서 자동 판별한다.
     """
     best = None
     for name, layout in VESC_LAYOUTS.items():
@@ -148,7 +151,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("bag")
     ap.add_argument("--odom", default="/odom")
-    ap.add_argument("--erpm-gain", type=float, default=4232.0)
+    ap.add_argument("--erpm-gain", type=float, default=4336.0,
+                    help="speed_to_erpm_gain. 2026-08-04 세미슬릭 재보정 후 4336. "
+                         "그 이전 bag은 4232를 넘길 것")
     a = ap.parse_args()
 
     db3 = a.bag if a.bag.endswith(".db3") else (sorted(glob.glob(os.path.join(a.bag, "*.db3"))) or [None])[0]
