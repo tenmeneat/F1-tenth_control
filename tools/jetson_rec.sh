@@ -47,7 +47,21 @@ done
 
 # 녹화 토픽. /state·/avoid_waypoints·/overtake_waypoints는 2026-07-30 추가 —
 # 07-29 저속 주행 원인이 state machine의 AVOID 고착이었는데 /state가 없어 역추론해야 했다.
-TOPICS="/drive_autonomous /drive_mppi /drive /joy /drive_mode /mppi_active /estop_lock \
+#
+# 🔑 /ackermann_cmd·/teleop는 2026-08-05 추가 — **LUT 조향축 확장 실측에 필수**.
+#    /drive는 자율 채널의 *요청*일 뿐이고, ackermann_mux가 수동(/teleop, pri100)·E-stop과
+#    중재한 **최종 명령**은 /ackermann_cmd다(→ ackermann_to_vesc → 서보).
+#    LUT 상단(조향 0.39~0.43)은 자율로는 원리적으로 못 만든다 — 그 조향각을 만드는 게
+#    LUT 자신이라 0.3897에서 saturate하기 때문(닭-달걀). **수동 풀락 주행만이 유일한
+#    데이터 소스**이고, 수동 조향은 /drive에 안 실리므로 이 두 토픽이 없으면 그 주행이
+#    통째로 버려진다.
+#    ⚠️ 수동/자율이 섞인 bag에서 /drive를 쓰면 수동 주행의 요레이트를 자율 조향명령에
+#       짝지어 LUT를 조용히 오염시킨다 — 캘리브레이터가 /ackermann_cmd를 우선하는 이유.
+#
+# ⚠️ 이 목록은 ~/.zshrc 의 f1rec_here 알리아스와 **한 쌍**이다. 한쪽만 고치면 조용히 어긋난다.
+# 2026-08-05: /drive_mppi·/mppi_active 제거 — 08-01 MPPI 노드 삭제로 존재하지 않는 토픽.
+TOPICS="/drive_autonomous /drive /ackermann_cmd /teleop \
+/joy /drive_mode /estop_lock \
 /pf/pose/odom /odom /tf /tf_static /scan /sensors/imu/raw /imu/data \
 /global_waypoints /local_waypoints /state /avoid_waypoints /overtake_waypoints \
 /car_state/frenet/odom /commands/motor/speed /commands/motor/brake \

@@ -111,15 +111,31 @@ def generate_launch_description():
     #    반대로 vesc.yaml만 넓히면 컨트롤러가 못 내는 각을 안 쓰게 되어 손해만 본다.
     #    → 08-03에 ackermann_to_vesc가 발행 전에 스스로 [servo_min, servo_max]로 클램프하도록
     #      고쳐서, 혹시 어긋나도 driver의 클리핑 로그 폭주 경로는 타지 않는다(안전망).
+    # 🔴 2026-08-05: 좌우 대칭 0.410 으로 변경. 젯슨 vesc.yaml 의 **좌우 개별 조향 게인**
+    #    (steering_angle_to_servo_gain_left -0.5785 / _right -0.4702) 활성화와 **한 쌍**이다.
+    #    개별 게인을 켜면 steering_angle 의 의미가 "단일 게인용 명령값"에서
+    #    **실제 바퀴 각(rad)** 으로 바뀌므로, 한계도 실측 풀락각인 좌우 대칭 0.410 이 된다.
+    #    ⚠️ 둘 중 하나만 배포하면 안 된다 — 젯슨이 구 방식(개별게인 0.0=폴백)인데 여기만
+    #       0.410 이면 좌조향이 23.5°가 아니라 19.3°까지밖에 안 나온다(손해만 봄).
+    #
+    #    왜 바꿨나 (0805 bag `run_0805_150603` 실측):
+    #      정상상태 자전거 모델로 역산한 K_us 가 **좌 0.0338 / 우 0.0175 = 좌회전
+    #      언더스티어가 우회전의 약 2배**. 이 트랙은 좌선회 39% / 우선회 8% 라 좌코너마다
+    #      바깥으로 밀려 **직선 진입 크로스트랙이 매 랩 −0.46 m(σ 1.6 cm)** 로 반복됐다.
+    #      단일 게인 -0.4463 은 풀락에서만 좌우가 맞고 중간각이 전부 어긋난 게 원인
+    #      (좌측 링키지가 같은 바퀴각에 servo 를 21.9% 더 씀).
+    #    검산: 개별게인+0.410 이면 풀락 servo 가 좌 0.230015 / 우 0.659982 로
+    #      [servo_min 0.23, servo_max 0.66] **안쪽**에 들어온다(클리핑 없음).
     max_steering_left_arg = DeclareLaunchArgument(
-        'max_steering_left', default_value='0.5315',
-        description='좌조향(δ>0) 명령 한계 [rad]. 젯슨 vesc.yaml servo_min 0.23과 한 쌍 '
-                    '(실제 도달 약 23.5° — 좌측 링키지 비선형이라 명령각이 더 크다)'
+        'max_steering_left', default_value='0.410',
+        description='좌조향(δ>0) 명령 한계 [rad] = 실제 바퀴 각. 젯슨 vesc.yaml 의 '
+                    'steering_angle_to_servo_gain_left(-0.5785) 활성화와 한 쌍'
     )
     max_steering_right_arg = DeclareLaunchArgument(
-        'max_steering_right', default_value='0.4320',
-        description='우조향(δ<0) 명령 한계 [rad]. 젯슨 vesc.yaml servo_max 0.66과 한 쌍 '
-                    '(실제 도달 약 23.5°). 조향 권한 캡은 이 값(작은 쪽)을 씀'
+        'max_steering_right', default_value='0.410',
+        description='우조향(δ<0) 명령 한계 [rad] = 실제 바퀴 각. 젯슨 vesc.yaml 의 '
+                    'steering_angle_to_servo_gain_right(-0.4702) 활성화와 한 쌍. '
+                    '조향 권한 캡은 이 값(작은 쪽)을 씀'
     )
 
     # 비워두면 기존 폴백 순서(f1tenth_control share → steering_lookup share)로 로드.

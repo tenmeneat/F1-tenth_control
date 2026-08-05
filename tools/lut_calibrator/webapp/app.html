@@ -165,6 +165,24 @@ textarea{width:100%;height:190px;margin-top:9px;background:var(--sunk);color:var
       같이 넣으면 그 위에 이어서 쌓습니다. 파일은 서버로 올라가지 않고 브라우저 안에서만 처리됩니다.</div>
     <input id="file" type="file" accept=".db3,.csv,.yaml" multiple hidden>
   </div>
+  <div class="card" id="baseopt" style="padding:14px 18px;margin-top:12px">
+    <div class="row" style="align-items:center;flex-wrap:wrap;gap:14px">
+      <label style="display:flex;align-items:center;gap:7px">
+        <span><b>베이스 LUT</b></span>
+        <select id="baseSel">
+          <option value="std">표준 (조향축 ~0.3897)</option>
+          <option value="ext">축 확장 (~0.4320) — 수동 풀락 실측용</option>
+        </select>
+      </label>
+      <label style="display:flex;align-items:center;gap:7px">
+        <span><b>Prior weight</b></span>
+        <input id="priorW" type="number" min="0" step="0.5" value="3" style="width:76px">
+      </label>
+      <span class="note" id="baseNote" style="margin:0"></span>
+    </div>
+    <p class="note" id="baseWarn" style="margin:8px 0 0"></p>
+  </div>
+
   <div id="status" role="status" aria-live="polite"></div>
 
   <div id="results">
@@ -206,6 +224,7 @@ textarea{width:100%;height:190px;margin-top:9px;background:var(--sunk);color:var
 <!-- sql.js (SQLite WASM) 인라인 -->
 <script>/*__SQLJS_GLUE__*/</script>
 <script id="baselut" type="text/plain">__BASE_LUT__</script>
+<script id="baselutext" type="text/plain">__BASE_LUT_EXT__</script>
 <script>
 "use strict";
 const WASM_B64="__WASM_B64__";
@@ -214,12 +233,20 @@ function b64ToBytes(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);
 
 // ══ 상수 (control_map_node / lut_calibrator_node 기준) ══
 const WHEELBASE=0.33, DEG2RAD=Math.PI/180;
-const MIN_SPEED=1.0, PRIOR_W=3.0, ALPHA=0.3, IMU_SCALE=DEG2RAD;
+const MIN_SPEED=1.0, ALPHA=0.3, IMU_SCALE=DEG2RAD;
+let PRIOR_W=3.0;                    // UI에서 바꿀 수 있다(CLI --prior-weight와 같은 뜻)
 const IMU_PREFS=["/imu/data","/sensors/imu/raw"];
 const ODOM_PREFS=["/pf/pose/odom","/odom"];
-const DRIVE_PREFS=["/drive","/drive_autonomous"];
+// ⚠️ /ackermann_cmd가 1순위 (2026-08-05, CLI와 동일). ackermann_mux가 수동(/teleop)·자율
+//    (/drive)·E-stop을 중재한 뒤 실제로 서보로 나간 **최종** 명령이다. /drive는 자율 채널의
+//    요청일 뿐이라, 수동 구간이 섞인 bag에서 그걸 쓰면 수동 주행의 요레이트를 자율 조향명령에
+//    짝지어 LUT를 조용히 오염시킨다. LUT 상단(>0.3897)은 자율로는 원리적으로 못 만들므로
+//    (그 각을 만드는 게 LUT 자신 = 닭-달걀) 수동 풀락 주행이 유일한 데이터 소스다.
+const DRIVE_PREFS=["/ackermann_cmd","/drive","/drive_autonomous"];
 const SIM_MARKERS=["/ego_racecar/odom"];
-const LS_KEY="f1tenth_lut_calib_state_v1";
+// 베이스별로 키를 나눈다 — 격자 크기가 달라 서로 호환되지 않으므로 섞이면 안 된다.
+const LS_KEY_BASE="f1tenth_lut_calib_state_v1";
+let LS_KEY=LS_KEY_BASE;
 
 // ══ CDR 리더 (bag_analyzer의 검증된 파서와 동일) ══
 class CDR{
@@ -255,8 +282,12 @@ function parseLutCsv(text){
           vel:rows[0].slice(1).map(num), steer:rows.slice(1).map(r=>num(r[0])),
           grid:rows.slice(1).map(r=>r.slice(1).map(num))};
 }
-const LUT=parseLutCsv(document.getElementById('baselut').textContent);
-const NS=LUT.steer.length, NV=LUT.vel.length;
+// 베이스 LUT는 런타임에 바꿀 수 있다(표준 ↔ 축 확장). 격자 크기가 달라지므로
+// 바꿀 때는 반드시 누적 상태를 리셋해야 한다 — setBase()가 그 일을 한다.
+const BASE_SRC={std:'baselut', ext:'baselutext'};
+let BASE_ID='std';
+let LUT=parseLutCsv(document.getElementById(BASE_SRC.std).textContent);
+let NS=LUT.steer.length, NV=LUT.vel.length;
 
 // ══ 숫자 포맷: C++ ostream / Python '%g'와 동일하게 ══
 function fmtG(v){
@@ -650,11 +681,45 @@ document.getElementById('reset').addEventListener('click',()=>{
   results.style.display='none';drop.style.display='';
   statusEl.textContent='누적을 초기화했습니다.';});
 
+// ══ 베이스 LUT 전환 ══════════════════════════════════════════════════════════
+// 표준(60행, 조향축 ~0.3897) ↔ 축 확장(63행, ~0.4320). 격자 크기가 다르므로 전환 시
+// 누적 상태를 반드시 버린다. localStorage 키도 베이스별로 분리해 서로 섞이지 않게 한다.
+const baseSel=document.getElementById('baseSel'), priorInp=document.getElementById('priorW');
+const baseNote=document.getElementById('baseNote'), baseWarn=document.getElementById('baseWarn');
+
+function setBase(id,{keep=false}={}){
+  BASE_ID=(id==='ext')?'ext':'std';
+  LUT=parseLutCsv(document.getElementById(BASE_SRC[BASE_ID]).textContent);
+  NS=LUT.steer.length; NV=LUT.vel.length;
+  LS_KEY=LS_KEY_BASE+(BASE_ID==='ext'?'_ext':'');
+  if(!keep){STATE=blankState();BAGLOG=[];IMU_SQ=KIN_SQ=UNIT_N=0;}
+  const top=LUT.steer[LUT.steer.length-1];
+  baseNote.textContent=`조향축 ${NS}행 · 상한 ${top.toFixed(4)} rad · 속도축 ${NV}열`;
+  baseWarn.innerHTML = BASE_ID==='ext'
+    ? '🔴 <b>축 확장본은 상단 4행이 측정이 아니라 시드</b>입니다(기존 표면의 국소 접선 외삽). '
+     +'자율주행 bag으로는 그 행이 <b>영원히 안 채워집니다</b> — 조향 명령을 만드는 게 LUT 자신이라 '
+     +'0.3897에서 saturate하기 때문입니다(닭-달걀). <b>수동 풀락 정상원 주행</b>으로만 채울 수 있고, '
+     +'채우기 전에는 배포하지 마세요. Prior weight를 <b>0.5</b> 정도로 낮춰 실측이 지배하게 하세요.'
+    : 'CLI 기본값과 동일한 베이스입니다 — 같은 bag이면 <code>calibrate_lut_from_bag.py</code>와 '
+     +'바이트 단위로 같은 CSV가 나옵니다.';
+  results.style.display='none'; drop.style.display='';
+}
+baseSel.addEventListener('change',()=>{
+  setBase(baseSel.value);
+  statusEl.textContent='베이스 LUT를 바꿨습니다 — 격자 크기가 달라 누적을 초기화했습니다.';
+});
+priorInp.addEventListener('change',()=>{
+  const v=parseFloat(priorInp.value);
+  PRIOR_W=(isFinite(v)&&v>=0)?v:3.0; priorInp.value=PRIOR_W;
+});
+
 // 테마 전환 시 캔버스 다시 그림(색을 CSS 변수에서 읽으므로)
 matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{if(HM_GEO)drawHeatmap();});
 new MutationObserver(()=>{if(HM_GEO)drawHeatmap();})
   .observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
 wireHeatmapHover();
+
+setBase('std',{keep:true});   // 라벨/키 초기화 (기본 = 표준, 누적은 아래에서 로드)
 
 // 이전 세션 누적이 있으면 알려준다(자동으로 결과를 열지는 않음)
 if(loadLS()&&totalSamples()>0){

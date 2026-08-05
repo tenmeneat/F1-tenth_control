@@ -48,7 +48,13 @@ WHEELBASE = 0.33           # 단위 검증용 기구학 기대 요레이트 계�
 # 토픽 자동 판별 우선순위. 앞에 있을수록 우선.
 IMU_TOPIC_PREFS = ["/imu/data", "/sensors/imu/raw"]
 ODOM_TOPIC_PREFS = ["/pf/pose/odom", "/odom"]
-DRIVE_TOPIC_PREFS = ["/drive", "/drive_autonomous"]
+# ⚠️ /ackermann_cmd가 1순위다(2026-08-05 변경). 이게 ackermann_mux가 수동(/teleop)·자율
+#    (/drive)·E-stop을 중재한 뒤 실제로 ackermann_to_vesc → 서보로 나간 **최종** 명령이다.
+#    /drive는 자율 채널의 요청일 뿐이라, 수동 구간이 섞인 bag에서 그걸 쓰면 수동 주행의
+#    요레이트를 자율 조향명령에 짝지어 LUT를 조용히 오염시킨다.
+#    LUT 상단(조향 >0.3897) 실측은 **수동 풀락 주행으로만** 얻을 수 있으므로(자율은 LUT가
+#    saturate해서 그 각을 못 만든다 = 닭-달걀) 이 우선순위가 축 확장의 전제조건이다.
+DRIVE_TOPIC_PREFS = ["/ackermann_cmd", "/drive", "/drive_autonomous"]
 
 # 시뮬 bag 판별용. LUT는 실차 sysid 자산이라 시뮬 데이터가 섞이면 안 된다.
 SIM_TOPIC_MARKERS = ["/ego_racecar/odom"]

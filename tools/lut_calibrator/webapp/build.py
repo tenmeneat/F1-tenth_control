@@ -16,13 +16,18 @@ app = open(os.path.join(HERE, "app.html")).read()
 glue = open(os.path.join(HERE, "vendor", "sql-wasm.js")).read()
 wasm_b64 = base64.b64encode(open(os.path.join(HERE, "vendor", "sql-wasm.wasm"), "rb").read()).decode()
 base_lut = open(os.path.join(REPO, "control_code", "LUT_calibrated.csv")).read().strip()
+# 축 확장본(조향축 ~0.4320). UI에서 고를 수 있게 같이 심는다 — 기본은 표준이라
+# CLI 기본값과의 바이트 동일성은 그대로 유지된다. 상세는 ../README.md 참고.
+base_lut_ext = open(os.path.join(HERE, "..", "LUT_base_extended.csv")).read().strip()
 
 # LUT는 <script type="text/plain">에 그대로 들어가므로 종료 태그만 없으면 안전
-assert "</script" not in base_lut.lower(), "베이스 LUT에 </script>가 들어 있습니다"
+for name, txt in (("표준", base_lut), ("축 확장", base_lut_ext)):
+    assert "</script" not in txt.lower(), f"베이스 LUT({name})에 </script>가 들어 있습니다"
 
 full = (app.replace("/*__SQLJS_GLUE__*/", glue)
            .replace("__WASM_B64__", wasm_b64)
-           .replace("__BASE_LUT__", base_lut))
+           .replace("__BASE_LUT_EXT__", base_lut_ext)   # ⚠️ __BASE_LUT__ 보다 먼저!
+           .replace("__BASE_LUT__", base_lut))          #    (앞이 뒤의 접두사라 순서가 중요)
 
 with open(os.path.join(HERE, "webapp.html"), "w") as f:
     f.write(full)

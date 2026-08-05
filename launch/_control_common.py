@@ -307,7 +307,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'imu_linear_scale': imu_linear_scale,
             'yaw_rate_gain': LaunchConfiguration('yaw_rate_gain'),
             'curvature_ff_blend': 0.0,
-            'heading_damping_gain': 0.0,
+            'heading_damping_gain': 0.2,
             'acceleration_scaler_for_steering': LaunchConfiguration('acceleration_scaler_for_steering'),
             'deceleration_scaler_for_steering': LaunchConfiguration('deceleration_scaler_for_steering'),
             'start_scale_speed': LaunchConfiguration('start_scale_speed'),
