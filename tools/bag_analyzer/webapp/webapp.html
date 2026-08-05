@@ -106,6 +106,13 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
 .bintbl td:first-child{text-align:left;color:var(--dim)}
 .bintbl tr.thin td{color:#6e7783}
 .bintbl tr:last-child td{border-bottom:0}
+/* 코너 판정 기준(MLA) 입력 — bag에 없는 런치 인자라 사람이 넣어야 한다 */
+.mlabox{float:right;font-size:12px;font-weight:400;color:var(--dim);
+  background:#11161d;border:1px solid var(--line);border-radius:6px;padding:4px 9px}
+.mlabox input{width:56px;background:#0d1117;border:1px solid #2b333d;border-radius:4px;
+  color:#e6edf3;font:600 12.5px ui-monospace,Menlo,Consolas,monospace;padding:2px 5px;text-align:right}
+.mlabox input:focus{outline:none;border-color:#4c8dff}
+.mlabox code{color:#a5d6ff;font-size:11.5px}
 </style></head>
 <body>
 <header>
@@ -171,7 +178,9 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
     </div>
     <div class="tblscroll"><table id="bintbl" class="bintbl"></table></div>
 
-    <h2>코너별 통과 속도 <span class="hint">— 진입 → 에이펙스(최저속) → 탈출 · 그립 여유</span></h2>
+    <h2>코너별 통과 속도 <span class="hint">— 진입 → 에이펙스(최저속) → 탈출 · <b>설정 MLA</b> 대비 여유</span>
+      <span class="mlabox" title="이 주행에서 실제로 넣은 런치 인자. bag에 기록되지 않으므로 직접 입력합니다.">그 주행의 <code>max_lateral_accel</code>
+        <input id="mla" type="number" step="0.1" min="0.5" max="20"> m/s²</span></h2>
     <div class="cornerwrap">
       <div class="cornermapbox">
         <canvas id="cornermap" title="턴 위치 — 표에 마우스를 올리면 해당 턴이 켜집니다"></canvas>
@@ -182,14 +191,15 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
     </div>
     <div class="explain" id="ex_corner" style="margin-top:8px"></div>
 
-    <h2>파트별 튜닝 가이드 <span class="hint">— 파트마다 무엇을 · 어떤 파라미터로 (🔧)</span></h2>
+    <h2>파트별 튜닝 가이드 <span class="hint">— 파트마다 무엇을 · 어떤 파라미터로 (🔧)</span>
+      <span id="mlawarn" class="mlabox" style="display:none;color:#f5a623;border-color:#5a4520">⚠️ 아래 진단은 <b>bag을 열 때의 MLA</b> 기준입니다 — 새 값으로 다시 진단하려면 bag을 다시 여세요</span></h2>
     <div id="guide"></div>
     <h3>권장 다음 셰이크다운</h3>
     <div id="reccmd"></div>
 
     <h2>궤적 · 요레이트</h2>
     <div class="chartrow">
-      <div><div class="clab hint" id="lab_traj">궤적 (map, 속도색 · 빨강=그립초과)</div><canvas id="traj" class="traj"></canvas></div>
+      <div><div class="clab hint" id="lab_traj">궤적 (map, 속도색 · 빨강=설정 초과)</div><canvas id="traj" class="traj"></canvas></div>
       <div class="explain" id="ex_traj"></div>
     </div>
     <div class="chartrow">
@@ -476,6 +486,16 @@ const WHEELBASE=0.33,MAX_STEER=0.41,CAR_W=0.31,CAR_L=0.58,DEG2RAD=Math.PI/180;
 const SRC_LABEL={imu:'IMU',mcl:'MCL pose',odom_kinematic:'⚠️명령값'};
 const R_MIN=WHEELBASE/Math.tan(MAX_STEER);
 let GRIP=6.5;const GRIP_ASSUMED=6.5;
+// ── 판정 기준이 둘인 이유 (2026-08-05) ────────────────────────────────────
+// GRIP = **타이어가 버텼나**. bag에서 제어상실을 관측해야만 잴 수 있고, 안 밀어붙인
+//        주행에서는 원리적으로 못 정한다(그때 GRIP_ASSUMED로 폴백).
+// MLA  = **컨트롤러가 지키라고 한 값을 지켰나**(= 사전감속이 목표를 달성했나).
+//        bag에 안 실린다(/parameter_events 미녹화) → 사용자가 그 주행의 런치 인자를 입력.
+// ⚠️ 둘을 하나로 뭉치면 08-05 160913 bag처럼 "34코너 전부 그립 초과"가 뜬다 —
+//    실제로는 타이어가 멀쩡했고(K_us 무증가·조향 38% 여유) 가정값 6.5가 낡았을 뿐이다.
+//    **코너 판정의 기본 기준은 MLA**(아는 숫자·조치 가능)이고, GRIP은 실측됐을 때만 덧댄다.
+const MLA_KEY='f1ba_mla';
+let MLA=(()=>{const v=parseFloat(localStorage.getItem(MLA_KEY));return isFinite(v)&&v>0?v:6.0;})();
 
 // ══ bag 파싱: 한 파일 → 원시 메시지(절대 타임스탬프). 토픽명 우선 분류(겹치는 타입 자동 구분) ══
 const RAW_KEYS=["odom_vesc","odom_pf","odom_gen","imu_raw","imu_data","imu_gen","scanRaw","tfRaw",
@@ -899,6 +919,22 @@ function estimateGrip(tr){
   const measured=reached?Math.min(GCAP,Math.max(3,q(0.95))):peak;
   return {reached,measured,peak,onset};
 }
+// ══ 타이어에 여유가 남았나 — 요레이트 추종률의 **하중 의존성** (2026-08-05) ═══════
+// 제어상실이 안 일어난 bag에서도 "더 밀어붙일 수 있었나"는 답할 수 있다: 타이어가 포화하면
+// 하중이 커질수록 지시 요레이트 대비 실측이 급락한다. 평평하면 아직 선형 영역이다.
+// (08-05 160913 bag 실측: a_lat 3–4에서 0.52 → 8–10에서 0.67. 급락 없음 = 여유 있음)
+function gripHeadroom(tr,thr){
+  const lo=[],hi=[];
+  for(let i=0;i<tr.length;i++){
+    const v=tr[i][4],w=Math.abs(tr[i][7]),wc=Math.abs(tr[i][8]),a=Math.abs(tr[i][5]);
+    if(v<1.5||wc<1.0)continue;
+    const r=w/wc;
+    if(a<0.6*thr)lo.push(r);else if(a>thr)hi.push(r);}
+  if(lo.length<50||hi.length<30)return null;      // 표본이 적으면 판정하지 않는다
+  const m=a=>{const s=a.slice().sort((x,y)=>x-y);return s[Math.floor(s.length/2)];};
+  const rLo=m(lo),rHi=m(hi);
+  return {nLo:lo.length,nHi:hi.length,rLo,rHi,holds:rHi>=0.90*rLo};
+}
 function segmentCorners(tr,grip){
   const N=tr.length,KTHR=0.15,segs=[];let cur=null,lastT=-1e9;   // κ>0.15 (반경<6.7m) = 코너
   for(let i=0;i<N;i++){const v=tr[i][4];const k=v>0.8?Math.abs(tr[i][7])/v:0;
@@ -1057,17 +1093,26 @@ function diagnose(S){
     `슬라이드/스핀 직전까지 타이어가 버틴 최대 제어 횡가속(스핀 중 vx·wz 폭주는 제외, 물리 상한 11로 캡). 가정값이 아니라 이 실측치로 코너 진단·권장속도를 계산했습니다. 전이 오버슈트가 섞여 다소 낙관적일 수 있어 마진을 크게 둡니다.`,
     `<code>max_lateral_accel:=${(grip*0.8).toFixed(1)}</code> (실측×0.8 보수 마진)로 설정.`);
   else F('control','info',`그립 한계 미도달 — 실측 ≥ ${gi.peak.toFixed(1)} m/s²`,
-    `차가 그립 한계까지 안 밀어붙였습니다(최대 |a_lat| ${gi.peak.toFixed(1)}, 조향 포화 없음). 이 bag만으로는 실그립을 못 정합니다 — 아래 코너 판정은 <b>가정 그립 ${GRIP_ASSUMED}</b> 기준(참고용).`,
+    `차가 그립 한계까지 안 밀어붙였습니다(최대 |a_lat| ${gi.peak.toFixed(1)}, 조향 포화 없음). 이 bag만으로는 실그립을 못 정합니다 — `
+    +`그래서 <b>아래 코너 판정은 그립이 아니라 설정 <code>max_lateral_accel</code>(${MLA.toFixed(1)}) 기준</b>입니다("설정을 지켰나"이지 "미끄러졌나"가 아님).`,
     `실그립을 재려면 안전한 곳에서 코너 속도를 서서히 올려 <b>슬라이드가 시작되는 지점</b>까지 밀고 다시 녹화.`);
-  // 코너별 오버스피드 (주행 요레이트로 분할 — 맵 불일치와 무관하게 동작)
-  const bad=corners.filter(c=>c.peakAl>grip||c.sat).sort((a,b)=>b.peakAl-a.peakAl);
+  // ── 코너 판정 (2026-08-05) ──────────────────────────────────────────────
+  // 기준을 grip(미도달 시 가정 6.5)에서 **설정 MLA**로 바꿨다. 낡은 가정값으로 "그립 초과"를
+  // 단정하면 08-05 160913 bag처럼 34코너 전부가 빨갛게 뜬다(실제론 타이어 멀쩡).
+  // 실그립이 실측된 bag에서는 그걸 넘었는지를 **심각도**로만 얹는다.
+  const bad=corners.filter(c=>c.peakAl>MLA||c.sat).sort((a,b)=>b.peakAl-a.peakAl);
   const vSafeMin=bad.reduce((m,c)=>c.vSafe!=null?Math.min(m,c.vSafe):m,Infinity);
-  bad.slice(0,3).forEach(c=>{const ratio=c.peakAl/grip;
-    F('control',ratio>1.6?'critical':'warn',`코너 @ ${c.t0.toFixed(1)}s 오버스피드`,
-      `진입 ${c.entryV.toFixed(1)} m/s · 피크 |a_lat| ${c.peakAl.toFixed(1)} (${ratio.toFixed(1)}×그립)${c.sat?' · 조향 포화(풀락 스핀)':''} · 최소반경 ${c.minRad.toFixed(1)}m. 그립 대비 과속 진입.`,
-      c.vSafe!=null?`이 코너 안전 진입속도 <b>v_safe ${c.vSafe.toFixed(1)} m/s</b>. 이 구간만 프로파일 감속(offline_trajectory_generator)하거나, 여의치 않으면 전역 <code>max_speed</code>로 캡.`:'');});
-  if(!bad.length)F('control','ok','코너 그립 마진 양호',
-    `감지된 코너 ${corners.length}개 모두 그립(${grip.toFixed(1)}) 이내 — 오버스피드·조향 포화 없음.`);
+  bad.slice(0,3).forEach(c=>{const ratio=c.peakAl/MLA;
+    const slid=gi.reached&&c.peakAl>grip;      // 실측 그립도 넘음 = 진짜 미끄러짐
+    F('control',(slid||c.sat)?'critical':'warn',`코너 @ ${c.t0.toFixed(1)}s — 설정 MLA 초과 ${ratio.toFixed(1)}×`,
+      `진입 ${c.entryV.toFixed(1)} m/s · 피크 |a_lat| ${c.peakAl.toFixed(1)} (설정 ${MLA.toFixed(1)}의 ${ratio.toFixed(1)}배)`
+      +`${c.sat?' · <b>조향 포화(풀락)</b>':''} · 최소반경 ${c.minRad.toFixed(1)}m. `
+      +(slid?`<b>실측 그립 ${grip.toFixed(1)}도 넘었습니다 — 실제로 밀린 코너입니다.</b>`
+            :`단 이 bag은 그립 한계 미도달이라 <b>미끄러졌다는 뜻이 아닙니다</b> — 사전감속이 자기 목표에 못 미친 것입니다.`),
+      slid?(c.vSafe!=null?`이 코너 안전 진입속도 <b>v_safe ${c.vSafe.toFixed(1)} m/s</b>. 이 구간만 프로파일 감속(offline_trajectory_generator)하거나 전역 <code>max_speed</code>로 캡.`:'')
+          :`둘 중 하나입니다 — ① 사전감속을 늘린다(<code>prebrake_decel</code>을 실측 감속도까지 낮추고 <code>curvature_lookahead_count</code>↑) ② 설정이 낮다면 <code>max_lateral_accel</code>을 실그립 쪽으로 올린다. 짧고 급한 코너는 제동거리가 물리적으로 모자라 ①로도 안 될 수 있습니다.`);});
+  if(!bad.length)F('control','ok','코너 마진 양호',
+    `감지된 코너 ${corners.length}개 모두 설정 <code>max_lateral_accel</code> ${MLA.toFixed(1)} 이내 — 초과·조향 포화 없음.`);
   // ── 요레이트 추종률: 언더스티어(그립) vs 조향 게인 결손(캘리브레이션) 분리 ──
   // 명령(기구학) 대비 실측 비율. 그립 근처에서 낮으면 언더스티어, **그립 한참 아래에서도**
   // 낮으면 슬립이 아니라 차가 명령한 만큼 안 꺾이는 것 = 서보 게인/링키지 문제.
@@ -1136,10 +1181,27 @@ function diagnose(S){
     F('control','info','조향 포화 한계 속도',
       `K_us=${kUs.toFixed(4)}이면 κ=0.7(R=1.43m) 코너에서 필요 조향이 ±0.41에 닿는 속도가 <b>${vSt.toFixed(2)} m/s</b>입니다. 그립 한계 √(그립/κ)=${Math.sqrt(grip/0.7).toFixed(2)} m/s와 비교해 낮은 쪽이 실제 구속조건입니다.`,
       `두 한계 중 낮은 쪽 아래로 <code>max_speed</code>를 잡을 것.`);}
+  // ── 설정 MLA를 올릴 근거가 있나 (2026-08-05) ────────────────────────────
+  // 조건: 제어상실 없음 + 조향 미포화 + 설정을 유의하게 넘겨 돌았음 + 고하중에서 요레이트
+  // 추종률이 안 무너짐. 넷이 다 서면 "타이어가 버텼는데 설정이 낮다"가 데이터로 성립한다.
+  const anySat=corners.some(c=>c.sat);
+  const hd=gripHeadroom(tr,MLA);
+  if(!gi.reached&&!anySat&&gi.peak>MLA*1.1&&hd&&hd.holds){
+    const sug=Math.min(+(gi.peak*0.9).toFixed(1),+(MLA*1.5).toFixed(1));
+    rec.max_lateral_accel=sug;
+    F('control','ok',`설정 <code>max_lateral_accel</code>(${MLA.toFixed(1)})이 실제보다 낮습니다`,
+      `코너에서 |a_lat| <b>${gi.peak.toFixed(1)} m/s²</b>까지 갔는데 제어상실도 조향 포화도 없었습니다`
+      +`(최대 |δ| 여유 있음). 게다가 요레이트 추종률이 고하중에서 안 무너집니다 — `
+      +`a_lat < ${(0.6*MLA).toFixed(1)}에서 <b>${(hd.rLo*100).toFixed(0)}%</b>, > ${MLA.toFixed(1)}에서 <b>${(hd.rHi*100).toFixed(0)}%</b>`
+      +`(n=${hd.nLo}/${hd.nHi}). 타이어가 포화했다면 여기가 급락합니다. <b>아직 선형 영역</b>이라는 뜻입니다.`,
+      `<code>max_lateral_accel:=${sug}</code>로 올려 A/B. ⚠️ 이건 실그립이 아니라 <b>"최소한 여기까지는 버텼다"</b>는 하한이므로, `
+      +`한 번에 ${gi.peak.toFixed(1)}까지 가지 말고 단계적으로 올리며 요레이트 추종률을 다시 확인할 것.`);}
   // 권장 파라미터 (코너별 v_safe에서 도출)
-  if(bad.length&&isFinite(vSafeMin))rec.max_speed=Math.max(1.5,Math.floor(vSafeMin*2)/2);
+  // ⚠️ max_speed 하향 권고는 **실제로 밀린 경우에만** — 설정 초과만으로 속도를 깎으면
+  //    낡은 MLA가 그대로 랩타임 손실로 굳는다.
+  if(gi.reached&&bad.some(c=>c.peakAl>grip)&&isFinite(vSafeMin))rec.max_speed=Math.max(1.5,Math.floor(vSafeMin*2)/2);
   if(gi.reached)rec.max_lateral_accel=+(grip*0.8).toFixed(1);
-  if(bad.some(c=>c.peakAl>1.6*grip))rec.note=true;
+  if(gi.reached&&bad.some(c=>c.peakAl>1.6*grip))rec.note=true;
   if(S.stallDur>0.8)rec.min_speed=1.0;
   // IMU deg/s
   if(S.imu.gz_raw.length&&absmax(S.imu.gz_raw)>30)F('control','info','IMU 자이로 = deg/s 확인',
@@ -1170,7 +1232,7 @@ function diagnose(S){
 
   const stats={dur:S.dur,peakV,minV,minVMoving,peakAl,overFrac,minDecel,nCorners:corners.length,cornerV,grip,gripReached:gi.reached,gripPeak:gi.peak,
                alatSource:S.alatSource,peakAlCmd:absmax(alatCmd),usRatio,gainA,kUs,speedBins};
-  return {findings,rec,stats,gripUsed:grip,corners,turnInfo:clusterTurns(corners,tr)};
+  return {findings,rec,stats,gripUsed:grip,mlaAtAnalysis:MLA,corners,turnInfo:clusterTurns(corners,tr)};
 }
 
 // ══ 렌더/뷰어 (데스크톱 도구의 3D 뷰어 코드 기반) ══
@@ -1257,7 +1319,7 @@ function drawChart(cv,series,opt){opt=opt||{};const c=cv.getContext('2d'),W=cv.c
     opt.corners.forEach(cn=>{
       const x0=X(cn.t0),x1=X(cn.t1);
       c.fillStyle='rgba(88,166,255,0.10)';c.fillRect(x0,M.t,Math.max(1.5,x1-x0),PH);
-      const bad=cn.sat||cn.peakAl>GRIP;
+      const bad=cn.sat||cn.peakAl>MLA;
       c.fillStyle=bad?'#e5484d':'#58a6ff';
       c.beginPath();c.arc(X(cn.apexT),Y(cn.apexV),2.6,0,6.2832);c.fill();});
     c.restore();}
@@ -1440,7 +1502,10 @@ function wireTurnHighlight(tbl,TI,C){
     cv.addEventListener('mouseleave',()=>set(null));}
 }
 
-const CORNER_SLACK=0.85;   // 에이펙스가 v_grip의 이 비율 미만이면 '그립 남김'
+const CORNER_SLACK=0.85;   // 에이펙스가 한계속도의 이 비율 미만이면 '여유 남김'
+// 설정 MLA에서 그 코너 최소반경으로 낼 수 있었던 속도 √(MLA·R).
+// ⚠️ segmentCorners의 c.vGrip과 달리 **렌더 시점에** 계산한다 — MLA는 분석 후에도 바뀐다.
+function mlaSpeed(c){return (isFinite(c.minRad)&&c.minRad<50)?Math.sqrt(MLA*c.minRad):null;}
 function drawCornerTable(){
   const el=document.getElementById('cornertbl');if(!el)return;
   const C=DATA.corners||[],L=DATA.laps;
@@ -1454,13 +1519,15 @@ function drawCornerTable(){
   let slowIdx=0;for(let i=1;i<C.length;i++)if(C[i].apexV<C[slowIdx].apexV)slowIdx=i;
   el.innerHTML='<thead><tr>'+(hasLap?'<th>랩</th>':'')+'<th>턴</th><th>#</th><th>시각</th><th>진입 [m/s]</th>'
     +'<th>에이펙스(최저) [m/s]</th><th>탈출 [m/s]</th><th>최소반경 [m]</th>'
-    +'<th>피크 |a_lat|</th><th>그립상 가능 √(a·R)</th><th>판정</th></tr></thead><tbody>'
+    +`<th>피크 |a_lat|</th><th>설정상 가능 √(${MLA.toFixed(1)}·R)</th><th>판정 (설정 대비)</th></tr></thead><tbody>`
     +C.map((c,i)=>{
-      const over=c.peakAl>GRIP||c.sat;
-      const slack=c.vGrip!=null&&!over&&c.apexV<c.vGrip*CORNER_SLACK;
+      // 판정 기준은 **설정 MLA**다. 실그립은 미도달 bag에서 정할 수 없어서 판정에 못 쓴다.
+      const vSet=mlaSpeed(c);
+      const over=c.peakAl>MLA||c.sat;
+      const slack=vSet!=null&&!over&&c.apexV<vSet*CORNER_SLACK;
       const verdict=c.sat?'<b style="color:#e5484d">조향 포화</b>'
-        :over?`<b style="color:#e5484d">그립 초과 ${(c.peakAl/GRIP).toFixed(1)}×</b>`
-        :slack?`<span style="color:#f5a623">그립 남김 −${((1-c.apexV/c.vGrip)*100).toFixed(0)}%</span>`
+        :over?`<b style="color:#e5484d">설정 초과 ${(c.peakAl/MLA).toFixed(1)}×</b>`
+        :slack?`<span style="color:#f5a623">여유 −${((1-c.apexV/vSet)*100).toFixed(0)}%</span>`
         :'<span style="color:#7ee787">적정</span>';
       const tn=turnOf(i);
       const tcell=tn?`<span class="tcell"><span class="sw" style="background:${tn.color}"></span>`
@@ -1471,7 +1538,7 @@ function drawCornerTable(){
         +`<td>${c.entryV.toFixed(2)}</td>`
         +`<td><b>${c.apexV.toFixed(2)}</b></td><td>${c.exitV.toFixed(2)}</td>`
         +`<td>${c.minRad<50?c.minRad.toFixed(2):'—'}</td>`
-        +`<td>${c.peakAl.toFixed(1)}</td><td>${c.vGrip!=null?c.vGrip.toFixed(2):'—'}</td>`
+        +`<td>${c.peakAl.toFixed(1)}</td><td>${vSet!=null?vSet.toFixed(2):'—'}</td>`
         +`<td>${verdict}</td></tr>`;}).join('')
     +'</tbody>';
   wireTurnHighlight(el,TI,C);
@@ -1480,24 +1547,34 @@ function drawCornerTable(){
   // 해설 — 표를 그냥 두면 "그래서 뭘 올리나"가 안 보인다
   const apex=C.map(c=>c.apexV).sort((a,b)=>a-b);
   const med=pct(apex,0.5),lo=apex[0];
-  const nOver=C.filter(c=>c.peakAl>GRIP||c.sat).length;
-  const nSlack=C.filter(c=>c.vGrip!=null&&!(c.peakAl>GRIP||c.sat)&&c.apexV<c.vGrip*CORNER_SLACK).length;
+  const nOver=C.filter(c=>c.peakAl>MLA||c.sat).length;
+  const nSlack=C.filter(c=>{const s=mlaSpeed(c);return s!=null&&!(c.peakAl>MLA||c.sat)&&c.apexV<s*CORNER_SLACK;}).length;
+  const st=DATA.stats;
   let conc,cc;
-  if(nOver){conc=`코너 ${C.length}개 중 <b>${nOver}개가 그립 초과·조향 포화</b>. 최저 에이펙스 ${lo.toFixed(2)} m/s(중앙 ${med.toFixed(2)}). `
-      +`이 코너들은 더 느리게 들어가야 하고, 튜닝이 아니라 <b>프로파일 감속</b>이 답입니다.`;cc='#e5484d';}
-  else if(nSlack>C.length*0.4){conc=`코너 ${C.length}개 중 <b>${nSlack}개에서 그립을 남기고</b> 돌았습니다(에이펙스가 √(a·R)의 ${(CORNER_SLACK*100).toFixed(0)}% 미만). `
+  if(nOver){
+    // ⚠️ 같은 '설정 초과'라도 실그립까지 넘었으면 진짜 미끄러진 것이다 — 뭉뚱그리면 안 된다.
+    const nSlid=st.gripReached?C.filter(c=>c.peakAl>st.grip||c.sat).length:0;
+    conc=`코너 ${C.length}개 중 <b>${nOver}개가 설정 MLA(${MLA.toFixed(1)}) 초과·조향 포화</b>. 최저 에이펙스 ${lo.toFixed(2)} m/s(중앙 ${med.toFixed(2)}). `
+      +(nSlid?`그중 <b>${nSlid}개는 실측 그립 ${st.grip.toFixed(1)}도 넘었습니다 — 실제로 밀린 코너</b>라 진입속도를 낮춰야 합니다.`
+             :`실그립을 넘은 코너는 없으므로 "미끄러졌다"가 아니라 <b>사전감속이 자기 목표를 못 지켰다</b>는 뜻입니다 — 짧고 급한 코너에서 제동거리가 모자라면 이렇게 됩니다.`);
+    cc='#e5484d';}
+  else if(nSlack>C.length*0.4){conc=`코너 ${C.length}개 중 <b>${nSlack}개에서 설정 MLA 대비 여유를 남기고</b> 돌았습니다(에이펙스가 √(${MLA.toFixed(1)}·R)의 ${(CORNER_SLACK*100).toFixed(0)}% 미만). `
       +`최저 에이펙스 ${lo.toFixed(2)} m/s(중앙 ${med.toFixed(2)}) — 사전감속이 과하거나 프로파일 코너 속도가 보수적입니다. 랩타임 여유가 여기 있습니다.`;cc='#f5a623';}
-  else{conc=`코너 ${C.length}개 에이펙스 ${lo.toFixed(2)}~${apex[apex.length-1].toFixed(2)} m/s(중앙 ${med.toFixed(2)}) — 그립 대비 적정 범위. 오버스피드 0개.`;cc='#7ee787';}
-  // 그립 미도달 bag이면 '초과/남김' 판정은 가정값 기준이라 참고용이다 — 에이펙스 값 자체는 실측
-  if(!DATA.stats.gripReached)conc+=` <b>단, 이 bag은 그립 한계 미도달</b>이라 판정은 가정 그립 ${GRIP.toFixed(1)} 기준의 참고치입니다`
-    +` — 에이펙스 속도 자체는 실측이라 그대로 믿어도 됩니다.`;
+  else{conc=`코너 ${C.length}개 에이펙스 ${lo.toFixed(2)}~${apex[apex.length-1].toFixed(2)} m/s(중앙 ${med.toFixed(2)}) — 설정 MLA ${MLA.toFixed(1)} 대비 적정 범위. 초과 0개.`;cc='#7ee787';}
+  // ── 실그립은 **판정이 아니라 맥락**으로만 붙인다 (2026-08-05) ──
+  // 제어상실을 관측 못 한 bag에서 "그립 초과"라고 단정하면 낡은 가정값(6.5)이 그대로 결론이 된다.
+  if(st.gripReached)conc+=` 이 bag은 제어상실이 관측돼 <b>실그립 ≈ ${st.grip.toFixed(1)} m/s²</b>가 실측됐습니다`
+    +(nOver?` — 설정 초과가 실제 한계도 넘었는지 위 피크 |a_lat|과 대조하세요.`:` — 설정을 그 아래에서 올릴 여지가 있습니다.`);
+  else conc+=` <b>실그립은 이 bag으로 못 정합니다</b>(제어상실 미관측) — 확실한 건 <b>≥ ${st.gripPeak.toFixed(1)} m/s²</b>라는 것뿐이고,`
+    +(st.gripPeak>MLA?` 그 값이 설정 ${MLA.toFixed(1)}보다 높은데도 차가 버텼다는 건 <b>설정을 올릴 근거</b>입니다.`
+                     :` 타이어를 한계까지 밀어붙인 주행이 아닙니다.`);
   // 턴별 요약 — "어느 코너가 문제인가"는 랩을 가로질러 묶어야 보인다
   const nT=TI.turns.length;
   let turnLine='';
   if(nT){
     const stat=TI.turns.map(t=>{
       const ap=t.members.map(i=>C[i].apexV).filter(v=>isFinite(v));
-      const bad=t.members.filter(i=>C[i].peakAl>GRIP||C[i].sat).length;
+      const bad=t.members.filter(i=>C[i].peakAl>MLA||C[i].sat).length;
       return {id:t.id,n:t.n,avg:ap.length?ap.reduce((a,b)=>a+b,0)/ap.length:NaN,bad};});
     // ⚠️ "가장 느린 턴"은 **반복 통과한** 턴에서만 고른다. 아웃랩 출발·주행 종료처럼
     //    1회만 잡힌 구간이 항상 최저 에이펙스라 그대로 뽑으면 매번 그 아티팩트를 지목한다.
@@ -1511,14 +1588,17 @@ function drawCornerTable(){
         +`랩타임을 깎으려면 여기부터 봅니다.`:'')
       +(once.length?` <span style="color:#9aa4b2">${once.map(x=>x.id).join('·')}는 1회만 잡힌 구간이라(아웃랩 출발·주행 종료 등) 대표성이 없습니다.</span>`:'');
     const badT=stat.filter(x=>x.bad);
-    if(badT.length)turnLine+=` 그립 초과·포화가 나온 턴: <b>${badT.map(x=>`${x.id}(${x.bad}/${x.n}회)`).join(', ')}</b>`
+    if(badT.length)turnLine+=` 설정 초과·포화가 나온 턴: <b>${badT.map(x=>`${x.id}(${x.bad}/${x.n}회)`).join(', ')}</b>`
       +` — 특정 턴에만 몰려 있으면 전역 파라미터가 아니라 <b>그 구간 프로파일</b>이 원인입니다.`;
   }
   setEx('ex_corner',
     `코너(κ>0.15 = 반경 6.7m 미만) 하나하나의 통과 속도. <b>에이펙스</b>가 그 코너를 실제로 몇으로 돌았나입니다 — `
     +`상단 '속도 범위'의 최저 0은 정지출발이라 이 값과 무관합니다. `
-    +`<b>그립상 가능 √(a·R)</b>은 ${DATA.stats.gripReached?'실측':'<b>가정</b>'} 그립 ${GRIP.toFixed(1)} m/s²와 그 코너 최소반경으로 계산한 이론 한계속도로, `
-    +`에이펙스가 이보다 낮으면 여유를 남긴 것, 높으면 밀린 것입니다. ◀ = 최저 에이펙스 코너.`
+    +`<b>설정상 가능 √(${MLA.toFixed(1)}·R)</b>은 오른쪽 위에 입력한 컨트롤러 <code>max_lateral_accel</code>과 그 코너 최소반경으로 계산한 목표 속도로, `
+    +`에이펙스가 이보다 낮으면 여유를 남긴 것, 높으면 설정을 넘겨 들어간 것입니다. ◀ = 최저 에이펙스 코너.`
+    +`<br>⚠️ <b>판정은 "타이어가 미끄러졌나"가 아니라 "설정을 지켰나"입니다.</b> 실그립은 bag에서 제어상실을 관측해야만 잴 수 있어서 `
+    +`(이 bag: ${DATA.stats.gripReached?`<b>실측 ${DATA.stats.grip.toFixed(1)} m/s²</b>`:`<b>미도달 — ≥ ${DATA.stats.gripPeak.toFixed(1)} m/s²</b>만 확실`}) 판정 기준으로 쓰지 않습니다. `
+    +`설정 초과가 곧 미끄러짐은 아니며, 보통은 <b>사전감속(<code>prebrake_decel</code>·<code>curvature_lookahead_count</code>)이 짧은 코너에서 목표에 못 미친 것</b>입니다.`
     +`<br><b>턴(T#)</b>은 랩마다 반복되는 같은 물리적 코너를 에이펙스 위치로 묶은 것 — <b>#</b>는 통시적 일련번호라 랩이 쌓이면 같은 코너가 다른 번호로 보입니다.`,
     conc+turnLine,cc);
 }
@@ -1542,7 +1622,7 @@ function computeClusterScales(){
   const lon=track.map(q=>Math.abs(q[6])).sort((a,b)=>a-b);
   const lat=track.map(q=>Math.abs(q[5])).sort((a,b)=>a-b);
   CLUSTER_LON_MAX=Math.max(1.5,Math.ceil(pct(lon,0.98)*2)/2);
-  CLUSTER_LAT_MAX=Math.max(0.5,Math.ceil(Math.max(pct(lat,0.98),GRIP)/G*10)/10);
+  CLUSTER_LAT_MAX=Math.max(0.5,Math.ceil(Math.max(pct(lat,0.98),MLA)/G*10)/10);
 }
 function gauge(c,cx,cy,r,opt){
   const A0=Math.PI*0.75,A1=Math.PI*2.25,SPAN=A1-A0;   // 아래가 트인 270° 스윕
@@ -1676,9 +1756,9 @@ function drawCluster(){
   // 횡g: 실측 그립을 레드라인으로 — 지금 한계를 넘었는지 즉시 보임
   const latMax=CLUSTER_LAT_MAX;
   gauge(c,cxC+gap,cy,rSm,{min:-latMax,max:latMax,value:gLat,bidir:true,ticks:4,
-    redline:GRIP/G,color:Math.abs(alat)>GRIP?'#e5484d':'#bc8cff',
+    redline:MLA/G,color:Math.abs(alat)>MLA?'#e5484d':'#bc8cff',
     text:(gLat>=0?'+':'')+gLat.toFixed(2),unit:'g',
-    label:`횡가속 ${alat.toFixed(1)} m/s² · 그립 ${(GRIP/G).toFixed(2)}g`});
+    label:`횡가속 ${alat.toFixed(1)} m/s² · 설정 ${(MLA/G).toFixed(2)}g`});
   // 좌우 방향 표시 (횡g 부호)
   c.font='10px system-ui';c.fillStyle='#59616e';c.textAlign='center';c.textBaseline='alphabetic';
   c.fillText(gLat>0.03?'◀ 좌선회':gLat<-0.03?'우선회 ▶':'직진',cxC+gap,cy-rSm*1.30);
@@ -1698,7 +1778,7 @@ function drawCluster(){
   panel(26,'left',[
     ['주행 모드',md.label,md.c],
     ['알고리즘',(DATA.mppi&&DATA.mppi.length)?(mppiOn(cur)?'MPPI':'MAP'):'—','#c9d1d9'],
-    ['그립 사용률',`${(Math.abs(alat)/GRIP*100).toFixed(0)} %`,Math.abs(alat)>GRIP?'#e5484d':'#c9d1d9'],
+    ['설정 MLA 사용률',`${(Math.abs(alat)/MLA*100).toFixed(0)} %`,Math.abs(alat)>MLA?'#e5484d':'#c9d1d9'],
   ]);
   const steerNow=DATA.cmd?interpAt(DATA.cmd.t,DATA.cmd.steer,cur):null;
   panel(W-26,'right',[
@@ -1715,7 +1795,7 @@ function drawCharts(){const T=track.map(p=>p[0]);
   if(DATA.cmd)vs.push({t:DATA.cmd.t,v:DATA.cmd.speed,color:'#e6edf3',dash:[5,3],w:1});
   if(DATA.plannedVx)vs.push({t:DATA.plannedVx.t,v:DATA.plannedVx.v,color:'#bc8cff',dash:[2,3],w:1});
   drawChart(chV,vs,{playhead:true,corners:DATA.corners});
-  drawChart(chA,[{t:T,v:track.map(p=>p[9]),color:'#6b7280'},{t:T,v:track.map(p=>p[5]),color:'#e5484d'}],{zeroCenter:true,grip:GRIP,playhead:true});
+  drawChart(chA,[{t:T,v:track.map(p=>p[9]),color:'#6b7280'},{t:T,v:track.map(p=>p[5]),color:'#e5484d'}],{zeroCenter:true,grip:MLA,playhead:true});
   drawChart(chD,[{t:T,v:track.map(p=>p[6]),color:'#2dd4bf'}],{zeroCenter:true,playhead:true});}
 function drawStaticCharts(){drawSpeedBins();const T=track.map(p=>p[0]);
   drawChart(chY,[{t:T,v:track.map(p=>p[8]),color:'#6b7280'},{t:T,v:track.map(p=>p[7]),color:'#58a6ff'},{t:DATA.imu.t,v:DATA.imu.gz_rad,color:'#f5a623'}],{zeroCenter:true});
@@ -1769,7 +1849,7 @@ function drawTrajectory(){const cv=trajCv,c=cv.getContext('2d'),W=cv.clientWidth
   // 주행 궤적(속도색)
   for(let i=0;i+1<track.length;i++){c.strokeStyle=speedColor(track[i][4]);c.lineWidth=3;c.beginPath();c.moveTo(X(track[i][1]),Y(track[i][2]));c.lineTo(X(track[i+1][1]),Y(track[i+1][2]));c.stroke();}
   // 그립초과 지점(빨강점)
-  c.fillStyle='#e5484d';for(let i=0;i<track.length;i++)if(Math.abs(track[i][5])>GRIP){c.beginPath();c.arc(X(track[i][1]),Y(track[i][2]),2.4,0,7);c.fill();}
+  c.fillStyle='#e5484d';for(let i=0;i<track.length;i++)if(Math.abs(track[i][5])>MLA){c.beginPath();c.arc(X(track[i][1]),Y(track[i][2]),2.4,0,7);c.fill();}
   // 시작점
   c.fillStyle='#7ee787';c.beginPath();c.arc(X(track[0][1]),Y(track[0][2]),4,0,7);c.fill();}
 
@@ -1852,12 +1932,15 @@ function fillExplain(D){const s=D.stats,L=D.loc;
   else{vc=`최고 ${s.peakV.toFixed(1)} m/s. 실측(초록)이 계획(보라)을 잘 따라가면 추종 정상.`;vcc='#7ee787';}
   setEx('ex_v','초록=실측 vx · 흰 점선=명령 · 보라 점선=글로벌 계획속도. 세 선이 겹칠수록 추종이 좋다.',vc,vcc);
   // 횡가속도
-  let ac,acc;const rr=s.peakAl/s.grip;
+  // ⚠️ stats.overFrac은 grip 기준으로 굳어 있다 — 설정 MLA는 런타임에 바뀌므로 여기서 다시 센다.
+  let ac,acc;const rr=s.peakAl/MLA;
+  const ovf=track.reduce((n,p)=>n+(Math.abs(p[5])>MLA?1:0),0)/Math.max(track.length,1);
   if(rr>1.6){const um=(s.usRatio!=null&&s.usRatio<0.6)?`언더스티어(요레이트 추종률 ${(s.usRatio*100).toFixed(0)}%)`:'스핀';
-    ac=`최대 |a_lat| ${s.peakAl.toFixed(1)} = 그립의 ${rr.toFixed(1)}배, ${(s.overFrac*100).toFixed(0)}% 구간 초과 → 코너 과속·${um}.`;acc='#e5484d';}
-  else if(s.overFrac>0.05){ac=`최대 ${s.peakAl.toFixed(1)}, 초과 ${(s.overFrac*100).toFixed(0)}% → 마진 부족.`;acc='#f5a623';}
-  else{ac=`최대 ${s.peakAl.toFixed(1)} < 그립 ${s.grip.toFixed(1)} → 마진 확보.`;acc='#7ee787';}
-  setEx('ex_a',`빨강=실측 a_lat(vx×${SRC_LABEL[s.alatSource]||'?'} 요레이트) · 회색=명령 a_lat(조향 기구학, 참고). 주황 점선=${s.gripReached?'실측':'가정'} 그립 ±${GRIP.toFixed(1)}. 둘이 벌어지면 언더스티어.`,ac,acc);
+    ac=`최대 |a_lat| ${s.peakAl.toFixed(1)} = 설정 MLA(${MLA.toFixed(1)})의 ${rr.toFixed(1)}배, ${(ovf*100).toFixed(0)}% 구간 초과 → 사전감속이 목표 미달`
+      +(s.gripReached?`·${um}.`:` (실그립 미도달이라 미끄러짐 아님 — 설정이 낮거나 제동거리가 모자란 것).`);acc=s.gripReached?'#e5484d':'#f5a623';}
+  else if(ovf>0.05){ac=`최대 ${s.peakAl.toFixed(1)}, 설정 초과 ${(ovf*100).toFixed(0)}% → 설정 대비 마진 부족.`;acc='#f5a623';}
+  else{ac=`최대 ${s.peakAl.toFixed(1)} < 설정 MLA ${MLA.toFixed(1)} → 설정 이내.`;acc='#7ee787';}
+  setEx('ex_a',`빨강=실측 a_lat(vx×${SRC_LABEL[s.alatSource]||'?'} 요레이트) · 회색=명령 a_lat(조향 기구학, 참고). 주황 점선=<b>설정 MLA ±${MLA.toFixed(1)}</b>(그립이 아니라 컨트롤러에 넣은 값). 둘이 벌어지면 언더스티어.`,ac,acc);
   // 종가속도
   let dc,dcc;
   if(s.minDecel>-0.8){dc=`감속 국면 최저 ${s.minDecel>=0?'+':''}${s.minDecel.toFixed(2)} m/s² → 사실상 <b>감속 못 함</b>(브레이크/회생제동 미작동). 코너 사전감속 무효.`;dcc='#e5484d';}
@@ -1870,7 +1953,7 @@ function fillExplain(D){const s=D.stats,L=D.loc;
   else if(L&&L.pfJump>0.5){tc=`위치 점프 ${L.pfJump.toFixed(2)}m → MCL 미수렴/초기포즈 문제.`;tcc='#f5a623';}
   else if(L&&L.overlap){tc='차 궤적이 경로(보라)와 같은 지도에 얹혀 있으면 정합 정상.';tcc='#7ee787';}
   else tc='위치소스와 경로 겹침을 확인.';
-  setEx('ex_traj',`선=주행궤적(속도색) · 초록점=시작 · 빨강점=그립초과 · 보라=글로벌 경로. 위치소스=${D.poseSrc}.`,tc,tcc);
+  setEx('ex_traj',`선=주행궤적(속도색) · 초록점=시작 · 빨강점=설정 MLA(${MLA.toFixed(1)}) 초과 · 보라=글로벌 경로. 위치소스=${D.poseSrc}.`,tc,tcc);
   // 요레이트
   {const ur=D.stats.usRatio;
    setEx('ex_y','위: 회색=명령 요레이트(/odom = v·tanδ/L, 조향 의도) · 파랑=실측(a_lat 계산에 쓰는 값) · 주황=IMU raw 환산. 아래: IMU raw(진동/노이즈).',
@@ -1907,7 +1990,7 @@ function renderReport(D,name){
   const tiles=[["주행 시간",`${st.dur.toFixed(1)} s`],["속도 범위 [m/s]",vRange,vNote],
     ["코너 최저속 [m/s]",cvVal,cvNote],
     [`최대 |a_lat| (${SRC_LABEL[st.alatSource]||'?'})`,`${st.peakAl.toFixed(1)} m/s²`],
-    ["실측 그립",gripTile],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],
+    ["실측 그립",gripTile,st.gripReached?null:`설정 MLA ${MLA.toFixed(1)}의 ${(st.gripPeak/MLA*100).toFixed(0)}%까지 관측`],["최저 종가속도",`${st.minDecel>=0?'+':''}${st.minDecel.toFixed(2)} m/s²`],
     ["요레이트 추종률",st.usRatio!=null?`${(st.usRatio*100).toFixed(0)} %`:"—"],
     ["언더스티어 K_us",st.kUs!=null?`${st.kUs>=0?'+':''}${st.kUs.toFixed(3)}`:"—"],["코너 수",`${st.nCorners}`]];
   document.getElementById('tiles').innerHTML=tiles.map(([k,v,note])=>
@@ -1927,10 +2010,10 @@ function renderReport(D,name){
   let cmd="ros2 launch f1tenth_control control_real.launch.py";if(args.length)cmd+=" \\\n    "+args.join(" \\\n    ");
   let recHtml=`<pre class="cmd">${cmd}</pre>`;if(r.note)recHtml+=`<p class="note">＋ 코드 안전망 권장: 측정 a_lat이 그립 초과하거나 조향이 ±0.41에 포화되면 target_speed를 하드컷(스핀/limit-cycle 차단), recovery_lat_error 1.0→0.5.</p>`;
   document.getElementById('reccmd').innerHTML=recHtml;
-  document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] · 요레이트 출처 ${SRC_LABEL[st.alatSource]||'?'} (주황선 = ${st.gripReached?'실측':'가정'} 그립 ±${GRIP.toFixed(1)})`;
+  document.getElementById('lab_a').textContent=`횡가속도 a_lat = vx·wz [m/s²] · 요레이트 출처 ${SRC_LABEL[st.alatSource]||'?'} (주황선 = 설정 MLA ±${MLA.toFixed(1)})`;
   document.getElementById('lab_v').innerHTML='속도 vx [m/s] — 실측(초록)'+(D.cmd?` · 명령(흰 점선, ${D.cmd.src})`:'')+(D.plannedVx?' · 계획(보라 점선)':'')
-    +(D.corners&&D.corners.length?' · <span style="color:#58a6ff">코너 구간(음영)·에이펙스(점, 빨강=그립초과)</span>':'');
-  document.getElementById('lab_traj').textContent=`궤적 (map · 위치소스: ${D.poseSrc} · 속도색·빨강=그립초과)`;
+    +(D.corners&&D.corners.length?' · <span style="color:#58a6ff">코너 구간(음영)·에이펙스(점, 빨강=설정 초과)</span>':'');
+  document.getElementById('lab_traj').textContent=`궤적 (map · 위치소스: ${D.poseSrc} · 속도색·빨강=설정 MLA ${MLA.toFixed(1)} 초과)`;
   // 캔버스
   gl=document.getElementById('gl');ctx=gl.getContext('2d');
   chV=document.getElementById('c_v');chA=document.getElementById('c_a');chD=document.getElementById('c_d');
@@ -1943,6 +2026,22 @@ function renderReport(D,name){
   show('modestrip',anyMode);
   show('wrap_steer',!!D.cmd);show('wrap_x',!!D.xtrack);show('wrap_vesc',!!D.vesc);show('wrap_cmd',!!D.cmdBrake);
   show('h_extra',!!(D.cmd||D.xtrack||D.vesc||D.cmdBrake));
+  // ── 설정 MLA 입력 배선 ──────────────────────────────────────────────────
+  // bag에 안 실리는 값이라 사람이 넣는다. localStorage에 남겨 다음 bag에도 이어진다.
+  // ⚠️ 코너 표·차트·궤적은 즉시 다시 그리지만 '파트별 가이드'의 findings는 분석 시점
+  //    값으로 굳어 있다(재계산하려면 bag 재파싱). 값을 바꿨으면 배지로 알린다.
+  const mlaIn=document.getElementById('mla');
+  if(mlaIn){
+    mlaIn.value=MLA.toFixed(1);
+    mlaIn.oninput=()=>{
+      const v=parseFloat(mlaIn.value);
+      if(!isFinite(v)||v<=0)return;
+      MLA=v;localStorage.setItem(MLA_KEY,String(v));
+      drawCornerTable();computeClusterScales();
+      drawTrajectory();fillExplain(DATA);draw();
+      const w=document.getElementById('mlawarn');
+      if(w)w.style.display=(Math.abs(v-(DATA.mlaAtAnalysis??v))>1e-6)?'':'none';};
+  }
   fillExplain(D);drawSpeedBinTable();drawCornerTable();renderLaps();computeClusterScales();
   computeBounds();defcam();cur=T0;playing=false;
   wireControls();

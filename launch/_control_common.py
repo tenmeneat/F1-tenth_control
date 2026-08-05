@@ -87,7 +87,7 @@ def declare_common_args():
                         '구 이름 l1_distance'
         ),
         DeclareLaunchArgument(
-            't_clip_min', default_value='0.6',
+            't_clip_min', default_value='0.9',
             description='L1 룩어헤드 거리 하한 [m] (낮을수록 저속/시케인 구간에서 국소 지그재그를 '
                         '쫓아 고주파 조향 유발 가능)'
         ),
@@ -99,7 +99,7 @@ def declare_common_args():
         #    튜닝 노브라, 낮추면 조용히 횡가속 명령 상한이 올라갔다(0.6이면 6 m/s에서
         #    최대 lat_acc 120 m/s²). 수치 발산 방지용 하한은 별도 파라미터로 분리했다.
         DeclareLaunchArgument(
-            'l1_min_denom', default_value='0.6',
+            'l1_min_denom', default_value='0.9',
             description='L1 횡가속 분모 하한 [m] (목표점이 차량에 붙었을 때 발산 방지). '
                         't_clip_min과 무관하게 튜닝'
         ),
@@ -157,7 +157,7 @@ def declare_common_args():
         #   v ≤ √((ratio·δ_max − L·κ) / (K_us·κ))
         # 07-26 실차 κ=1.190(R=0.84m) 헤어핀에서 그립 2.11 m/s vs 조향 0.87 m/s — 조향이 먼저 걸린다.
         DeclareLaunchArgument(
-            'understeer_gradient', default_value='0.017',
+            'understeer_gradient', default_value='0.018',
             description='언더스티어 그래디언트 K_us [rad/(m/s^2)]. 0이면 조향 권한 캡 비활성'
         ),
         DeclareLaunchArgument(
@@ -219,7 +219,7 @@ def declare_common_args():
             description='런치 킥 on/off (자율 정지출발 데드존 관통 펀치)'
         ),
         DeclareLaunchArgument(
-            'launch_boost_speed', default_value='2.2',
+            'launch_boost_speed', default_value='1.8',
             description='데드존 관통용 펀치 속도 명령 [m/s]'
         ),
         DeclareLaunchArgument(
@@ -233,6 +233,59 @@ def declare_common_args():
         DeclareLaunchArgument(
             'launch_standstill_speed', default_value='0.3',
             description='실측이 이 속도[m/s] 미만이면 정지 판정 → 킥 시작(exit보다 낮아 히스테리시스)'
+        ),
+
+        # ── 기동 실패(탈조) 안티와인드업 — 2026-08-04 제거 → 08-05 복구 ─────────────
+        # 회피 서행이 FOC 센서리스 데드존에 빠져 탈조하면, 램프는 실측과 무관하게 계속 감겨
+        # 올라가고 모터가 물리는 순간 그 격차가 통째로 전류가 되어 급발진한다. 이걸 막는다.
+        # ⚠️ "명령이 실측보다 앞서지 못하게" 하는 **일반 clamp로 바꾸지 말 것** — VESC 속도
+        #    PID는 ERPM 오차에 비례해 전류를 만들어서 선행을 좁히면 가속이 그대로 죽는다.
+        #    탈조가 확정된 뒤에만(hold_delay) 정해진 값으로 눌러두는 표적형이라야 한다.
+        DeclareLaunchArgument(
+            'stall_guard_enable', default_value='true',
+            description='탈조 안티와인드업 on/off (급발진 안전망 — 탈조 자체를 막지는 않는다)'
+        ),
+        DeclareLaunchArgument(
+            'stall_speed_threshold', default_value='0.7',
+            description='실측이 이 속도[m/s] 미만이면 "안 나가는 중"으로 판정'
+        ),
+        DeclareLaunchArgument(
+            'stall_hold_speed', default_value='1.5',
+            description='탈조 확정 시 명령을 눌러둘 속도 [m/s]. 데드존 상단(0.49)보다 충분히 위'
+        ),
+        DeclareLaunchArgument(
+            'stall_hold_delay', default_value='1.0',
+            description='탈조 판정까지 필요한 지속 시간 [s]. launch_boost_time(0.6)보다 커야 킥과 안 싸운다'
+        ),
+
+        # ── 데드존 바닥 (0 = 비활성) ────────────────────────────────────────────────
+        # 탈조를 **사후 수습**하는 게 stall_guard라면, 이건 **애초에 안 빠지게** 한다.
+        # FOC 센서리스는 800~2250 ERPM(≈0.17~0.49 m/s)에 머무를 때 깨진다(스윕 통과는 OK).
+        # 🔴 기본 0인 이유: 플래닝이 요구한 속도보다 빠르게 가는 것 = 회피 중 권한 침범이다.
+        #    켜기 전 local_planning 쪽과 합의할 것. 0.55면 데드존 상단(0.49) 바로 위.
+        DeclareLaunchArgument(
+            'deadzone_floor_speed', default_value='0.0',
+            description='0 < 목표속도 < 이 값이면 이 값으로 올림 [m/s]. 0=비활성. 완전정지(0)는 그대로'
+        ),
+
+        # ── 출발 정렬 (기본 off) ────────────────────────────────────────────────────
+        # 정지출발 직후 조향을 0에서 시작해 속도에 비례해 채운다.
+        # ⚠️ 2026-08-05 실측(0805 bag 10개): 출발 시 헤딩 오차가 10~55°라 조향이 즉시
+        #    0.25~0.44(풀락 근처)로 튄다. 근본 완화는 `t_clip_min`↑(a_lat 분모를 키움)이고
+        #    이건 그 위에 얹는 완화책이다 — 헤딩이 이미 틀어져 있어 진짜 직진은 오히려 라인에서
+        #    멀어지므로 "직진 출발"이 아니라 "조향 서서히 채우기"로 구현했다.
+        # ⚠️ 무장은 engage 에지 1회뿐 — 속도로만 게이트하면 회피 서행 중 조향이 죽는다.
+        DeclareLaunchArgument(
+            'launch_align_enable', default_value='false',
+            description='정지출발 직후 조향 블렌딩 on/off (engage 에지 1회성)'
+        ),
+        DeclareLaunchArgument(
+            'launch_align_speed', default_value='1.2',
+            description='이 속도[m/s]에서 조향 100%. 그 아래는 v/이값 비율로 축소'
+        ),
+        DeclareLaunchArgument(
+            'launch_align_time', default_value='1.5',
+            description='블렌딩 최대 지속 시간 [s] — 넘으면 무조건 해제(탈조 시 조향 영구 억제 방지)'
         ),
 
         # IMU 보정 on/off. 끄면 순수 L1+LUT(시뮬 검증 상태)로 회귀한다. 단위 문제는
@@ -284,6 +337,14 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'launch_boost_time': LaunchConfiguration('launch_boost_time'),
             'launch_exit_speed': LaunchConfiguration('launch_exit_speed'),
             'launch_standstill_speed': LaunchConfiguration('launch_standstill_speed'),
+            'stall_guard_enable': ParameterValue(LaunchConfiguration('stall_guard_enable'), value_type=bool),
+            'stall_speed_threshold': LaunchConfiguration('stall_speed_threshold'),
+            'stall_hold_speed': LaunchConfiguration('stall_hold_speed'),
+            'stall_hold_delay': LaunchConfiguration('stall_hold_delay'),
+            'deadzone_floor_speed': LaunchConfiguration('deadzone_floor_speed'),
+            'launch_align_enable': ParameterValue(LaunchConfiguration('launch_align_enable'), value_type=bool),
+            'launch_align_speed': LaunchConfiguration('launch_align_speed'),
+            'launch_align_time': LaunchConfiguration('launch_align_time'),
             'l1_use_actual_distance': ParameterValue(
                 LaunchConfiguration('l1_use_actual_distance'), value_type=bool),
             # ⚠️ 좌우 조향 한계는 진입점 런치가 환경별로 넘긴다. 실차는 젯슨 vesc.yaml의

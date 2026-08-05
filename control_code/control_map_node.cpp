@@ -211,6 +211,30 @@ public:
         launch_exit_speed_ = declare_parameter<double>("launch_exit_speed", 0.8);
         launch_standstill_speed_ = declare_parameter<double>("launch_standstill_speed", 0.3);
 
+        // 기동 실패(VESC 센서리스 탈조) 안티와인드업 — control_loop 8-b.
+        // 2026-08-04에 제거했다가 08-05 복구(회피 중 저속 탈조 → 물리는 순간 급발진).
+        // ⚠️ "명령이 실측보다 앞서지 못하게" 하는 일반 clamp로 만들면 안 된다 — VESC 속도 PID는
+        //    ERPM 오차에 비례해 전류를 만들어서(s_pid_kp 0.003으로 60A를 뽑으려면 20000 ERPM
+        //    ≈ 4.7 m/s의 선행이 필요) 선행을 좁히면 가속이 그대로 죽는다. 그래서 **탈조가
+        //    확정된 뒤에만**(hold_delay) **정해진 값으로 눌러두는** 표적형이다.
+        stall_guard_enable_ = declare_parameter<bool>("stall_guard_enable", true);
+        stall_speed_threshold_ = declare_parameter<double>("stall_speed_threshold", 0.7);
+        stall_hold_speed_ = declare_parameter<double>("stall_hold_speed", 1.5);
+        stall_hold_delay_ = declare_parameter<double>("stall_hold_delay", 1.0);
+
+        // 데드존 바닥 — 0 < 명령 < 이 값이면 이 값으로 올려 FOC 센서리스 데드존
+        // (800~2250 ERPM ≈ 0.17~0.49 m/s)에 **걸터앉는 것**을 막는다. 0이면 비활성.
+        // ⚠️ 기본 0(비활성)인 이유: 플래닝이 요구한 속도보다 빠르게 가는 것이라 회피 중
+        //    권한 침범이다. 켜기 전에 local_planning 쪽과 합의할 것.
+        deadzone_floor_speed_ = declare_parameter<double>("deadzone_floor_speed", 0.0);
+
+        // 출발 정렬 — 정지출발 직후 조향을 속도에 비례해 서서히 넣는다(0에서 시작).
+        // ⚠️ **정지출발 1회성**이다. 속도로만 게이트하면 회피 서행(0.3 m/s) 중에도 조향이
+        //    눌려서 정작 피해야 할 때 안 꺾인다 — engage 에지에서만 무장한다.
+        launch_align_enable_ = declare_parameter<bool>("launch_align_enable", false);
+        launch_align_speed_ = declare_parameter<double>("launch_align_speed", 1.2);
+        launch_align_time_ = declare_parameter<double>("launch_align_time", 1.5);
+
         // IMU. 단위 보정 계수의 실제 값은 런치가 넘긴다(_control_common.py IMU_*_SCALE).
         use_imu_ = declare_parameter<bool>("use_imu", true);
         imu_angular_scale_ = declare_parameter<double>("imu_angular_scale", 1.0);
@@ -837,6 +861,37 @@ private:
                 current_speed_, steering_angle, wheelbase_, yaw_rate_gain_);
         }
 
+        // 6-5b) 출발 정렬 — 정지출발 직후 조향을 0에서 시작해 속도에 비례해 채운다.
+        //   ⚠️ 실측(2026-08-05, 0805 bag 10개): 출발 시 **헤딩 오차가 10~55°**다(횡오차는
+        //      0.05 m인데 헤딩만 30°인 경우도). L1 하한이 0.60 m라 a_lat = 2v²sin(η)/dist의
+        //      분모가 최소가 되어 조향이 즉시 0.25~0.44(풀락 근처)로 튄다 — 이게 "출발 시 버벅임".
+        //   ⚠️ 이 블렌드는 **완화지 해결이 아니다.** 헤딩이 이미 틀어져 있으므로 진짜 직진은
+        //      오히려 라인에서 멀어진다. 근본 완화는 `t_clip_min`을 올려 분모를 키우는 것.
+        //   ⚠️ 무장은 **engage 에지 1회뿐**이다. 속도로만 게이트하면 회피 서행(0.3 m/s) 중에도
+        //      조향이 눌려 정작 피해야 할 때 안 꺾인다.
+        if (launch_align_enable_) {
+            const bool gate = engage_gate_active();
+            // 무장: engage 게이트가 있으면 미체결→체결 에지, 없으면(시뮬) 노드 기동 후 1회
+            if (!align_armed_once_ && (gate ? is_engaged_ : true)
+                && std::abs(current_speed_) < launch_standstill_speed_) {
+                align_armed_once_ = true; align_active_ = true; align_time_ = 0.0;
+                RCLCPP_INFO(this->get_logger(), "출발 정렬 시작 — 조향을 %.2f m/s까지 선형 블렌딩",
+                            launch_align_speed_);
+            }
+            if (align_active_) {
+                align_time_ += dt;
+                if (std::abs(current_speed_) > launch_align_speed_ || align_time_ > launch_align_time_) {
+                    align_active_ = false;
+                    RCLCPP_INFO(this->get_logger(), "출발 정렬 종료 (t=%.2fs, v=%.2f m/s)",
+                                align_time_, current_speed_);
+                } else {
+                    const double w = std::clamp(std::abs(current_speed_) / std::max(1e-3, launch_align_speed_),
+                                                0.0, 1.0);
+                    steering_angle *= w;
+                }
+            }
+        }
+
         // 6-6) 조향 도달각 보상 — 명령각 중 바퀴가 실제로 내는 비율이 74%(실차 3회 재현)라
         //      LUT/보정항이 의도한 각을 바퀴가 내도록 1/ratio를 곱한다.
         //      ⚠️ **모든 보정항 뒤, 클리핑 앞**이 유일하게 맞는 자리다 — 보정항(요레이트·
@@ -865,6 +920,18 @@ private:
         //    레이싱에 부적합 — 위 4 참고).
         double target_speed = global_speed;
 
+        // 7-b. 데드존 바닥 — 0 < 목표 < floor면 floor로 올린다. VESC FOC 센서리스는 정지도
+        //   순항도 아닌 800~2250 ERPM(≈0.17~0.49 m/s)에 **머무를 때** 커뮤테이션이 깨진다
+        //   (스윕 통과는 괜찮다). 회피 서행이 이 대역에 걸터앉으면 그대로 탈조한다.
+        //   ⚠️ 완전 정지 요구(vx_mps=0)는 건드리지 않는다 — 0은 데드존이 아니라 정지다.
+        //   ⚠️ 기본 0(비활성): 플래닝이 요구한 것보다 빠르게 가는 것이라 회피 중 권한 침범이다.
+        if (deadzone_floor_speed_ > 1e-6 && target_speed > 1e-3 && target_speed < deadzone_floor_speed_) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "데드존 바닥: 목표 %.2f → %.2f m/s (FOC 센서리스 탈조 대역 회피)",
+                target_speed, deadzone_floor_speed_);
+            target_speed = deadzone_floor_speed_;
+        }
+
         // 8. 명령 속도 램프
         double final_speed = ramp_speed(last_target_speed_, target_speed, dt,
                                         base_max_accel_, base_max_decel_);
@@ -878,11 +945,34 @@ private:
             // 런치 상태도 누적하지 않는다(애초에 출발 명령이 하류로 나가지 않는 구간이다).
             // ⚠️ launch_latched_off_는 건드리지 않는다 — 매 사이클 false로 되돌리면 아래 8-c의
             //    킥이 무한 재무장돼 미체결 중에도 발행값이 부스트 값으로 덮인다.
+            stall_time_ = 0.0;          // 명령이 하류로 안 나가므로 탈조 판정 자체가 무의미
             launch_active_ = false;
             launch_time_ = 0.0;
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "자율 미체결 — 속도 램프를 실측(%.2f m/s)에 고정 중(engage 시 무충격 전환)",
                 current_speed_);
+        }
+
+        // 8-b. 기동 실패(VESC 센서리스 탈조) 안티와인드업. (2026-08-04 제거 → 08-05 복구)
+        //   램프 증분은 실측과 무관하게 쌓인다. 센서리스 FOC가 탈조해 차가 안 나가는 동안
+        //   명령만 프로파일 속도까지 감겨 올라가면, 모터가 물리는 순간 그 격차가 통째로
+        //   전류로 바뀌어 차가 튀어나간다. 회피 서행이 데드존에 빠졌을 때가 바로 이 상황이다.
+        //   ⚠️ launch_boost_time(0.6s) < stall_hold_delay(1.0s)라 런치 킥과 안 싸운다 —
+        //      킥이 먼저 시도하고, 실패해 포기하면 이 가드가 급발진 안전망으로 인계받는다.
+        if (stall_guard_enable_) {
+            if (std::abs(current_speed_) < stall_speed_threshold_ && final_speed > stall_hold_speed_) {
+                stall_time_ += dt;
+            } else {
+                stall_time_ = 0.0;
+            }
+            if (stall_time_ > stall_hold_delay_) {
+                final_speed = stall_hold_speed_;
+                last_target_speed_ = final_speed;
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "기동 실패 의심(%.1fs): 실측 %.2f m/s인데 명령이 감겨 올라감 → %.2f m/s로 제한. "
+                    "VESC 센서리스 오픈루프 확인 필요",
+                    stall_time_, current_speed_, stall_hold_speed_);
+            }
         }
 
         // 8-c. 런치 킥 — 자율 정지출발 시 VESC 센서리스 데드존 관통.
@@ -1034,6 +1124,20 @@ private:
     bool launch_active_ = false;
     double launch_time_ = 0.0;
     bool launch_latched_off_ = false;        // 관통 실패로 포기(차가 실제로 움직일 때까지 재시도 안 함)
+
+    // 기동 실패(탈조) 안티와인드업 — control_loop 8-b
+    bool stall_guard_enable_ = true;
+    double stall_speed_threshold_ = 0.7, stall_hold_speed_ = 1.5, stall_hold_delay_ = 1.0;
+    double stall_time_ = 0.0;                // 실측은 멈췄는데 명령만 커진 상태의 누적 시간 [s]
+
+    // 데드존 바닥 (0 = 비활성)
+    double deadzone_floor_speed_ = 0.0;
+
+    // 출발 정렬 — control_loop 6-5b. engage 에지에서만 무장하는 1회성
+    bool launch_align_enable_ = false;
+    double launch_align_speed_ = 1.2, launch_align_time_ = 1.5;
+    bool align_active_ = false, align_armed_once_ = false;
+    double align_time_ = 0.0;
 
     // IMU
     bool use_imu_;
