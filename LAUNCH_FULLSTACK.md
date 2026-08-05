@@ -134,7 +134,7 @@ cp ~/slam_toolbox/map.png ~/slam_toolbox/map.yaml \
 **② GUI로 라인 확인하며 생성** (새 트랙이면 이쪽. 라인을 눈으로 보고 조정)
 ```bash
 cd ~/2026_IFAC
-python3 offline_trajectory_generator/trajectory_gui.py \
+python3 offline_trajectory_generator/forza_trajectory_gui.py \
   --map-yaml src/monte_carlo_localization/maps/map.yaml
 ```
 - 파라미터를 만지면 `offline_trajectory_generator/gui_params.yaml`에 **자동 저장**된다
