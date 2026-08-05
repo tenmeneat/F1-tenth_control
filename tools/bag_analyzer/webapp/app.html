@@ -79,6 +79,22 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
 #tip{position:fixed;pointer-events:none;z-index:50;display:none;background:#0a0d12ee;border:1px solid var(--accent);
   border-radius:6px;padding:6px 9px;font-size:12px;font-variant-numeric:tabular-nums;color:var(--fg);white-space:pre}
 #modestrip{width:100%;height:22px;display:none;border:1px solid var(--line);border-radius:6px;margin:8px 0 2px;cursor:crosshair}
+/* 코너 표 + 턴 미니맵 2단 — 표가 넓어 가로스크롤이므로 맵은 고정폭으로 왼쪽에 둔다 */
+.cornerwrap{display:grid;grid-template-columns:330px minmax(0,1fr);gap:12px;align-items:start;margin-top:9px}
+@media(max-width:900px){.cornerwrap{grid-template-columns:1fr}}
+.cornermapbox{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 9px 9px}
+#cornermap{width:100%;height:250px;display:block;background:#0a0d12;border-radius:6px;cursor:crosshair}
+.maplab{font-size:12px;color:var(--dim);padding:6px 2px 0}
+.turnlegend{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.turnchip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--dim);
+  background:#0a0d12;border:1px solid var(--line);border-radius:20px;padding:2px 9px 2px 6px;cursor:default}
+.turnchip .sw{width:9px;height:9px;border-radius:50%;flex:none}
+.turnchip b{color:var(--fg);font-weight:600}
+/* 표에서 턴 식별 */
+.tcell{display:inline-flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums}
+.tcell .sw{width:8px;height:8px;border-radius:50%;flex:none}
+.bintbl tbody tr[data-turn]{cursor:default}
+.bintbl tbody tr.turnhot td{background:#1a2130}
 /* 속도 구간별 가감속 표 */
 .tblscroll{overflow-x:auto;margin-top:9px}
 .bintbl{width:100%;border-collapse:collapse;font-size:12.5px}
@@ -94,15 +110,15 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
 <body>
 <header>
   <h1>🏎️ F1TENTH Bag Analyzer</h1>
-  <span class="hint">rosbag(.db3)을 브라우저에서 바로 분석 — ROS·터미널 불필요</span>
+  <span class="hint">rosbag(.db3/.mcap)을 브라우저에서 바로 분석 — ROS·터미널 불필요</span>
   <a class="reload" id="again" style="display:none">↺ 다른 bag 열기</a>
 </header>
 <div class="wrap">
   <div id="drop">
     <div class="big">📦⬇︎</div>
     <div class="t">여기로 <b>rosbag 폴더</b>를 통째로 드래그 <span class="hint">(또는 클릭해서 파일 선택)</span></div>
-    <div class="s">폴더 안의 <code>metadata.yaml</code>로 형식을 확인하고 <code>*.db3</code>(분할 bag도 지원)를 자동으로 찾습니다. 실제 데이터는 <code>.db3</code>에 있어요(yaml은 목차일 뿐). 파일은 서버로 안 올라가고 브라우저 안에서만 처리됩니다.</div>
-    <input id="file" type="file" accept=".db3,.yaml" multiple hidden>
+    <div class="s">폴더 안에서 <code>*.db3</code>(sqlite3)·<code>*.mcap</code>을 자동으로 찾습니다 — 분할 bag도, 두 형식이 섞여 있어도 됩니다. 실제 데이터는 그 파일들에 있어요(<code>metadata.yaml</code>은 목차일 뿐). 파일은 서버로 안 올라가고 브라우저 안에서만 처리됩니다.</div>
+    <input id="file" type="file" accept=".db3,.mcap,.yaml" multiple hidden>
   </div>
   <div id="status"></div>
 
@@ -156,7 +172,14 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
     <div class="tblscroll"><table id="bintbl" class="bintbl"></table></div>
 
     <h2>코너별 통과 속도 <span class="hint">— 진입 → 에이펙스(최저속) → 탈출 · 그립 여유</span></h2>
-    <div class="tblscroll"><table id="cornertbl" class="bintbl"></table></div>
+    <div class="cornerwrap">
+      <div class="cornermapbox">
+        <canvas id="cornermap" title="턴 위치 — 표에 마우스를 올리면 해당 턴이 켜집니다"></canvas>
+        <div class="maplab">턴 위치 <span class="hint">— 랩마다 반복되는 같은 코너를 묶은 것</span></div>
+        <div id="turnlegend" class="turnlegend"></div>
+      </div>
+      <div class="tblscroll"><table id="cornertbl" class="bintbl"></table></div>
+    </div>
     <div class="explain" id="ex_corner" style="margin-top:8px"></div>
 
     <h2>파트별 튜닝 가이드 <span class="hint">— 파트마다 무엇을 · 어떤 파라미터로 (🔧)</span></h2>
@@ -262,54 +285,130 @@ const SRC_LABEL={imu:'IMU',mcl:'MCL pose',odom_kinematic:'⚠️명령값'};
 const R_MIN=WHEELBASE/Math.tan(MAX_STEER);
 let GRIP=6.5;const GRIP_ASSUMED=6.5;
 
-// ══ bag 파싱: 한 .db3 → 원시 메시지(절대 타임스탬프). 토픽명 우선 분류(겹치는 타입 자동 구분) ══
+// ══ bag 파싱: 한 파일 → 원시 메시지(절대 타임스탬프). 토픽명 우선 분류(겹치는 타입 자동 구분) ══
 const RAW_KEYS=["odom_vesc","odom_pf","odom_gen","imu_raw","imu_data","imu_gen","scanRaw","tfRaw",
   "estop","mppi","drive","drive_auto","drive_mppi","vesc","cmd_erpm","cmd_brake","cmd_servo","mode"];
+function emptyRaw(){const R={};RAW_KEYS.forEach(k=>R[k]=[]);R.wpnts=null;R.lwpnts=null;return R;}
+
+// 한 메시지를 R에 분류해 넣는다. 저장 형식(sqlite3/mcap)과 무관한 공용 경로 —
+// 두 리더가 (토픽명, 타입, ns 타임스탬프, CDR 바이트)만 넘겨주면 된다.
+function dispatchMsg(R,nm,ty,ts,u8){
+  const P=fn=>{const m=fn(new CDR(u8));m.t=ts;return m;};
+  try{
+    // ── 토픽명 기준(겹치는 토픽 자동 분류) ──
+    if(nm==="/odom")R.odom_vesc.push(P(pOdom));
+    else if(nm==="/pf/pose/odom")R.odom_pf.push(P(pOdom));
+    else if(nm==="/sensors/imu/raw")R.imu_raw.push(P(pImu));
+    else if(nm==="/imu/data")R.imu_data.push(P(pImu));
+    else if(nm==="/estop_lock")R.estop.push([ts,pBool(new CDR(u8))]);
+    else if(nm==="/mppi_active")R.mppi.push([ts,pBool(new CDR(u8))]);
+    else if(nm==="/drive")R.drive.push(P(pAckermann));
+    else if(nm==="/drive_autonomous")R.drive_auto.push(P(pAckermann));
+    else if(nm==="/drive_mppi")R.drive_mppi.push(P(pAckermann));
+    else if(nm==="/global_waypoints")R.wpnts=pWpntArray(new CDR(u8));
+    else if(nm==="/local_waypoints")R.lwpnts=pWpntArray(new CDR(u8));
+    else if(nm==="/sensors/core")R.vesc.push(P(pVesc));
+    else if(nm==="/commands/motor/speed")R.cmd_erpm.push([ts,pFloat(new CDR(u8))]);
+    else if(nm==="/commands/motor/brake")R.cmd_brake.push([ts,pFloat(new CDR(u8))]);
+    else if(nm==="/commands/servo/position")R.cmd_servo.push([ts,pFloat(new CDR(u8))]);
+    else if(nm==="/drive_mode")R.mode.push([ts,pString(new CDR(u8))]);
+    // ── 타입 폴백(임의 네임스페이스: 예 sim의 /ego_racecar/odom, /scan, /tf) ──
+    else if(ty==="nav_msgs/msg/Odometry")R.odom_gen.push(P(pOdom));
+    else if(ty==="sensor_msgs/msg/Imu")R.imu_gen.push(P(pImu));
+    else if(ty==="sensor_msgs/msg/LaserScan")R.scanRaw.push(P(pScan));
+    else if(ty==="tf2_msgs/msg/TFMessage")R.tfRaw.push({t:ts,tr:pTf(new CDR(u8))});
+    else if(ty==="ackermann_msgs/msg/AckermannDriveStamped")R.drive.push(P(pAckermann));
+  }catch(e){/* 개별 메시지 파싱 실패는 건너뜀 */}
+}
+
 function parseDb(bytes,SQL){
   const db=new SQL.Database(bytes);
   const tq=db.exec("SELECT id,name,type FROM topics")[0];
   if(!tq)throw new Error("topics 테이블이 없습니다 (rosbag2 sqlite(.db3)가 맞나요?)");
   const TOPIC={};tq.values.forEach(r=>TOPIC[r[0]]={name:r[1],type:r[2]});
   const stmt=db.prepare("SELECT topic_id,timestamp,data FROM messages ORDER BY timestamp");
-  const R={};RAW_KEYS.forEach(k=>R[k]=[]);R.wpnts=null;R.lwpnts=null;
+  const R=emptyRaw();
   while(stmt.step()){
     const row=stmt.get(),tid=row[0],ts=row[1],blob=row[2];
-    const tp=TOPIC[tid];if(!tp)continue;const nm=tp.name,ty=tp.type;
-    const u8=blob instanceof Uint8Array?blob:new Uint8Array(blob);
-    const P=fn=>{const m=fn(new CDR(u8));m.t=ts;return m;};
-    try{
-      // ── 토픽명 기준(겹치는 토픽 자동 분류) ──
-      if(nm==="/odom")R.odom_vesc.push(P(pOdom));
-      else if(nm==="/pf/pose/odom")R.odom_pf.push(P(pOdom));
-      else if(nm==="/sensors/imu/raw")R.imu_raw.push(P(pImu));
-      else if(nm==="/imu/data")R.imu_data.push(P(pImu));
-      else if(nm==="/estop_lock")R.estop.push([ts,pBool(new CDR(u8))]);
-      else if(nm==="/mppi_active")R.mppi.push([ts,pBool(new CDR(u8))]);
-      else if(nm==="/drive")R.drive.push(P(pAckermann));
-      else if(nm==="/drive_autonomous")R.drive_auto.push(P(pAckermann));
-      else if(nm==="/drive_mppi")R.drive_mppi.push(P(pAckermann));
-      else if(nm==="/global_waypoints")R.wpnts=pWpntArray(new CDR(u8));
-      else if(nm==="/local_waypoints")R.lwpnts=pWpntArray(new CDR(u8));
-      else if(nm==="/sensors/core")R.vesc.push(P(pVesc));
-      else if(nm==="/commands/motor/speed")R.cmd_erpm.push([ts,pFloat(new CDR(u8))]);
-      else if(nm==="/commands/motor/brake")R.cmd_brake.push([ts,pFloat(new CDR(u8))]);
-      else if(nm==="/commands/servo/position")R.cmd_servo.push([ts,pFloat(new CDR(u8))]);
-      else if(nm==="/drive_mode")R.mode.push([ts,pString(new CDR(u8))]);
-      // ── 타입 폴백(임의 네임스페이스: 예 sim의 /ego_racecar/odom, /scan, /tf) ──
-      else if(ty==="nav_msgs/msg/Odometry")R.odom_gen.push(P(pOdom));
-      else if(ty==="sensor_msgs/msg/Imu")R.imu_gen.push(P(pImu));
-      else if(ty==="sensor_msgs/msg/LaserScan")R.scanRaw.push(P(pScan));
-      else if(ty==="tf2_msgs/msg/TFMessage")R.tfRaw.push({t:ts,tr:pTf(new CDR(u8))});
-      else if(ty==="ackermann_msgs/msg/AckermannDriveStamped")R.drive.push(P(pAckermann));
-    }catch(e){/* 개별 메시지 파싱 실패는 건너뜀 */}
+    const tp=TOPIC[tid];if(!tp)continue;
+    dispatchMsg(R,tp.name,tp.type,ts,blob instanceof Uint8Array?blob:new Uint8Array(blob));
   }
   stmt.free();db.close();return R;
 }
 
-// ══ 여러 .db3 병합 → 시리즈/진단 (분할 bag 지원) ══
+// ══ MCAP 리더 (2026-08-04 추가) ═══════════════════════════════════════════════
+// jazzy의 rosbag2 기본 저장 형식이 mcap이라 .db3만 받으면 매번 `ros2 bag convert`가 필요했다.
+// 스펙: https://mcap.dev/spec — 매직(8B) + [opcode(1B) + length(u64 LE) + body]* + 매직.
+// 필요한 레코드는 Schema(0x03)/Channel(0x04)/Message(0x05)/Chunk(0x06) 넷뿐이고,
+// 나머지(인덱스·통계·첨부)는 건너뛴다. 청크 안에도 같은 형식의 레코드가 들어있어 재귀 처리.
+// ⚠️ 압축 청크는 미지원 — rosbag2 기본이 무압축이라 실사용엔 문제없고, 압축이면 명시적으로
+//    에러를 띄운다(조용히 빈 결과를 내는 것보다 낫다).
+const MCAP_MAGIC=[0x89,0x4D,0x43,0x41,0x50,0x30,0x0D,0x0A];
+function isMcap(u8){return u8.length>=8&&MCAP_MAGIC.every((b,i)=>u8[i]===b);}
+
+function parseMcap(bytes){
+  if(!isMcap(bytes))throw new Error("MCAP 매직이 아닙니다 (파일이 손상됐거나 형식이 다릅니다)");
+  const R=emptyRaw();
+  const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const SCHEMA={},CHAN={};
+  const td=new TextDecoder();
+  // 문자열: u32 길이 + UTF-8
+  const str=(o)=>{const n=dv.getUint32(o,true);return [td.decode(bytes.subarray(o+4,o+4+n)),o+4+n];};
+
+  // 레코드 스트림 하나를 훑는다. 청크 본문도 같은 함수로 재귀 처리한다.
+  function walk(start,end,view,buf){
+    let o=start;
+    while(o+9<=end){
+      const op=view.getUint8(o);
+      const len=Number(view.getBigUint64(o+1,true));
+      const bs=o+9, be=bs+len;
+      if(be>end)break;                       // 잘린 레코드 — 여기서 중단
+      if(op===0x03){                          // Schema: id(u16) name(str) encoding(str) data(u32+bytes)
+        const id=view.getUint16(bs,true);
+        const n=view.getUint32(bs+2,true);
+        SCHEMA[id]=td.decode(buf.subarray(bs+6,bs+6+n));
+      }else if(op===0x04){                    // Channel: id(u16) schema_id(u16) topic(str) ...
+        const id=view.getUint16(bs,true), sid=view.getUint16(bs+2,true);
+        const n=view.getUint32(bs+4,true);
+        CHAN[id]={topic:td.decode(buf.subarray(bs+8,bs+8+n)),schema:sid};
+      }else if(op===0x05){                    // Message: channel_id(u16) seq(u32) log_time(u64) pub_time(u64) data(나머지)
+        const cid=view.getUint16(bs,true);
+        const ch=CHAN[cid];
+        if(ch){
+          // log_time은 ns. db3 경로도 Number로 다루므로 동일하게 맞춘다
+          // (ns는 2^53을 넘지만 t0를 뺀 뒤 쓰므로 상대시간 정밀도는 ~256ns로 충분).
+          const ts=Number(view.getBigUint64(bs+6,true));
+          dispatchMsg(R,ch.topic,SCHEMA[ch.schema]||"",ts,buf.subarray(bs+22,be));
+        }
+      }else if(op===0x06){                    // Chunk: start(u64) end(u64) usize(u64) crc(u32) compression(str) records(u64+bytes)
+        let p=bs+28;
+        const cn=view.getUint32(p,true);
+        const comp=td.decode(buf.subarray(p+4,p+4+cn)); p+=4+cn;
+        if(comp&&comp!=="none")
+          throw new Error(`압축된 MCAP 청크(${comp})는 미지원입니다 — `+
+            `\`ros2 bag convert\`로 무압축/sqlite3로 바꾸거나, 기록 시 압축을 끄세요.`);
+        const rlen=Number(view.getBigUint64(p,true)); p+=8;
+        walk(p,Math.min(p+rlen,be),view,buf);  // 무압축이라 같은 버퍼를 그대로 재귀
+      }
+      // 그 외(MessageIndex/ChunkIndex/Statistics/Metadata/Attachment/SummaryOffset/DataEnd/Footer)는 스킵
+      o=be;
+    }
+  }
+  walk(8,bytes.length,dv,bytes);              // 선두 매직 8바이트 뒤부터
+  // db3 경로는 SQL `ORDER BY timestamp`라 전역 시간순으로 나온다. mcap은 기록 순서(채널별)라
+  // 여러 토픽이 한 키로 모이는 경우(tfRaw, 타입 폴백으로 합쳐지는 drive) 인터리브가 달라진다.
+  // analyze()가 뒤에서 어차피 정렬하지만, 두 리더의 출력 계약을 같게 두어야
+  // parseMcap을 단독으로 쓸 때 놀라지 않는다.
+  const ts=m=>Array.isArray(m)?m[0]:m.t;
+  RAW_KEYS.forEach(k=>R[k].sort((a,b)=>ts(a)-ts(b)));
+  return R;
+}
+
+// ══ 여러 파일 병합 → 시리즈/진단 (분할 bag·mcap/db3 혼재 지원) ══
 async function analyze(buffers){
-  const SQL=await initSqlJs({wasmBinary:b64ToBytes(WASM_B64)});
-  const parts=buffers.map(b=>parseDb(b,SQL));
+  const needSql=buffers.some(b=>!isMcap(b));
+  const SQL=needSql?await initSqlJs({wasmBinary:b64ToBytes(WASM_B64)}):null;
+  const parts=buffers.map(b=>isMcap(b)?parseMcap(b):parseDb(b,SQL));
   const R={};RAW_KEYS.forEach(k=>R[k]=[]);let wpnts=null,lwpnts=null;
   parts.forEach(p=>{RAW_KEYS.forEach(k=>{const s=p[k];if(s)for(let i=0;i<s.length;i++)R[k].push(s[i]);});if(p.wpnts)wpnts=p.wpnts;if(p.lwpnts)lwpnts=p.lwpnts;});
   // 겹치는 토픽 자동 선택 (우선순위)
@@ -631,9 +730,37 @@ function segmentCorners(tr,grip){
     // 이 코너 반경에서 그립상 낼 수 있었던 속도 √(a_lat·R). 에이펙스가 이보다 많이
     // 낮으면 그립을 남기고 돈 것(= 사전감속 과다), 넘으면 그립 초과로 밀린 것.
     const vGrip=isFinite(minRad)&&minRad<50?Math.sqrt(grip*minRad):null;
-    return {i0:s.i0,i1:s.i1,t0:tr[s.i0][0],t1:tr[s.i1][0],
+    return {i0:s.i0,i1:s.i1,apexI,t0:tr[s.i0][0],t1:tr[s.i1][0],
             entryV,apexV:isFinite(apexV)?apexV:entryV,apexT:tr[apexI][0],exitV,
             peakAl,minRad,sat,vSafe,vGrip};});
+}
+
+// ══ 턴 클러스터링 — 랩마다 반복되는 "같은 물리적 코너"를 하나로 묶는다 ═══════════
+// 표의 #는 통시적 일련번호라 랩이 쌓이면 #3·#5·#8이 사실 같은 코너인데도 분간이 안 된다.
+// 에이펙스 **위치**로 묶어 T1·T2… 라벨을 주면 "몇 번 코너를 몇으로 도는가"가 랩을 가로질러
+// 바로 읽힌다. 시간순 그리디라 T번호는 **주행에서 처음 만난 순서**가 된다.
+const TURN_COLORS=['#4c8dff','#f778ba','#56d4dd','#d29922','#a5d6ff','#bc8cff','#ff9e64','#6ee7b7'];
+function clusterTurns(C,tr){
+  if(!C||!C.length||!tr||!tr.length)return {turns:[],idOf:[]};
+  const pos=C.map(c=>{const p=tr[c.apexI!=null?c.apexI:c.i0];return [p[1],p[2]];});
+  // 임계 반경은 트랙 크기에 비례 — 고정값이면 큰 트랙에서 한 코너가 쪼개지고
+  // 작은 트랙에서 인접한 다른 코너가 뭉친다.
+  const xs=tr.map(p=>p[1]),ys=tr.map(p=>p[2]);
+  const diag=Math.hypot(Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys));
+  const THR=Math.max(0.8,diag*0.07);
+  const idOf=new Array(C.length).fill(0),turns=[];
+  for(let i=0;i<C.length;i++){
+    let best=-1,bd=THR;
+    for(let k=0;k<turns.length;k++){
+      const d=Math.hypot(pos[i][0]-turns[k].x,pos[i][1]-turns[k].y);
+      if(d<bd){bd=d;best=k;}}
+    if(best<0){turns.push({x:pos[i][0],y:pos[i][1],n:1,members:[i]});best=turns.length-1;}
+    else{const t=turns[best];                       // 러닝 센트로이드로 갱신
+      t.x=(t.x*t.n+pos[i][0])/(t.n+1);t.y=(t.y*t.n+pos[i][1])/(t.n+1);t.n++;t.members.push(i);}
+    idOf[i]=best;
+  }
+  turns.forEach((t,k)=>{t.id='T'+(k+1);t.color=TURN_COLORS[k%TURN_COLORS.length];});
+  return {turns,idOf};
 }
 
 // ══ 자동 진단 — 파트별(퍼셉션/로컬라이제이션/글로벌/로컬/컨트롤) + 적응형 ══
@@ -851,7 +978,7 @@ function diagnose(S){
 
   const stats={dur:S.dur,peakV,minV,minVMoving,peakAl,overFrac,minDecel,nCorners:corners.length,cornerV,grip,gripReached:gi.reached,gripPeak:gi.peak,
                alatSource:S.alatSource,peakAlCmd:absmax(alatCmd),usRatio,gainA,kUs,speedBins};
-  return {findings,rec,stats,gripUsed:grip,corners};
+  return {findings,rec,stats,gripUsed:grip,corners,turnInfo:clusterTurns(corners,tr)};
 }
 
 // ══ 렌더/뷰어 (데스크톱 도구의 3D 뷰어 코드 기반) ══
@@ -1061,6 +1188,66 @@ function drawSpeedBinTable(){
 // "코너를 몇으로 도나"는 bag 전체 최저속으로는 절대 안 나온다(정지출발이 항상 0을 만든다).
 // 코너 구간마다 진입/에이펙스/탈출을 따로 내고, 그립상 가능했던 √(a_lat·R)과 비교해
 // **더 밟을 수 있었는지 / 이미 넘었는지**를 코너 단위로 판정한다.
+// ── 턴 미니맵 ───────────────────────────────────────────────────────────────
+// 표만 보면 #3·#5·#8이 같은 코너인지 알 수 없다. 트랙 윤곽 위에 T번호를 찍어
+// "표의 이 줄 = 트랙의 저기"를 눈으로 잇는다. 궤적은 회색 단색 — 여기서 속도색을 쓰면
+// 정작 주인공인 턴 마커가 묻힌다(속도색 궤적은 아래 '궤적' 섹션이 이미 담당).
+let TURN_HIT=[],TURN_HOT=null;
+function drawCornerMap(hi){
+  const cv=document.getElementById('cornermap');if(!cv||!DATA||!track||!track.length)return;
+  const c=cv.getContext('2d'),W=cv.clientWidth,H=cv.clientHeight;c.clearRect(0,0,W,H);
+  const TI=DATA.turnInfo;if(!TI||!TI.turns.length)return;
+  if(hi!==undefined)TURN_HOT=hi;
+  const xs=track.map(p=>p[1]),ys=track.map(p=>p[2]);
+  let x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+  if(wp.length)wp.forEach(p=>{if(p[0]<x0)x0=p[0];if(p[0]>x1)x1=p[0];if(p[1]<y0)y0=p[1];if(p[1]>y1)y1=p[1];});
+  const pad=20,s=Math.min((W-2*pad)/Math.max(0.1,x1-x0),(H-2*pad)/Math.max(0.1,y1-y0));
+  const X=x=>pad+(x-x0)*s+(W-2*pad-(x1-x0)*s)/2, Y=y=>H-pad-(y-y0)*s-(H-2*pad-(y1-y0)*s)/2;
+  if(wp.length){c.strokeStyle='#3a2f52';c.lineWidth=1.2;c.beginPath();
+    for(let i=0;i<wp.length;i++){const x=X(wp[i][0]),y=Y(wp[i][1]);if(i)c.lineTo(x,y);else c.moveTo(x,y);}c.stroke();}
+  c.strokeStyle='#333c49';c.lineWidth=2.2;c.lineJoin='round';c.beginPath();
+  for(let i=0;i<track.length;i++){const x=X(track[i][1]),y=Y(track[i][2]);if(i)c.lineTo(x,y);else c.moveTo(x,y);}
+  c.stroke();
+  c.fillStyle='#7ee787';c.beginPath();c.arc(X(track[0][1]),Y(track[0][2]),3.5,0,7);c.fill();
+  TURN_HIT=[];
+  TI.turns.forEach(t=>{
+    const px=X(t.x),py=Y(t.y),on=(TURN_HOT===t.id),r=on?13:10;
+    TURN_HIT.push({id:t.id,px,py,r:r+4});
+    c.beginPath();c.arc(px,py,r,0,7);
+    c.fillStyle=on?t.color:'#0e1116';c.strokeStyle=t.color;c.lineWidth=on?3:2;c.fill();c.stroke();
+    c.fillStyle=on?'#0a0d12':t.color;c.font=(on?'bold ':'')+'11px system-ui';
+    c.textAlign='center';c.textBaseline='middle';c.fillText(t.id,px,py+0.5);
+  });
+}
+// 표 ↔ 맵 ↔ 범례 상호 하이라이트
+function wireTurnHighlight(tbl,TI,C){
+  const set=id=>{TURN_HOT=id;
+    tbl.querySelectorAll('tbody tr').forEach(tr=>
+      tr.classList.toggle('turnhot',!!id&&tr.dataset.turn===id));
+    drawCornerMap();};
+  tbl.querySelectorAll('tbody tr[data-turn]').forEach(tr=>{
+    tr.addEventListener('mouseenter',()=>set(tr.dataset.turn));
+    tr.addEventListener('mouseleave',()=>set(null));});
+  const lg=document.getElementById('turnlegend');
+  if(lg){
+    lg.innerHTML=TI.turns.map(t=>{
+      const ms=t.members.map(i=>C[i].apexV).filter(v=>isFinite(v));
+      const avg=ms.length?ms.reduce((a,b)=>a+b,0)/ms.length:NaN;
+      return `<span class="turnchip" data-turn="${t.id}"><span class="sw" style="background:${t.color}"></span>`
+        +`<b>${t.id}</b> ${t.n}회 · 평균 ${isFinite(avg)?avg.toFixed(2):'—'} m/s</span>`;}).join('');
+    lg.querySelectorAll('.turnchip').forEach(ch=>{
+      ch.addEventListener('mouseenter',()=>set(ch.dataset.turn));
+      ch.addEventListener('mouseleave',()=>set(null));});
+  }
+  const cv=document.getElementById('cornermap');
+  if(cv&&!cv._wired){cv._wired=true;
+    cv.addEventListener('mousemove',e=>{const r=cv.getBoundingClientRect();
+      const mx=e.clientX-r.left,my=e.clientY-r.top;
+      let hit=null;for(const h of TURN_HIT)if(Math.hypot(mx-h.px,my-h.py)<=h.r){hit=h.id;break;}
+      if(hit!==TURN_HOT)set(hit);});
+    cv.addEventListener('mouseleave',()=>set(null));}
+}
+
 const CORNER_SLACK=0.85;   // 에이펙스가 v_grip의 이 비율 미만이면 '그립 남김'
 function drawCornerTable(){
   const el=document.getElementById('cornertbl');if(!el)return;
@@ -1069,9 +1256,11 @@ function drawCornerTable(){
     setEx('ex_corner','코너별 진입·에이펙스·탈출 속도.','코너 미검출 — 판정 불가.','#9aa4b2');return;}
   const hasLap=!!(L&&L.list.length);
   const lapOfCorner=c=>{if(!hasLap)return null;const k=L.lapOf[c.i0];return k>=0?L.list[k].n:null;};
+  const TI=DATA.turnInfo||{turns:[],idOf:[]};
+  const turnOf=i=>TI.turns[TI.idOf[i]]||null;
   // 가장 느린 코너를 표에서 바로 찾을 수 있게 표시
   let slowIdx=0;for(let i=1;i<C.length;i++)if(C[i].apexV<C[slowIdx].apexV)slowIdx=i;
-  el.innerHTML='<thead><tr>'+(hasLap?'<th>랩</th>':'')+'<th>#</th><th>시각</th><th>진입 [m/s]</th>'
+  el.innerHTML='<thead><tr>'+(hasLap?'<th>랩</th>':'')+'<th>턴</th><th>#</th><th>시각</th><th>진입 [m/s]</th>'
     +'<th>에이펙스(최저) [m/s]</th><th>탈출 [m/s]</th><th>최소반경 [m]</th>'
     +'<th>피크 |a_lat|</th><th>그립상 가능 √(a·R)</th><th>판정</th></tr></thead><tbody>'
     +C.map((c,i)=>{
@@ -1081,7 +1270,11 @@ function drawCornerTable(){
         :over?`<b style="color:#e5484d">그립 초과 ${(c.peakAl/GRIP).toFixed(1)}×</b>`
         :slack?`<span style="color:#f5a623">그립 남김 −${((1-c.apexV/c.vGrip)*100).toFixed(0)}%</span>`
         :'<span style="color:#7ee787">적정</span>';
-      return `<tr>`+(hasLap?`<td>${lapOfCorner(c)??'—'}</td>`:'')
+      const tn=turnOf(i);
+      const tcell=tn?`<span class="tcell"><span class="sw" style="background:${tn.color}"></span>`
+        +`<b style="color:${tn.color}">${tn.id}</b></span>`:'—';
+      return `<tr${tn?` data-turn="${tn.id}"`:''}>`+(hasLap?`<td>${lapOfCorner(c)??'—'}</td>`:'')
+        +`<td>${tcell}</td>`
         +`<td>${i+1}${i===slowIdx?' ◀':''}</td><td>${(c.t0-T0).toFixed(1)} s</td>`
         +`<td>${c.entryV.toFixed(2)}</td>`
         +`<td><b>${c.apexV.toFixed(2)}</b></td><td>${c.exitV.toFixed(2)}</td>`
@@ -1089,6 +1282,8 @@ function drawCornerTable(){
         +`<td>${c.peakAl.toFixed(1)}</td><td>${c.vGrip!=null?c.vGrip.toFixed(2):'—'}</td>`
         +`<td>${verdict}</td></tr>`;}).join('')
     +'</tbody>';
+  wireTurnHighlight(el,TI,C);
+  drawCornerMap();
 
   // 해설 — 표를 그냥 두면 "그래서 뭘 올리나"가 안 보인다
   const apex=C.map(c=>c.apexV).sort((a,b)=>a-b);
@@ -1104,12 +1299,36 @@ function drawCornerTable(){
   // 그립 미도달 bag이면 '초과/남김' 판정은 가정값 기준이라 참고용이다 — 에이펙스 값 자체는 실측
   if(!DATA.stats.gripReached)conc+=` <b>단, 이 bag은 그립 한계 미도달</b>이라 판정은 가정 그립 ${GRIP.toFixed(1)} 기준의 참고치입니다`
     +` — 에이펙스 속도 자체는 실측이라 그대로 믿어도 됩니다.`;
+  // 턴별 요약 — "어느 코너가 문제인가"는 랩을 가로질러 묶어야 보인다
+  const nT=TI.turns.length;
+  let turnLine='';
+  if(nT){
+    const stat=TI.turns.map(t=>{
+      const ap=t.members.map(i=>C[i].apexV).filter(v=>isFinite(v));
+      const bad=t.members.filter(i=>C[i].peakAl>GRIP||C[i].sat).length;
+      return {id:t.id,n:t.n,avg:ap.length?ap.reduce((a,b)=>a+b,0)/ap.length:NaN,bad};});
+    // ⚠️ "가장 느린 턴"은 **반복 통과한** 턴에서만 고른다. 아웃랩 출발·주행 종료처럼
+    //    1회만 잡힌 구간이 항상 최저 에이펙스라 그대로 뽑으면 매번 그 아티팩트를 지목한다.
+    const rep=stat.filter(x=>isFinite(x.avg)&&x.n>=2);
+    const pool=rep.length?rep:stat.filter(x=>isFinite(x.avg));
+    const slow=pool.sort((a,b)=>a.avg-b.avg)[0];
+    const once=stat.filter(x=>x.n<2);
+    turnLine=` 반복 주행이라 코너가 랩마다 다시 잡히므로, 같은 위치를 <b>T1~T${nT}</b>로 묶어 왼쪽 맵에 찍었습니다`
+      +`(표에 마우스를 올리면 해당 턴이 켜집니다).`
+      +(slow?` 반복 통과하는 턴 중 가장 느린 곳은 <b>${slow.id}</b>(평균 에이펙스 ${slow.avg.toFixed(2)} m/s, ${slow.n}회 통과) — `
+        +`랩타임을 깎으려면 여기부터 봅니다.`:'')
+      +(once.length?` <span style="color:#9aa4b2">${once.map(x=>x.id).join('·')}는 1회만 잡힌 구간이라(아웃랩 출발·주행 종료 등) 대표성이 없습니다.</span>`:'');
+    const badT=stat.filter(x=>x.bad);
+    if(badT.length)turnLine+=` 그립 초과·포화가 나온 턴: <b>${badT.map(x=>`${x.id}(${x.bad}/${x.n}회)`).join(', ')}</b>`
+      +` — 특정 턴에만 몰려 있으면 전역 파라미터가 아니라 <b>그 구간 프로파일</b>이 원인입니다.`;
+  }
   setEx('ex_corner',
     `코너(κ>0.15 = 반경 6.7m 미만) 하나하나의 통과 속도. <b>에이펙스</b>가 그 코너를 실제로 몇으로 돌았나입니다 — `
     +`상단 '속도 범위'의 최저 0은 정지출발이라 이 값과 무관합니다. `
     +`<b>그립상 가능 √(a·R)</b>은 ${DATA.stats.gripReached?'실측':'<b>가정</b>'} 그립 ${GRIP.toFixed(1)} m/s²와 그 코너 최소반경으로 계산한 이론 한계속도로, `
-    +`에이펙스가 이보다 낮으면 여유를 남긴 것, 높으면 밀린 것입니다. ◀ = 최저 에이펙스 코너.`,
-    conc,cc);
+    +`에이펙스가 이보다 낮으면 여유를 남긴 것, 높으면 밀린 것입니다. ◀ = 최저 에이펙스 코너.`
+    +`<br><b>턴(T#)</b>은 랩마다 반복되는 같은 물리적 코너를 에이펙스 위치로 묶은 것 — <b>#</b>는 통시적 일련번호라 랩이 쌓이면 같은 코너가 다른 번호로 보입니다.`,
+    conc+turnLine,cc);
 }
 
 // ── 계기판 클러스터 (재생 시점 실시간) ──────────────────────────────────────
@@ -1364,7 +1583,8 @@ function drawTrajectory(){const cv=trajCv,c=cv.getContext('2d'),W=cv.clientWidth
 
 // ── 캔버스 리사이즈 ──
 function fit(cv){const dpr=window.devicePixelRatio||1;cv.width=cv.clientWidth*dpr;cv.height=cv.clientHeight*dpr;cv.getContext('2d').setTransform(dpr,0,0,dpr,0,0);}
-function resizeAll(){fit(gl);[chV,chA,chD,chY,chI,trajCv,chSteer,chX,chVesc,chCmd,modeStrip,chBins,clusterCv].filter(Boolean).forEach(fit);}
+function resizeAll(){fit(gl);[chV,chA,chD,chY,chI,trajCv,chSteer,chX,chVesc,chCmd,modeStrip,chBins,clusterCv,
+  document.getElementById('cornermap')].filter(Boolean).forEach(fit);}
 
 function updateReadout(){const p=track[idxAt(cur)],ro=document.getElementById('readout');if(!ro||!p)return;
   ro.innerHTML=`<b>t=${(cur-T0).toFixed(2)} s</b>    vx <b>${p[4].toFixed(2)}</b> m/s    `+
@@ -1400,7 +1620,7 @@ function wireControls(){
     else{cam.az-=dx*0.008;cam.el=Math.max(0.08,Math.min(1.5,cam.el+dy*0.006));}draw();};
   gl.onwheel=e=>{e.preventDefault();cam.dist*=Math.exp(e.deltaY*0.0011);cam.dist=Math.max(1,Math.min(bounds.r*8,cam.dist));draw();};
   gl.oncontextmenu=e=>e.preventDefault();
-  window.onresize=()=>{resizeAll();drawTrajectory();drawStaticCharts();draw();};
+  window.onresize=()=>{resizeAll();drawTrajectory();drawStaticCharts();drawCornerMap();draw();};
 }
 
 // ── 그래프별 해석·결론 패널 채우기 ──
@@ -1534,7 +1754,7 @@ function renderReport(D,name){
   fillExplain(D);drawSpeedBinTable();drawCornerTable();renderLaps();computeClusterScales();
   computeBounds();defcam();cur=T0;playing=false;
   wireControls();
-  const paint=()=>{resizeAll();drawTrajectory();drawStaticCharts();syncSeek();draw();};
+  const paint=()=>{resizeAll();drawTrajectory();drawStaticCharts();drawCornerMap();syncSeek();draw();};
   paint();                              // 즉시 (레이아웃 준비됨)
   requestAnimationFrame(paint);         // 안전망: 컨테이너 표시 직후 clientWidth=0였던 경우 재렌더
 }
@@ -1570,21 +1790,20 @@ function collectEntry(entry,out){
 }
 async function handleFiles(files){
   files=files||[];
-  const db3s=files.filter(f=>f.name.endsWith('.db3')).sort((a,b)=>a.name.localeCompare(b.name));
+  // .db3(sqlite3)와 .mcap을 모두 받는다. 섞여 있어도(분할 bag 재기록 등) 파일별로 판별한다.
+  const bags=files.filter(f=>f.name.endsWith('.db3')||f.name.endsWith('.mcap'))
+                  .sort((a,b)=>a.name.localeCompare(b.name));
   const yaml=files.find(f=>f.name.endsWith('.yaml'));
-  const mcap=files.find(f=>f.name.endsWith('.mcap'));
-  if(!db3s.length){
-    if(mcap){status.innerHTML='<span class="err">MCAP(.mcap) 형식은 아직 미지원입니다 — sqlite3(.db3)로 기록된 bag을 넣어주세요. (metadata.yaml의 storage_identifier가 sqlite3여야 함)</span>';return;}
-    if(yaml){status.innerHTML='<span class="err">metadata.yaml만으로는 분석할 수 없습니다 — 실제 데이터는 .db3에 있습니다. bag 폴더를 통째로 넣거나 .db3를 포함해 주세요.</span>';return;}
-    status.innerHTML='<span class="err">.db3 파일을 찾지 못했습니다. bag 폴더 또는 .db3를 넣어주세요.</span>';return;
+  if(!bags.length){
+    if(yaml){status.innerHTML='<span class="err">metadata.yaml만으로는 분석할 수 없습니다 — 실제 데이터는 .db3/.mcap에 있습니다. bag 폴더를 통째로 넣거나 데이터 파일을 포함해 주세요.</span>';return;}
+    status.innerHTML='<span class="err">bag 데이터 파일(.db3 또는 .mcap)을 찾지 못했습니다. bag 폴더 또는 데이터 파일을 넣어주세요.</span>';return;
   }
-  // yaml이 있으면 저장형식 확인(호환성 안내)
-  if(yaml){try{const txt=await yaml.text();const m=txt.match(/storage_identifier:\s*(\S+)/);
-    if(m&&m[1]!=='sqlite3'&&!db3s.length){status.innerHTML=`<span class="err">storage_identifier=${m[1]} — sqlite3만 지원.</span>`;return;}}catch(e){}}
-  const label=db3s.length>1?`${db3s.length}개 .db3(분할 bag)`:db3s[0].name;
+  const nMcap=bags.filter(f=>f.name.endsWith('.mcap')).length;
+  const kind=nMcap===bags.length?'.mcap':(nMcap?'.db3+.mcap':'.db3');
+  const label=bags.length>1?`${bags.length}개 ${kind}(분할 bag)`:bags[0].name;
   status.textContent=`읽는 중: ${label} …`;
   try{
-    const buffers=[];for(const f of db3s)buffers.push(new Uint8Array(await f.arrayBuffer()));
+    const buffers=[];for(const f of bags)buffers.push(new Uint8Array(await f.arrayBuffer()));
     status.textContent='파싱·분석 중 …';
     await new Promise(r=>setTimeout(r,30));
     const D=await analyze(buffers);
