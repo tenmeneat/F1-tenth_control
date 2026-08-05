@@ -219,7 +219,7 @@ def declare_common_args():
             description='런치 킥 on/off (자율 정지출발 데드존 관통 펀치)'
         ),
         DeclareLaunchArgument(
-            'launch_boost_speed', default_value='2.2',
+            'launch_boost_speed', default_value='2.0',
             description='데드존 관통용 펀치 속도 명령 [m/s]'
         ),
         DeclareLaunchArgument(
@@ -276,7 +276,7 @@ def declare_common_args():
         #    멀어지므로 "직진 출발"이 아니라 "조향 서서히 채우기"로 구현했다.
         # ⚠️ 무장은 engage 에지 1회뿐 — 속도로만 게이트하면 회피 서행 중 조향이 죽는다.
         DeclareLaunchArgument(
-            'launch_align_enable', default_value='true',
+            'launch_align_enable', default_value='false',
             description='정지출발 직후 조향 블렌딩 on/off (engage 에지 1회성)'
         ),
         DeclareLaunchArgument(
