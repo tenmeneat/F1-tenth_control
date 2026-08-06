@@ -17,7 +17,6 @@
 #include "std_msgs/msg/string.hpp"
 
 #include "f1tenth_control/types.hpp"
-#include "f1tenth_control/imu_stability_controller.hpp"
 #include "f1tenth_control/steering_lookup_table.hpp"
 #include "f110_msgs/msg/wpnt_array.hpp"
 
@@ -130,27 +129,9 @@ public:
         //                        max(t_clip_min, √2·lat_err), t_clip_max)
         // 이름이 역할과 반대였던 구 파라미터(l1_gain=절편, l1_distance=속도계수)를 2026-07-30에
         // 개명했다 — l1_offset[m] = 절편, l1_speed_gain[s] = 속도 계수(원본 Python MAP의 q_l1/m_l1).
+        // (구 이름 호환 shim은 2026-08-06 제거 — 런치가 새 이름만 넘긴 지 오래됐다)
         l1_offset_ = declare_parameter<double>("l1_offset", 0.5);
         l1_speed_gain_ = declare_parameter<double>("l1_speed_gain", 0.3);
-        // 구 이름 호환 shim: 명시적으로 넘어온 경우에만 신 이름을 덮는다(기본은 NaN = 미지정).
-        // ⚠️ 조용히 무시하면 "튜닝했는데 안 바뀐다"가 되므로 반드시 경고를 띄운다.
-        {
-            const double kUnset = std::numeric_limits<double>::quiet_NaN();
-            double legacy_offset = declare_parameter<double>("l1_gain", kUnset);
-            double legacy_slope  = declare_parameter<double>("l1_distance", kUnset);
-            if (!std::isnan(legacy_offset)) {
-                l1_offset_ = legacy_offset;
-                RCLCPP_WARN(this->get_logger(),
-                    "구 파라미터 l1_gain=%.3f 사용 중 — l1_offset[m]으로 개명됐다(절편). "
-                    "런치/명령줄을 l1_offset으로 바꿀 것", legacy_offset);
-            }
-            if (!std::isnan(legacy_slope)) {
-                l1_speed_gain_ = legacy_slope;
-                RCLCPP_WARN(this->get_logger(),
-                    "구 파라미터 l1_distance=%.3f 사용 중 — l1_speed_gain[s]으로 개명됐다(속도 계수). "
-                    "런치/명령줄을 l1_speed_gain으로 바꿀 것", legacy_slope);
-            }
-        }
         t_clip_min_ = declare_parameter<double>("t_clip_min", 0.8);
         t_clip_max_ = declare_parameter<double>("t_clip_max", 5.0);
         // L1 횡가속 분모의 하한 [m]. ⚠️ 예전엔 t_clip_min을 그대로 재사용했는데, t_clip_min은
@@ -211,24 +192,12 @@ public:
         launch_exit_speed_ = declare_parameter<double>("launch_exit_speed", 0.8);
         launch_standstill_speed_ = declare_parameter<double>("launch_standstill_speed", 0.3);
 
-        // 데드존 바닥 — 0 < 명령 < 이 값이면 이 값으로 올려 FOC 센서리스 데드존
-        // (800~2250 ERPM ≈ 0.17~0.49 m/s)에 **걸터앉는 것**을 막는다. 0이면 비활성.
-        // ⚠️ 기본 0(비활성)인 이유: 플래닝이 요구한 속도보다 빠르게 가는 것이라 회피 중
-        //    권한 침범이다. 켜기 전에 local_planning 쪽과 합의할 것.
-        deadzone_floor_speed_ = declare_parameter<double>("deadzone_floor_speed", 0.0);
-
-        // 출발 정렬 — 정지출발 직후 조향을 속도에 비례해 서서히 넣는다(0에서 시작).
-        // ⚠️ **정지출발 1회성**이다. 속도로만 게이트하면 회피 서행(0.3 m/s) 중에도 조향이
-        //    눌려서 정작 피해야 할 때 안 꺾인다 — engage 에지에서만 무장한다.
-        launch_align_enable_ = declare_parameter<bool>("launch_align_enable", false);
-        launch_align_speed_ = declare_parameter<double>("launch_align_speed", 1.2);
-        launch_align_time_ = declare_parameter<double>("launch_align_time", 1.5);
-
-        // IMU. 단위 보정 계수의 실제 값은 런치가 넘긴다(_control_common.py IMU_*_SCALE).
+        // IMU. 단위 보정 계수의 실제 값은 런치가 넘긴다(_control_common.py IMU_LINEAR_SCALE).
+        // ⚠️ 2026-08-06: 요레이트 카운터스티어(yaw_rate_gain + StabilityController)를 제거해
+        //    자이로 소비처가 없어졌다 → imu_angular_scale도 함께 삭제. IMU는 이제 종가속
+        //    (조향 가감속 스케일러)에만 쓰인다.
         use_imu_ = declare_parameter<bool>("use_imu", true);
-        imu_angular_scale_ = declare_parameter<double>("imu_angular_scale", 1.0);
         imu_linear_scale_ = declare_parameter<double>("imu_linear_scale", 1.0);
-        yaw_rate_gain_ = declare_parameter<double>("yaw_rate_gain", 0.1);
 
         max_speed_ = declare_parameter<double>("max_speed", 12.0);
         min_speed_ = declare_parameter<double>("min_speed", 2.0);
@@ -324,8 +293,6 @@ public:
             std::bind(&ControlMapNode::local_path_callback, this, std::placeholders::_1));
         local_last_recv_time_ = this->now();  // 노드 클럭 타입으로 초기화(clock mismatch 방지)
 
-        stability_controller_ = std::make_unique<StabilityController>(0.2);  // alpha_yaw_rate
-
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             odom_topic_, 10, std::bind(&ControlMapNode::odom_callback, this, std::placeholders::_1));
         imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
@@ -387,10 +354,6 @@ private:
         // use_imu=false는 "IMU를 신뢰하지 않는다"는 뜻이므로 파생값을 전부 쓰지 않는다.
         // acc_now_는 0 초기화 상태로 남아 acc_mean=0 → 스케일러 중립(1.0)으로 안전히 떨어진다.
         if (!use_imu_) return;
-
-        // ⚠️ VESC 자이로는 deg/s로 발행한다(2026-07-19 실차 확인). 보정 안 하면 실측 요레이트가
-        //    57.3배가 되어 카운터스티어가 즉시 반대로 포화한다.
-        stability_controller_->update_yaw_rate(msg->angular_velocity.z * imu_angular_scale_);
 
         // 종가속 rolling buffer (조향 가감속 스케일러용).
         // ⚠️ VESC 가속도계는 m/s²가 아니라 g로 발행한다(imu_linear_scale로 환산).
@@ -842,49 +805,24 @@ private:
         double heading_err = wrap_pi(wps[closest_idx].yaw - current_yaw_);
         steering_angle += heading_damping_gain_ * heading_err;
 
-        // 6-5) 요레이트 피드백 카운터스티어. 명령 조향각이 기하학적으로 의도하는 기대 요레이트
-        //      (v·tanδ/L) 대비 IMU 실측의 오차에 비례해 보정한다(언더스티어 시 더 꺾음).
-        //      rate limit·클리핑 **이전**에 더해 보정분까지 안전 한계 안으로 수렴시킨다.
-        if (use_imu_) {
-            steering_angle += stability_controller_->calculate_yaw_rate_correction(
-                current_speed_, steering_angle, wheelbase_, yaw_rate_gain_);
-        }
-
-        // 6-5b) 출발 정렬 — 정지출발 직후 조향을 0에서 시작해 속도에 비례해 채운다.
-        //   ⚠️ 실측(2026-08-05, 0805 bag 10개): 출발 시 **헤딩 오차가 10~55°**다(횡오차는
-        //      0.05 m인데 헤딩만 30°인 경우도). L1 하한이 0.60 m라 a_lat = 2v²sin(η)/dist의
-        //      분모가 최소가 되어 조향이 즉시 0.25~0.44(풀락 근처)로 튄다 — 이게 "출발 시 버벅임".
-        //   ⚠️ 이 블렌드는 **완화지 해결이 아니다.** 헤딩이 이미 틀어져 있으므로 진짜 직진은
-        //      오히려 라인에서 멀어진다. 근본 완화는 `t_clip_min`을 올려 분모를 키우는 것.
-        //   ⚠️ 무장은 **engage 에지 1회뿐**이다. 속도로만 게이트하면 회피 서행(0.3 m/s) 중에도
-        //      조향이 눌려 정작 피해야 할 때 안 꺾인다.
-        if (launch_align_enable_) {
-            const bool gate = engage_gate_active();
-            // 무장: engage 게이트가 있으면 미체결→체결 에지, 없으면(시뮬) 노드 기동 후 1회
-            if (!align_armed_once_ && (gate ? is_engaged_ : true)
-                && std::abs(current_speed_) < launch_standstill_speed_) {
-                align_armed_once_ = true; align_active_ = true; align_time_ = 0.0;
-                RCLCPP_INFO(this->get_logger(), "출발 정렬 시작 — 조향을 %.2f m/s까지 선형 블렌딩",
-                            launch_align_speed_);
-            }
-            if (align_active_) {
-                align_time_ += dt;
-                if (std::abs(current_speed_) > launch_align_speed_ || align_time_ > launch_align_time_) {
-                    align_active_ = false;
-                    RCLCPP_INFO(this->get_logger(), "출발 정렬 종료 (t=%.2fs, v=%.2f m/s)",
-                                align_time_, current_speed_);
-                } else {
-                    const double w = std::clamp(std::abs(current_speed_) / std::max(1e-3, launch_align_speed_),
-                                                0.0, 1.0);
-                    steering_angle *= w;
-                }
-            }
-        }
+        // ❌ 2026-08-06: 여기 있던 **요레이트 피드백 카운터스티어**(yaw_rate_gain +
+        //    StabilityController)를 제거했다. 되살리기 전에 읽을 것:
+        //    ① 런치 기본값이 계속 0.00(=비활성)이었다 → 실거동 변화 0.
+        //    ② 이 항은 "지금 언더스티어다"라고 **컨트롤러가 판정**해 조향을 더 주는 보정이다.
+        //       주행 판단은 planning이 전담한다는 방침(팀 결정)과 정면으로 어긋난다.
+        //    ③ 애초에 오버스티어 보정인데 우리 크래시는 전부 언더스티어였고, 게인을 검증할
+        //       저마찰 드리프트 bag이 없어 켤 근거 자체가 없었다(WORKLOG 07-29).
+        //
+        // ❌ 2026-08-06: 여기 있던 **출발 정렬**(launch_align_enable 외 2개)도 제거했다.
+        //    기본 false였고, 실측(0805 bag 10개)에서 정상 출발 시 효과가 0~25%뿐이었다
+        //    (블렌딩이 0.46~0.70s밖에 안 사는데 큰 조향은 그 뒤 v 2.8~4.8 구간에서 나온다).
+        //    효과가 컸던 52~75% 케이스는 전부 **탈조로 못 나간** bag이라 조향과 무관했다 —
+        //    출발 덜그럭의 정체는 VESC 오픈루프 기동 시퀀스다(CLAUDE.md "출발 시 덜그럭" 참고).
 
         // 6-6) 조향 도달각 보상 — 명령각 중 바퀴가 실제로 내는 비율이 74%(실차 3회 재현)라
         //      LUT/보정항이 의도한 각을 바퀴가 내도록 1/ratio를 곱한다.
-        //      ⚠️ **모든 보정항 뒤, 클리핑 앞**이 유일하게 맞는 자리다 — 보정항(요레이트·
-        //         heading·FF)도 같은 링키지를 통과하므로 함께 보상돼야 한다.
+        //      ⚠️ **모든 보정항 뒤, 클리핑 앞**이 유일하게 맞는 자리다 — 보정항(heading·FF)도
+        //         같은 링키지를 통과하므로 함께 보상돼야 한다.
         if (steering_reach_ratio_ < 0.999) steering_angle /= steering_reach_ratio_;
 
         // 6-7) rate limit → 좌우 물리 한계 (δ>0 = 좌). 하드웨어가 못 내는 각을 명령해봐야
@@ -909,17 +847,11 @@ private:
         //    레이싱에 부적합 — 위 4 참고).
         double target_speed = global_speed;
 
-        // 7-b. 데드존 바닥 — 0 < 목표 < floor면 floor로 올린다. VESC FOC 센서리스는 정지도
-        //   순항도 아닌 800~2250 ERPM(≈0.17~0.49 m/s)에 **머무를 때** 커뮤테이션이 깨진다
-        //   (스윕 통과는 괜찮다). 회피 서행이 이 대역에 걸터앉으면 그대로 탈조한다.
-        //   ⚠️ 완전 정지 요구(vx_mps=0)는 건드리지 않는다 — 0은 데드존이 아니라 정지다.
-        //   ⚠️ 기본 0(비활성): 플래닝이 요구한 것보다 빠르게 가는 것이라 회피 중 권한 침범이다.
-        if (deadzone_floor_speed_ > 1e-6 && target_speed > 1e-3 && target_speed < deadzone_floor_speed_) {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                "데드존 바닥: 목표 %.2f → %.2f m/s (FOC 센서리스 탈조 대역 회피)",
-                target_speed, deadzone_floor_speed_);
-            target_speed = deadzone_floor_speed_;
-        }
+        // ❌ 2026-08-06: 여기 있던 **데드존 바닥**(deadzone_floor_speed)을 제거했다.
+        //    기본 0(비활성)이라 실거동 변화는 없다. 제거 이유는 코드가 원래 달고 있던 경고
+        //    그대로다 — 플래닝이 요구한 속도보다 **빠르게** 가는 것이라 회피 중 권한 침범이다.
+        //    FOC 센서리스 데드존(0.17~0.49 m/s)에 걸터앉는 문제는 planning이 속도 레버를
+        //    쥐고 푸는 게 맞다(08-06 stall_guard 재제거와 같은 판단).
 
         // 8. 명령 속도 램프
         double final_speed = ramp_speed(last_target_speed_, target_speed, dt,
@@ -1091,19 +1023,10 @@ private:
     double launch_time_ = 0.0;
     bool launch_latched_off_ = false;        // 관통 실패로 포기(차가 실제로 움직일 때까지 재시도 안 함)
 
-    // 데드존 바닥 (0 = 비활성)
-    double deadzone_floor_speed_ = 0.0;
-
-    // 출발 정렬 — control_loop 6-5b. engage 에지에서만 무장하는 1회성
-    bool launch_align_enable_ = false;
-    double launch_align_speed_ = 1.2, launch_align_time_ = 1.5;
-    bool align_active_ = false, align_armed_once_ = false;
-    double align_time_ = 0.0;
-
-    // IMU
+    // IMU — 종가속(조향 가감속 스케일러)에만 쓴다. 자이로 소비처는 2026-08-06 요레이트
+    // 카운터스티어 제거와 함께 사라졌다(imu_angular_scale도 같이 삭제).
     bool use_imu_;
-    double imu_angular_scale_, imu_linear_scale_ = 1.0;
-    double yaw_rate_gain_;
+    double imu_linear_scale_ = 1.0;
     std::vector<double> acc_now_;            // 종가속 rolling buffer
 
     // 곡률 사전감속
@@ -1144,8 +1067,6 @@ private:
     double drive_mode_timeout_ = 1.0;
     bool is_engaged_ = false, drive_mode_seen_ = false;
     rclcpp::Time drive_mode_last_recv_time_;
-
-    std::unique_ptr<StabilityController> stability_controller_;
 
     // ROS 2 통신
     std::string odom_topic_;

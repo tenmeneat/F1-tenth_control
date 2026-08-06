@@ -9,11 +9,11 @@ from launch.substitutions import LaunchConfiguration
 # 런치파일이 아니라 순수 헬퍼 모듈 — ros2 launch 진입점으로 직접 실행되지 않는다.
 # 두 환경에서 100% 동일한 파라미터/노드 정의를 여기 한 곳에만 두어 드리프트를 막는다.
 #
-# IMU 단위 보정 계수 — 하드웨어 상수, 여기가 유일한 정의 위치. control_map_node(카운터스티어)가
-# 소비한다. (lut_calibrator_node는 2026-08-01 제거됨 — LUT 보정은 tools/lut_calibrator/의
-# rosbag 오프라인 웹앱으로 대체)
-IMU_ANGULAR_SCALE_REAL = 0.0174533   # = pi/180. VESC가 deg/s로 발행(2026-07-19 확인)
-IMU_ANGULAR_SCALE_SIM  = 1.0         # sim_imu_bridge_node는 이미 rad/s로 중계
+# IMU 단위 보정 계수 — 하드웨어 상수, 여기가 유일한 정의 위치.
+# control_map_node의 조향 가감속 스케일러(acc_mean)가 소비한다.
+# ⚠️ 2026-08-06: 각속도 계수(IMU_ANGULAR_SCALE_*)는 요레이트 카운터스티어 제거로 소비처가
+#    없어져 함께 삭제했다. 자이로를 다시 쓰게 되면 **VESC는 deg/s로 발행**하므로
+#    real = pi/180 = 0.0174533, sim = 1.0(sim_imu_bridge_node는 이미 rad/s 중계)로 되살릴 것.
 IMU_LINEAR_SCALE_REAL = 9.80665      # g → m/s². VESC가 g로 발행(2026-07-19 소스 확인)
 IMU_LINEAR_SCALE_SIM  = 1.0          # sim_imu_bridge_node는 0 고정
 
@@ -28,13 +28,7 @@ def declare_common_args():
         # ⚠️ force_autonomous·speed_to_erpm_gain 인자는 teleop 제거(2026-07-29)와 함께 폐지됐다 —
         #    유일한 소비처가 joy_teleop_monitor였다. 시뮬은 drive_source_selector가 자율 명령을
         #    /drive로 직결하므로 기동 즉시 자율주행이다.
-        # 요레이트 카운터스티어 게인. 시뮬 스윕(0.0/0.08/0.15): 랩타임은 게인 무관, 0.15부터
-        # 조향 채터링이 뚜렷(부호전환 0→3.32/s). 실차 오버스티어 검증 데이터가 없어 현재 0.
-        DeclareLaunchArgument(
-            'yaw_rate_gain',
-            default_value='0.00',
-            description='요레이트 카운터스티어 게인 (낮게 시작해 채터링 보며 상향)'
-        ),
+        # ❌ 2026-08-06: yaw_rate_gain(요레이트 카운터스티어) 인자 제거 — 아래 "제거된 인자" 참고.
 
         # ── 조향 스케일러 (가감속/속도 구간별 조향 게인 완화) ──
         DeclareLaunchArgument(
@@ -235,49 +229,25 @@ def declare_common_args():
             description='실측이 이 속도[m/s] 미만이면 정지 판정 → 킥 시작(exit보다 낮아 히스테리시스)'
         ),
 
-        # ── 데드존 바닥 (0 = 비활성) ────────────────────────────────────────────────
-        # 탈조를 **사후 수습**하는 대신 **애초에 안 빠지게** 한다.
-        # FOC 센서리스는 800~2250 ERPM(≈0.17~0.49 m/s)에 머무를 때 깨진다(스윕 통과는 OK).
-        # 🔴 기본 0인 이유: 플래닝이 요구한 속도보다 빠르게 가는 것 = 회피 중 권한 침범이다.
-        #    켜기 전 local_planning 쪽과 합의할 것. 0.55면 데드존 상단(0.49) 바로 위.
-        DeclareLaunchArgument(
-            'deadzone_floor_speed', default_value='0.0',
-            description='0 < 목표속도 < 이 값이면 이 값으로 올림 [m/s]. 0=비활성. 완전정지(0)는 그대로'
-        ),
-
-        # ── 출발 정렬 (기본 off) ────────────────────────────────────────────────────
-        # 정지출발 직후 조향을 0에서 시작해 속도에 비례해 채운다.
-        # ⚠️ 2026-08-05 실측(0805 bag 10개): 출발 시 헤딩 오차가 10~55°라 조향이 즉시
-        #    0.25~0.44(풀락 근처)로 튄다. 근본 완화는 `t_clip_min`↑(a_lat 분모를 키움)이고
-        #    이건 그 위에 얹는 완화책이다 — 헤딩이 이미 틀어져 있어 진짜 직진은 오히려 라인에서
-        #    멀어지므로 "직진 출발"이 아니라 "조향 서서히 채우기"로 구현했다.
-        # ⚠️ 무장은 engage 에지 1회뿐 — 속도로만 게이트하면 회피 서행 중 조향이 죽는다.
-        DeclareLaunchArgument(
-            'launch_align_enable', default_value='false',
-            description='정지출발 직후 조향 블렌딩 on/off (engage 에지 1회성)'
-        ),
-        DeclareLaunchArgument(
-            'launch_align_speed', default_value='1.2',
-            description='이 속도[m/s]에서 조향 100%. 그 아래는 v/이값 비율로 축소'
-        ),
-        DeclareLaunchArgument(
-            'launch_align_time', default_value='1.5',
-            description='블렌딩 최대 지속 시간 [s] — 넘으면 무조건 해제(탈조 시 조향 영구 억제 방지)'
-        ),
-
-        # IMU 보정 on/off. 끄면 순수 L1+LUT(시뮬 검증 상태)로 회귀한다. 단위 문제는
-        # imu_angular_scale로 해결됐으므로 평상시엔 true.
+        # IMU 보정 on/off. 끄면 조향 가감속 스케일러가 중립(acc_mean=0)으로 떨어져
+        # 순수 L1+LUT(시뮬 검증 상태)가 된다.
         DeclareLaunchArgument(
             'use_imu', default_value='true',
-            description='IMU 보정(요레이트 카운터스티어) 사용 여부. '
-                        '조향 채터링 시 false로 순수 L1+LUT 주행'
+            description='IMU 종가속(조향 가감속 스케일러) 사용 여부. false면 순수 L1+LUT 주행'
         ),
 
+        # ❌ 2026-08-06 제거된 인자 — 되살리기 전에 control_map_node.cpp의 해당 ❌ 주석을 읽을 것.
+        #    전부 **기본값이 비활성**이라 제거로 인한 실거동 변화는 없다.
+        #    · yaw_rate_gain(0.00)            — 요레이트 카운터스티어. 컨트롤러가 언더스티어를
+        #                                       **판정**하는 항이라 planning 전담 방침과 충돌
+        #    · deadzone_floor_speed(0.0)      — 플래닝 요구보다 빠르게 가는 권한 침범
+        #    · launch_align_{enable,speed,time} — 정상 출발 효과 0~25%. 출발 덜그럭의 원인은
+        #                                       조향이 아니라 VESC 오픈루프 기동 시퀀스였다
     ]
 
 
 def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max_accel,
-                            imu_angular_scale, imu_linear_scale,
+                            imu_linear_scale,
                             max_steering_left, max_steering_right,
                             lookup_table_file='', remappings=None):
     """control_map_node — 환경별로 다른 값만 인자로 받고 나머지는 공용 정의.
@@ -314,10 +284,6 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'launch_boost_time': LaunchConfiguration('launch_boost_time'),
             'launch_exit_speed': LaunchConfiguration('launch_exit_speed'),
             'launch_standstill_speed': LaunchConfiguration('launch_standstill_speed'),
-            'deadzone_floor_speed': LaunchConfiguration('deadzone_floor_speed'),
-            'launch_align_enable': ParameterValue(LaunchConfiguration('launch_align_enable'), value_type=bool),
-            'launch_align_speed': LaunchConfiguration('launch_align_speed'),
-            'launch_align_time': LaunchConfiguration('launch_align_time'),
             'l1_use_actual_distance': ParameterValue(
                 LaunchConfiguration('l1_use_actual_distance'), value_type=bool),
             # ⚠️ 좌우 조향 한계는 진입점 런치가 환경별로 넘긴다. 실차는 젯슨 vesc.yaml의
@@ -337,9 +303,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'drive_mode_timeout': LaunchConfiguration('drive_mode_timeout'),
             'lookup_table_file': lookup_table_file,
             'use_imu': ParameterValue(LaunchConfiguration('use_imu'), value_type=bool),
-            'imu_angular_scale': imu_angular_scale,
             'imu_linear_scale': imu_linear_scale,
-            'yaw_rate_gain': LaunchConfiguration('yaw_rate_gain'),
             'curvature_ff_blend': 0.0,
             'heading_damping_gain': 0.2,
             'acceleration_scaler_for_steering': LaunchConfiguration('acceleration_scaler_for_steering'),

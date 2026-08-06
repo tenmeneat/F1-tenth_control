@@ -183,8 +183,6 @@ def generate_launch_description():
         max_steering_left=LaunchConfiguration('max_steering_left'),
         max_steering_right=LaunchConfiguration('max_steering_right'),
         lookup_table_file=LaunchConfiguration('lookup_table_file'),
-        # VESC 자이로가 deg/s로 발행(2026-07-19 확인) → rad/s 환산. 근거는 _control_common.py 주석.
-        imu_angular_scale=common.IMU_ANGULAR_SCALE_REAL,
         # VESC 가속도계가 g로 발행(2026-07-19 소스 확인) → m/s² 환산.
         imu_linear_scale=common.IMU_LINEAR_SCALE_REAL,
         # vesc_driver_node는 IMU를 sensors/imu/raw로 발행하지만 control_map_node.cpp는
