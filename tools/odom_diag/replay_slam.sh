@@ -24,7 +24,7 @@ fi
 # f1tenth_ws 는 젯슨에만 있다. 랩탑에서 오프라인 재현할 때는 없어도 된다
 # (slam_toolbox 는 apt 로 /opt/ros 에 깔리고, 파라미터는 아래 저장소 사본을 쓴다).
 [ -f ~/f1tenth_ws/install/setup.bash ] && source ~/f1tenth_ws/install/setup.bash
-export ROS_DOMAIN_ID=91          # 실차 도메인(67)과 격리 — 재생이 차에 안 샌다
+export ROS_DOMAIN_ID=91          # 실차 도메인(70)과 격리 — 재생이 차에 안 샌다
 export ROS_LOCALHOST_ONLY=1                      # Jazzy 에선 폐기 예정이지만 아직 동작
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST   # Jazzy 의 정식 대체 변수
 

@@ -20,7 +20,7 @@
 #      🔴 latched 토픽은 오버라이드에서 제외돼 있다. 이유는 아래 ℹ️ 항목과 같다.
 #
 # ⚠️ 랩탑 녹화의 전제 (하나라도 빠지면 토픽이 안 잡힌다):
-#   1) ROS_DOMAIN_ID가 젯슨과 같아야 한다(67).
+#   1) ROS_DOMAIN_ID가 젯슨과 같아야 한다(70).
 #   2) wifi는 DDS 멀티캐스트를 막는다 → ROS_DISCOVERY_SERVER=10.1.1.3:11811 필요.
 #      유선(피트)에서는 불필요. 이 스크립트는 env가 이미 있으면 그대로 쓰고, 없으면 경고만 한다.
 #   3) 메시지 타입이 랩탑에 있어야 한다. f110_msgs는 ~/2026_IFAC에 있고,
@@ -38,7 +38,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HOST="${JETSON_HOST:-jetson}"
 LOCAL_ROOT="${LOCAL_BAG_ROOT:-$HOME/rosbag_log}"
-DOMAIN="${ROS_DOMAIN_ID:-67}"
+DOMAIN="${ROS_DOMAIN_ID:-70}"
 MODE="local"; ARG=""; RM_REMOTE=1; WITH_MAP=0; FULL=0
 
 while [ $# -gt 0 ]; do

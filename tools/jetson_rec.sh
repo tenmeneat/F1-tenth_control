@@ -27,7 +27,7 @@ SESSION="f1bag"                                  # 젯슨 tmux 세션 이름
 SSH_OPTS=(-o ServerAliveInterval=10 -o ServerAliveCountMax=6)
 REMOTE_DIR="${JETSON_BAG_DIR:-~/rosbags}"
 LOCAL_ROOT="${LOCAL_BAG_ROOT:-$HOME/rosbag_log}"
-DOMAIN="${ROS_DOMAIN_ID:-67}"
+DOMAIN="${ROS_DOMAIN_ID:-70}"
 RM_REMOTE=1          # 기본 삭제 — 젯슨 디스크를 안 쓰는 게 이 스크립트의 목적
 MODE="record"
 ARG=""

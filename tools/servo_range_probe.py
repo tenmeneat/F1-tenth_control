@@ -35,7 +35,7 @@ control_map_node의 `MAX_STEERING_ANGLE`(0.41)과 `steer_authority_ratio` 곡률
     ⚠️ 자율/수동 어느 쪽도 주행 명령을 보내고 있지 않아야 한다(E-stop 상태 권장).
 
     # 젯슨에서
-    export ROS_DOMAIN_ID=67
+    export ROS_DOMAIN_ID=70
     python3 servo_range_probe.py --side right      # 우조향(servo 증가) 한계 탐색
     python3 servo_range_probe.py --side left       # 좌조향(servo 감소) 한계 탐색
 
