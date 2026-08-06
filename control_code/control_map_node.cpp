@@ -211,17 +211,6 @@ public:
         launch_exit_speed_ = declare_parameter<double>("launch_exit_speed", 0.8);
         launch_standstill_speed_ = declare_parameter<double>("launch_standstill_speed", 0.3);
 
-        // 기동 실패(VESC 센서리스 탈조) 안티와인드업 — control_loop 8-b.
-        // 2026-08-04에 제거했다가 08-05 복구(회피 중 저속 탈조 → 물리는 순간 급발진).
-        // ⚠️ "명령이 실측보다 앞서지 못하게" 하는 일반 clamp로 만들면 안 된다 — VESC 속도 PID는
-        //    ERPM 오차에 비례해 전류를 만들어서(s_pid_kp 0.003으로 60A를 뽑으려면 20000 ERPM
-        //    ≈ 4.7 m/s의 선행이 필요) 선행을 좁히면 가속이 그대로 죽는다. 그래서 **탈조가
-        //    확정된 뒤에만**(hold_delay) **정해진 값으로 눌러두는** 표적형이다.
-        stall_guard_enable_ = declare_parameter<bool>("stall_guard_enable", true);
-        stall_speed_threshold_ = declare_parameter<double>("stall_speed_threshold", 0.7);
-        stall_hold_speed_ = declare_parameter<double>("stall_hold_speed", 1.5);
-        stall_hold_delay_ = declare_parameter<double>("stall_hold_delay", 1.0);
-
         // 데드존 바닥 — 0 < 명령 < 이 값이면 이 값으로 올려 FOC 센서리스 데드존
         // (800~2250 ERPM ≈ 0.17~0.49 m/s)에 **걸터앉는 것**을 막는다. 0이면 비활성.
         // ⚠️ 기본 0(비활성)인 이유: 플래닝이 요구한 속도보다 빠르게 가는 것이라 회피 중
@@ -945,34 +934,11 @@ private:
             // 런치 상태도 누적하지 않는다(애초에 출발 명령이 하류로 나가지 않는 구간이다).
             // ⚠️ launch_latched_off_는 건드리지 않는다 — 매 사이클 false로 되돌리면 아래 8-c의
             //    킥이 무한 재무장돼 미체결 중에도 발행값이 부스트 값으로 덮인다.
-            stall_time_ = 0.0;          // 명령이 하류로 안 나가므로 탈조 판정 자체가 무의미
             launch_active_ = false;
             launch_time_ = 0.0;
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "자율 미체결 — 속도 램프를 실측(%.2f m/s)에 고정 중(engage 시 무충격 전환)",
                 current_speed_);
-        }
-
-        // 8-b. 기동 실패(VESC 센서리스 탈조) 안티와인드업. (2026-08-04 제거 → 08-05 복구)
-        //   램프 증분은 실측과 무관하게 쌓인다. 센서리스 FOC가 탈조해 차가 안 나가는 동안
-        //   명령만 프로파일 속도까지 감겨 올라가면, 모터가 물리는 순간 그 격차가 통째로
-        //   전류로 바뀌어 차가 튀어나간다. 회피 서행이 데드존에 빠졌을 때가 바로 이 상황이다.
-        //   ⚠️ launch_boost_time(0.6s) < stall_hold_delay(1.0s)라 런치 킥과 안 싸운다 —
-        //      킥이 먼저 시도하고, 실패해 포기하면 이 가드가 급발진 안전망으로 인계받는다.
-        if (stall_guard_enable_) {
-            if (std::abs(current_speed_) < stall_speed_threshold_ && final_speed > stall_hold_speed_) {
-                stall_time_ += dt;
-            } else {
-                stall_time_ = 0.0;
-            }
-            if (stall_time_ > stall_hold_delay_) {
-                final_speed = stall_hold_speed_;
-                last_target_speed_ = final_speed;
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "기동 실패 의심(%.1fs): 실측 %.2f m/s인데 명령이 감겨 올라감 → %.2f m/s로 제한. "
-                    "VESC 센서리스 오픈루프 확인 필요",
-                    stall_time_, current_speed_, stall_hold_speed_);
-            }
         }
 
         // 8-c. 런치 킥 — 자율 정지출발 시 VESC 센서리스 데드존 관통.
@@ -1124,11 +1090,6 @@ private:
     bool launch_active_ = false;
     double launch_time_ = 0.0;
     bool launch_latched_off_ = false;        // 관통 실패로 포기(차가 실제로 움직일 때까지 재시도 안 함)
-
-    // 기동 실패(탈조) 안티와인드업 — control_loop 8-b
-    bool stall_guard_enable_ = true;
-    double stall_speed_threshold_ = 0.7, stall_hold_speed_ = 1.5, stall_hold_delay_ = 1.0;
-    double stall_time_ = 0.0;                // 실측은 멈췄는데 명령만 커진 상태의 누적 시간 [s]
 
     // 데드존 바닥 (0 = 비활성)
     double deadzone_floor_speed_ = 0.0;

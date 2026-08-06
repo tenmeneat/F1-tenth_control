@@ -77,7 +77,7 @@ def declare_common_args():
         #    구 이름이 역할과 정반대였다(gain이 절편, distance가 기울기). 구 이름을 명령줄에
         #    넘기면 노드가 경고와 함께 여전히 받아주지만(호환 shim), 새 이름을 쓸 것.
         DeclareLaunchArgument(
-            'l1_offset', default_value='0.5',
+            'l1_offset', default_value='0.75',
             description='L1 룩어헤드 거리의 **절편** [m] (공식: l1_offset + v*l1_speed_gain). '
                         '구 이름 l1_gain'
         ),
@@ -235,31 +235,8 @@ def declare_common_args():
             description='실측이 이 속도[m/s] 미만이면 정지 판정 → 킥 시작(exit보다 낮아 히스테리시스)'
         ),
 
-        # ── 기동 실패(탈조) 안티와인드업 — 2026-08-04 제거 → 08-05 복구 ─────────────
-        # 회피 서행이 FOC 센서리스 데드존에 빠져 탈조하면, 램프는 실측과 무관하게 계속 감겨
-        # 올라가고 모터가 물리는 순간 그 격차가 통째로 전류가 되어 급발진한다. 이걸 막는다.
-        # ⚠️ "명령이 실측보다 앞서지 못하게" 하는 **일반 clamp로 바꾸지 말 것** — VESC 속도
-        #    PID는 ERPM 오차에 비례해 전류를 만들어서 선행을 좁히면 가속이 그대로 죽는다.
-        #    탈조가 확정된 뒤에만(hold_delay) 정해진 값으로 눌러두는 표적형이라야 한다.
-        DeclareLaunchArgument(
-            'stall_guard_enable', default_value='true',
-            description='탈조 안티와인드업 on/off (급발진 안전망 — 탈조 자체를 막지는 않는다)'
-        ),
-        DeclareLaunchArgument(
-            'stall_speed_threshold', default_value='0.7',
-            description='실측이 이 속도[m/s] 미만이면 "안 나가는 중"으로 판정'
-        ),
-        DeclareLaunchArgument(
-            'stall_hold_speed', default_value='1.5',
-            description='탈조 확정 시 명령을 눌러둘 속도 [m/s]. 데드존 상단(0.49)보다 충분히 위'
-        ),
-        DeclareLaunchArgument(
-            'stall_hold_delay', default_value='1.0',
-            description='탈조 판정까지 필요한 지속 시간 [s]. launch_boost_time(0.6)보다 커야 킥과 안 싸운다'
-        ),
-
         # ── 데드존 바닥 (0 = 비활성) ────────────────────────────────────────────────
-        # 탈조를 **사후 수습**하는 게 stall_guard라면, 이건 **애초에 안 빠지게** 한다.
+        # 탈조를 **사후 수습**하는 대신 **애초에 안 빠지게** 한다.
         # FOC 센서리스는 800~2250 ERPM(≈0.17~0.49 m/s)에 머무를 때 깨진다(스윕 통과는 OK).
         # 🔴 기본 0인 이유: 플래닝이 요구한 속도보다 빠르게 가는 것 = 회피 중 권한 침범이다.
         #    켜기 전 local_planning 쪽과 합의할 것. 0.55면 데드존 상단(0.49) 바로 위.
@@ -337,10 +314,6 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'launch_boost_time': LaunchConfiguration('launch_boost_time'),
             'launch_exit_speed': LaunchConfiguration('launch_exit_speed'),
             'launch_standstill_speed': LaunchConfiguration('launch_standstill_speed'),
-            'stall_guard_enable': ParameterValue(LaunchConfiguration('stall_guard_enable'), value_type=bool),
-            'stall_speed_threshold': LaunchConfiguration('stall_speed_threshold'),
-            'stall_hold_speed': LaunchConfiguration('stall_hold_speed'),
-            'stall_hold_delay': LaunchConfiguration('stall_hold_delay'),
             'deadzone_floor_speed': LaunchConfiguration('deadzone_floor_speed'),
             'launch_align_enable': ParameterValue(LaunchConfiguration('launch_align_enable'), value_type=bool),
             'launch_align_speed': LaunchConfiguration('launch_align_speed'),
