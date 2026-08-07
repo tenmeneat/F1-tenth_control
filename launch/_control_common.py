@@ -97,6 +97,23 @@ def declare_common_args():
             description='L1 횡가속 분모 하한 [m] (목표점이 차량에 붙었을 때 발산 방지). '
                         't_clip_min과 무관하게 튜닝'
         ),
+        # 🔴 2026-08-07 신설. L1_distance는 실측 속도로 계산하는데 횡가속 게인은 프로파일
+        #    속도를 써서, 둘이 갈라지면 게인이 (v_prof/v_meas)²배로 뛰던 것을 막는다.
+        #    0807 실차 로그: 정지(실측 0.00) 상태에서 프로파일 4.01로 a_lat 13.93을 요구해
+        #    LUT 포화 → 조향 −0.387(풀락 94%). 상세는 control_map_node.cpp 선언부 주석.
+        DeclareLaunchArgument(
+            'steering_speed_cap_measured', default_value='true',
+            description='조향용 속도(횡가속 게인+LUT 조회)를 실측 속도로 상한. '
+                        'false면 구 거동(프로파일 속도만 사용) — 롤백용'
+        ),
+        # 상태 한 줄(Pose/Target WP/Idx/Steer/Speed/L1_dist) 로그 주기. 구 500ms 고정에서
+        # 2000ms로 완화 — 0807 실차 로그 1007줄 중 617줄이 이 줄이었다.
+        # ⚠️ 이 줄은 rosbag에 없는 closest_idx/idx_a/L1_dist를 유일하게 보여준다(②-f 규명에 사용).
+        #    디버깅 땐 500으로 낮추고, 정말 조용히 하려면 0으로 끌 것.
+        DeclareLaunchArgument(
+            'status_log_period_ms', default_value='2000',
+            description='컨트롤러 상태 한 줄 로그 주기 [ms]. 0 = 끔 (디버깅 시 500 권장)'
+        ),
 
         # ── 조향 체인 (2026-07-30 신설) ──
         # 명령각 중 바퀴가 실제로 내는 비율. 0.41 명령 → 실측 ~0.30(74%, 07-28 3회 재현,
@@ -209,7 +226,7 @@ def declare_common_args():
         # ⚠️ s_pid_ramp_erpms_s가 2000→21160으로 오른 뒤로는 이 킥이 훨씬 사납다(즉시 큰 ERPM
         #    오차 → 큰 전류). 부스트 속도를 올릴 땐 반드시 잭업 상태에서 먼저 볼 것.
         DeclareLaunchArgument(
-            'launch_boost_enable', default_value='true',
+            'launch_boost_enable', default_value='false',
             description='런치 킥 on/off (자율 정지출발 데드존 관통 펀치)'
         ),
         DeclareLaunchArgument(
@@ -267,6 +284,9 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             't_clip_min': LaunchConfiguration('t_clip_min'),
             't_clip_max': LaunchConfiguration('t_clip_max'),
             'l1_min_denom': LaunchConfiguration('l1_min_denom'),
+            'steering_speed_cap_measured': LaunchConfiguration('steering_speed_cap_measured'),
+            'status_log_period_ms': ParameterValue(
+                LaunchConfiguration('status_log_period_ms'), value_type=int),
             # ⚠️ lateral_error_coeff는 2026-07-30에 폐지됐다 — 소비처인 lat_err_scale이
             #    항상 1.0인 죽은 코드였다(control_map_node.cpp control_loop 4 주석 참고).
             'max_speed': max_speed,

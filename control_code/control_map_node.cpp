@@ -224,6 +224,28 @@ public:
         // = 복귀가 필요한 바로 그 순간에 더 심해진다. false면 구 거동(즉시 롤백용).
         l1_use_actual_distance_ = declare_parameter<bool>("l1_use_actual_distance", true);
 
+        // 🔴 2026-08-07: 조향용 속도(speed_for_lu)를 **실측 속도로도 상한**한다.
+        //   문제: L1_distance는 `current_speed_`(실측)로 계산하는데 횡가속 게인
+        //   `2·v²/L1_norm`은 프로파일 속도를 쓴다. 두 속도가 갈라지면 게인만 (v_prof/v_meas)²
+        //   배로 뛴다 — 정지출발에서 실측 0.9 vs 프로파일 3.6이면 **15배**다.
+        //   실증(run_0807_140513 컨트롤러 로그, 젯슨):
+        //     "LUT 그립 포화: 요구 a_lat 13.93 m/s² @ 4.01 m/s (조향 0.203 rad에서 saturate)"
+        //     "Pose: (...) | Steer: -0.3866 | Speed: 0.00 / 0.00 | L1_dist: 0.90"
+        //   → 차가 **완전히 정지**했는데(실측 0.00) 프로파일 4.01로 a_lat 13.93을 요구해
+        //     LUT가 포화하고 조향이 풀락의 94%로 붙었다. 그 상태로 자율에 진입하면 조향이
+        //     ±0.410을 오가는 리미트사이클이 된다(같은 bag 2.8초 중 61%가 풀락, 부호반전 6회).
+        //   두 축을 같은 속도로 묶으면 v→0에서 a_lat→0이 되어 LUT 포화가 원천 차단된다.
+        //   ⚠️ LUT는 (a_lat, v)를 함께 받으므로 상한은 lat_acc 계산과 LUT 조회 **양쪽에**
+        //      동시에 걸려야 한다 — 한쪽만 바꾸면 두 오차의 상쇄가 깨져 오히려 나빠진다.
+        //   false면 구 거동(즉시 롤백용).
+        steering_speed_cap_measured_ =
+            declare_parameter<bool>("steering_speed_cap_measured", true);
+
+        // 상태 한 줄 로그 주기 [ms]. 0이면 끈다. 예전엔 500ms 고정이라 실차 로그의 61%가
+        // 이 줄이었다(0807 로그 1007줄 중 617줄 / 317초).
+        const auto status_log_param = declare_parameter<int>("status_log_period_ms", 2000);
+        status_log_period_ms_ = static_cast<int>(status_log_param > 0 ? status_log_param : 0);
+
         // 조향 rate limit [rad/s]. ⚠️ 예전엔 "사이클당 0.4 rad" 하드코딩이었다 — 50Hz에서
         // 20 rad/s = 풀락까지 2 사이클(40ms)이라 제한이 있는 척만 하고 아무것도 안 막았고,
         // dt와 무관해서 루프가 밀리면 실효 제한이 더 느슨해졌다. 기본값 20.0은 구 거동과 동일
@@ -441,8 +463,17 @@ private:
 
         smooth_curvature(waypoints_, /*closed=*/true);
 
-        RCLCPP_INFO(this->get_logger(), "🔄 글로벌 경로 수신! 웨이포인트 %zu개, 초기 인덱스 %zu",
-                    waypoints_.size(), last_target_idx_);
+        // 플래너가 **같은 경로를 2초마다 재발행**하므로 매번 찍으면 로그의 16%가 이 줄이 된다
+        // (0807 실차 로그 1007줄 중 158줄). 내용이 실제로 바뀐 경우에만 찍는다.
+        const size_t path_sig = waypoints_.size() ^
+            (std::hash<double>{}(waypoints_.front().x) << 1) ^
+            (std::hash<double>{}(waypoints_.back().y) << 2) ^
+            (std::hash<double>{}(total_path_length) << 3);
+        if (path_sig != last_global_sig_) {
+            last_global_sig_ = path_sig;
+            RCLCPP_INFO(this->get_logger(), "🔄 글로벌 경로 수신! 웨이포인트 %zu개, 길이 %.2f m, 초기 인덱스 %zu",
+                        waypoints_.size(), total_path_length, last_target_idx_);
+        }
     }
 
     // 로컬 경로: 상류 플래너의 전방 구간을 그대로 저장한다.
@@ -728,6 +759,12 @@ private:
         // 5. 목표 횡가속도 → LUT 조향각
         double lat_acc = 0.0;
         speed_for_lu = std::min(speed_for_lu, curvature_speed_limit);
+        // 🔴 실측 속도 상한 (선언부 주석 참고). L1_distance가 실측 속도로 계산되므로 게인도
+        //    같은 속도를 써야 한다 — 안 그러면 정지/저속에서 게인이 (v_prof/v_meas)²배로 뛴다.
+        //    ⚠️ 반드시 lat_acc 계산과 LUT 조회 **앞**에 둘 것(둘 다 speed_for_lu를 쓴다).
+        if (steering_speed_cap_measured_) {
+            speed_for_lu = std::min(speed_for_lu, current_speed_);
+        }
         // ⚠️ 분모는 목표점까지의 **실제 직선거리**다(l1_use_actual_distance, 선언부 주석 참고).
         //    하한 l1_min_denom은 목표점이 차량에 붙은 경우(L1_norm→0) 발산 방지 — t_clip_min을
         //    재사용하던 것을 2026-07-30에 분리했다(룩어헤드 노브가 횡가속 상한을 조용히 흔들었다).
@@ -868,7 +905,9 @@ private:
             //    킥이 무한 재무장돼 미체결 중에도 발행값이 부스트 값으로 덮인다.
             launch_active_ = false;
             launch_time_ = 0.0;
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+            // ⚠️ 2초 throttle이면 대기 중 계속 찍힌다(0807 로그 1007줄 중 156줄). 상태 전이는
+            //    이미 위 "자율 체결 상태 변경"이 1회 찍으므로, 여기선 30초 하트비트로 충분하다.
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 30000,
                 "자율 미체결 — 속도 램프를 실측(%.2f m/s)에 고정 중(engage 시 무충격 전환)",
                 current_speed_);
         }
@@ -912,11 +951,16 @@ private:
             }
         }
 
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-            "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %zu -> %zu | Steer: %.4f | "
-            "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f",
-            current_x_, current_y_, current_yaw_, L1_x, L1_y, closest_idx, idx_a, steering_angle,
-            final_speed, current_speed_, L1_distance, acc_mean);
+        // 상태 한 줄. ⚠️ **지우지 말 것** — 2026-08-07 정지 풀락 버그(②-f)를 이 줄 하나로
+        //    규명했다(rosbag만으로는 closest_idx/idx_a/L1_dist를 볼 수 없다).
+        //    주기는 `status_log_period_ms`로 조절하고, 0이면 끈다.
+        if (status_log_period_ms_ > 0) {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), status_log_period_ms_,
+                "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %zu -> %zu | Steer: %.4f | "
+                "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f",
+                current_x_, current_y_, current_yaw_, L1_x, L1_y, closest_idx, idx_a, steering_angle,
+                final_speed, current_speed_, L1_distance, acc_mean);
+        }
 
         // 9. 발행. ⚠️ acceleration 필드는 **명령 속도의 시간미분**이다 —
         //    예전엔 `(publish_speed − current_speed_)/dt`, 즉 "명령−실측 추종오차 ÷ dt"를
@@ -998,6 +1042,9 @@ private:
     double l1_min_denom_ = 0.6;              // L1 횡가속 분모 하한 [m] (t_clip_min과 분리)
     double heading_damping_gain_;
     bool l1_use_actual_distance_ = true;
+    bool steering_speed_cap_measured_ = true;  // 조향용 속도를 실측 속도로 상한(정지 시 LUT 포화 차단)
+    int status_log_period_ms_ = 2000;          // 상태 한 줄 로그 주기 [ms], 0 = 끔
+    size_t last_global_sig_ = 0;               // 글로벌 경로 재발행 중복 로그 억제용 서명
 
     // 조향 스케일러 / 속도 룩어헤드
     double acceleration_scaler_for_steering_, deceleration_scaler_for_steering_;
