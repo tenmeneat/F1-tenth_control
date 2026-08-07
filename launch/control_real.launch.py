@@ -57,7 +57,7 @@ def generate_launch_description():
     # 2026-07-30 5.1→6.0 상향(사용자 결정) — LUT 실 그립 피크(~6.7) 이내이나 구 실측
     # 마찰한계(~3.1 m/s²)보다는 낙관치. 코너 슬라이드/언더스티어 시 다시 낮출 것.
     max_lateral_accel_arg = DeclareLaunchArgument(
-        'max_lateral_accel', default_value='6.0',
+        'max_lateral_accel', default_value='7.0',
         description='코너 그립 클램프 a_lat [m/s^2] (LUT 그립 피크 ~6.7 이내)'
     )
 
