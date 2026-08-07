@@ -134,16 +134,21 @@ def generate_launch_description():
     #       클리핑 로그가 VESC 시리얼을 굶겨 /sensors/imu 50→39 Hz → imu_timeout 초과 →
     #       vesc_to_odom 이 구식 조향명령 방식으로 폴백(선회 헤딩 +36~39% 과적분).
     #    ⚠️ 젯슨 offset 을 되돌리면 이 값도 같이 0.410 으로 되돌릴 것.
+    # 🔴 2026-08-07: 서보암이 다시 빠져(08-06 야간) 재장착 → 08-06 의 0.8° 좌 트림
+    #    (offset 0.4591 / 좌 0.395)은 기계 기준점이 사라져 무의미해졌다. 젯슨 offset 을
+    #    대칭 기준값 0.4672 로 되돌렸으므로 좌우 모두 0.410 이 맞다:
+    #      좌 (0.4672-0.23)/0.5785 = 0.4100  /  우 (0.66-0.4672)/0.4702 = 0.4100
+    #    ⚠️ 이 값은 "servo 0.4672 에서 바퀴가 직진"이라는 전제 위에서만 맞다. 암 재장착
+    #       실측 트림이 끝나기 전에는 주행 금지 — 중립이 어긋난 채면 한쪽이 스톱에 물린다.
     max_steering_left_arg = DeclareLaunchArgument(
-        'max_steering_left', default_value='0.395',
+        'max_steering_left', default_value='0.410',
         description='좌조향(δ>0) 명령 한계 [rad] = 실제 바퀴 각. 젯슨 vesc.yaml 의 '
-                    'steering_angle_to_servo_gain_left(-0.5785) + offset(0.4591) 과 한 쌍'
+                    'steering_angle_to_servo_gain_left(-0.5785) + offset(0.4672) 과 한 쌍'
     )
     max_steering_right_arg = DeclareLaunchArgument(
         'max_steering_right', default_value='0.410',
         description='우조향(δ<0) 명령 한계 [rad] = 실제 바퀴 각. 젯슨 vesc.yaml 의 '
-                    'steering_angle_to_servo_gain_right(-0.4702) + offset(0.4591) 과 한 쌍. '
-                    '⚠️ 조향 권한 캡은 좌우 중 **작은 쪽**을 쓰므로 이제 좌(0.395)가 적용된다'
+                    'steering_angle_to_servo_gain_right(-0.4702) + offset(0.4672) 과 한 쌍'
     )
 
     # 비워두면 기존 폴백 순서(f1tenth_control share → steering_lookup share)로 로드.

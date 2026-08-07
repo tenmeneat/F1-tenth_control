@@ -71,12 +71,12 @@ def declare_common_args():
         #    구 이름이 역할과 정반대였다(gain이 절편, distance가 기울기). 구 이름을 명령줄에
         #    넘기면 노드가 경고와 함께 여전히 받아주지만(호환 shim), 새 이름을 쓸 것.
         DeclareLaunchArgument(
-            'l1_offset', default_value='0.69',
+            'l1_offset', default_value='0.70',
             description='L1 룩어헤드 거리의 **절편** [m] (공식: l1_offset + v*l1_speed_gain). '
                         '구 이름 l1_gain'
         ),
         DeclareLaunchArgument(
-            'l1_speed_gain', default_value='0.28',
+            'l1_speed_gain', default_value='0.3',
             description='L1 룩어헤드 거리의 **속도 계수** [s] (공식: l1_offset + v*l1_speed_gain). '
                         '구 이름 l1_distance'
         ),
