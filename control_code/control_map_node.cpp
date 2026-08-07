@@ -246,6 +246,10 @@ public:
         const auto status_log_param = declare_parameter<int>("status_log_period_ms", 2000);
         status_log_period_ms_ = static_cast<int>(status_log_param > 0 ? status_log_param : 0);
 
+        // L1 목표점이 차량보다 이만큼 더 많이 튀면 진단 경고 + 카운트. 0이면 검출 끔.
+        // 주행 개입은 전혀 없다(순수 관측). 상세는 control_loop의 검출부 주석 참고.
+        l1_jump_warn_m_ = declare_parameter<double>("l1_jump_warn_m", 1.0);
+
         // 조향 rate limit [rad/s]. ⚠️ 예전엔 "사이클당 0.4 rad" 하드코딩이었다 — 50Hz에서
         // 20 rad/s = 풀락까지 2 사이클(40ms)이라 제한이 있는 척만 하고 아무것도 안 막았고,
         // dt와 무관해서 루프가 밀리면 실효 제한이 더 느슨해졌다. 기본값 20.0은 구 거동과 동일
@@ -732,6 +736,35 @@ private:
         const double L1_x = wps[idx_a].x, L1_y = wps[idx_a].y;
         publish_l1_marker(L1_x, L1_y);   // 표시 전용
 
+        // ── L1 목표점 점프 검출 (🔵 2026-08-07 신설, **진단 전용 — 주행 개입 없음**) ──
+        // 배경: 08-04에 인덱스 점프 가드가 통째로 제거됐고(CLAUDE.md "제거된 안전 레이어"),
+        //   이후 "룩어헤드가 트랙 반대쪽까지 튄다"는 보고가 들어왔다. 그런데 이걸 볼 창구가
+        //   없다 — 상태 로그는 500ms 주기라 50Hz에서 일어나 자기수복되는 점프를 통째로 놓치고,
+        //   `/debug/l1_lookahead`(50Hz)는 bag에 안 잡힌다. 그래서 **50Hz로 세는 카운터**를 둔다.
+        // ⚠️ 인덱스 **번호**로 판정하면 안 된다. 로컬/글로벌은 배열이 달라 소스가 바뀌는
+        //    순간 번호가 크게 튀는데(실측 53→134, 126→10) 목표점 **좌표는 연속**이다
+        //    — 0807 로그 40개 분석에서 대점프 24건 중 20건이 이 "라벨링만 바뀜"이었다.
+        //    좌표로 재야 참이다.
+        if (l1_jump_warn_m_ > 0.0 && l1_prev_valid_) {
+            const double veh_move = std::hypot(current_x_ - prev_pose_x_, current_y_ - prev_pose_y_);
+            const double tgt_move = std::hypot(L1_x - prev_l1_x_, L1_y - prev_l1_y_);
+            if (tgt_move - veh_move > l1_jump_warn_m_) {
+                ++l1_jump_count_;
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "L1 목표점 순간이동: 목표점 %.2f m 이동 / 차량 %.2f m (초과 %.2f m). "
+                    "누적 점프 %lu회, 뒤쪽 %lu회 / 주행 %lu 사이클",
+                    tgt_move, veh_move, tgt_move - veh_move,
+                    l1_jump_count_, l1_behind_count_, l1_cycle_count_);
+            }
+            // 목표점이 차량 **뒤**에 찍히면 sin_eta 부호가 뒤집혀 조향이 반대로 나간다.
+            const double fwd = std::cos(current_yaw_) * (L1_x - current_x_) +
+                               std::sin(current_yaw_) * (L1_y - current_y_);
+            if (fwd < 0.0) ++l1_behind_count_;
+            if (current_speed_ > 0.5) ++l1_cycle_count_;
+        }
+        prev_pose_x_ = current_x_; prev_pose_y_ = current_y_;
+        prev_l1_x_ = L1_x; prev_l1_y_ = L1_y; l1_prev_valid_ = true;
+
         // 3. sin(eta) — 차량 헤딩과 L1 목표점 사이의 횡방향 성분
         double L1_vector_x = L1_x - current_x_;
         double L1_vector_y = L1_y - current_y_;
@@ -955,11 +988,16 @@ private:
         //    규명했다(rosbag만으로는 closest_idx/idx_a/L1_dist를 볼 수 없다).
         //    주기는 `status_log_period_ms`로 조절하고, 0이면 끈다.
         if (status_log_period_ms_ > 0) {
+            // ⚠️ Idx 앞의 L/G는 **어느 배열의 인덱스인지**다. 로컬(L)과 글로벌(G)은 배열이
+            //    달라 소스가 바뀌면 번호가 크게 튀는데(실측 L53→G134) 실제 목표점 좌표는
+            //    연속이다. 이 표기가 없으면 "룩어헤드가 트랙 반대쪽으로 튀었다"로 오독된다.
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), status_log_period_ms_,
-                "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %zu -> %zu | Steer: %.4f | "
-                "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f",
-                current_x_, current_y_, current_yaw_, L1_x, L1_y, closest_idx, idx_a, steering_angle,
-                final_speed, current_speed_, L1_distance, acc_mean);
+                "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %c%zu -> %c%zu | Steer: %.4f | "
+                "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f | 점프 %lu/뒤쪽 %lu",
+                current_x_, current_y_, current_yaw_, L1_x, L1_y,
+                following_local ? 'L' : 'G', closest_idx, following_local ? 'L' : 'G', idx_a,
+                steering_angle, final_speed, current_speed_, L1_distance, acc_mean,
+                l1_jump_count_, l1_behind_count_);
         }
 
         // 9. 발행. ⚠️ acceleration 필드는 **명령 속도의 시간미분**이다 —
@@ -1045,6 +1083,12 @@ private:
     bool steering_speed_cap_measured_ = true;  // 조향용 속도를 실측 속도로 상한(정지 시 LUT 포화 차단)
     int status_log_period_ms_ = 2000;          // 상태 한 줄 로그 주기 [ms], 0 = 끔
     size_t last_global_sig_ = 0;               // 글로벌 경로 재발행 중복 로그 억제용 서명
+
+    // L1 목표점 점프 검출 (진단 전용)
+    double l1_jump_warn_m_ = 1.0;
+    double prev_pose_x_ = 0.0, prev_pose_y_ = 0.0, prev_l1_x_ = 0.0, prev_l1_y_ = 0.0;
+    bool l1_prev_valid_ = false;
+    unsigned long l1_jump_count_ = 0, l1_behind_count_ = 0, l1_cycle_count_ = 0;
 
     // 조향 스케일러 / 속도 룩어헤드
     double acceleration_scaler_for_steering_, deceleration_scaler_for_steering_;

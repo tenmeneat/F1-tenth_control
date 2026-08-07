@@ -140,6 +140,9 @@ EXCLUDE_TYPES=(vesc_msgs/msg/VescImuStamped)
 EXCLUDE_TOPICS=(/local_waypoints/path /pf/viz/particles /pf/viz/inferred_pose)
 [ "$WITH_MAP" = 0 ] && EXCLUDE_TOPICS+=(/map)
 # */markers 는 개수가 늘어날 수 있어 정규식으로 한 번에 막는다(새 마커 토픽도 자동 적용).
+# ⚠️ /debug/l1_lookahead 는 마커 타입이지만 **분석용**이다(L1 목표점 50Hz). 이 정규식에
+#    안 걸리게 이름이 /markers 로 안 끝나니 그대로 녹화된다 — 제외 목록에 넣지 말 것.
+#    2026-08-07에 tools/jetson_rec.sh TOPICS 와 ~/.zshrc f1rec_here 에도 명시 추가했다.
 EXCLUDE_RE='.*/markers$'
 
 QOS_ARGS=()

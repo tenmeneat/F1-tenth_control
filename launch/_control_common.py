@@ -114,6 +114,13 @@ def declare_common_args():
             'status_log_period_ms', default_value='2000',
             description='컨트롤러 상태 한 줄 로그 주기 [ms]. 0 = 끔 (디버깅 시 500 권장)'
         ),
+        # 🔵 2026-08-07 신설. L1 목표점 점프 **검출**(주행 개입 없음, 순수 관측).
+        #    08-04에 인덱스 점프 가드가 제거된 뒤 "룩어헤드가 튄다"는 보고가 있는데, 500ms
+        #    상태로그로는 50Hz에서 자기수복되는 점프를 못 본다. 이 카운터가 그 창구다.
+        DeclareLaunchArgument(
+            'l1_jump_warn_m', default_value='1.0',
+            description='L1 목표점이 차량보다 이만큼[m] 더 튀면 경고+카운트. 0 = 검출 끔'
+        ),
 
         # ── 조향 체인 (2026-07-30 신설) ──
         # 명령각 중 바퀴가 실제로 내는 비율. 0.41 명령 → 실측 ~0.30(74%, 07-28 3회 재현,
@@ -287,6 +294,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'steering_speed_cap_measured': LaunchConfiguration('steering_speed_cap_measured'),
             'status_log_period_ms': ParameterValue(
                 LaunchConfiguration('status_log_period_ms'), value_type=int),
+            'l1_jump_warn_m': LaunchConfiguration('l1_jump_warn_m'),
             # ⚠️ lateral_error_coeff는 2026-07-30에 폐지됐다 — 소비처인 lat_err_scale이
             #    항상 1.0인 죽은 코드였다(control_map_node.cpp control_loop 4 주석 참고).
             'max_speed': max_speed,

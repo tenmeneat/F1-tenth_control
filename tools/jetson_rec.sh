@@ -60,12 +60,17 @@ done
 #
 # ⚠️ 이 목록은 ~/.zshrc 의 f1rec_here 알리아스와 **한 쌍**이다. 한쪽만 고치면 조용히 어긋난다.
 # 2026-08-05: /drive_mppi·/mppi_active 제거 — 08-01 MPPI 노드 삭제로 존재하지 않는 토픽.
+# 2026-08-07: /debug/l1_lookahead 추가. L1 목표점(50Hz)이다 — 08-04에 인덱스 점프 가드가
+#   제거된 뒤 "룩어헤드가 튄다"는 보고를 검증하려는데, 상태 로그는 500ms 주기라 50Hz에서
+#   자기수복되는 점프를 통째로 놓친다. 이 토픽이 없어서 0805~0807 bag 7개 전부로도
+#   "몇 번 튀었나"조차 셀 수 없었다. 비용은 MarkerArray 2개×50Hz ≈ 20~30 KB/s로 /scan 대비 미미.
+#   ⚠️ 순수 시각화 토픽(*/markers, /pf/viz/*)과 달리 **이건 분석용**이다 — 빼지 말 것.
 TOPICS="/drive_autonomous /drive /ackermann_cmd /teleop \
 /joy /drive_mode /estop_lock \
 /pf/pose/odom /odom /tf /tf_static /scan /sensors/imu/raw /imu/data \
 /global_waypoints /local_waypoints /state /avoid_waypoints /overtake_waypoints \
 /car_state/frenet/odom /commands/motor/speed /commands/motor/brake \
-/commands/servo/position /sensors/core"
+/commands/servo/position /sensors/core /debug/l1_lookahead"
 
 # 원격에서 ROS 환경을 명시적으로 세운다(.zshrc 의존 제거 — 비대화형 ssh는 .zshrc를 안 읽는다)
 REMOTE_ENV='
