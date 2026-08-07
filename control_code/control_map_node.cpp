@@ -49,6 +49,34 @@ inline double wrap_pi(double a) {
     return a;
 }
 
+// 헤딩 정합 최근접 스캔. 순수 거리 최소화는 경로가 스스로에게 가까워지는 구간에서 **차량
+// 진행방향과 정반대인** 웨이포인트를 고를 수 있고, 그 목표점은 차 뒤에 찍혀 sin_eta 부호가
+// 뒤집힌다 = 조향 역전.
+// → 경로 접선이 차량 헤딩과 max_heading_err 이내인 후보만 본다. 후보가 전무하면 게이트를
+//   포기하고 무제한 스캔으로 폴백한다(재획득 불능 상황을 만들지 않는다).
+// ⚠️ 이 폴백 때문에 **배열 전체가 뒤집힌 경우는 이 함수만으로 못 막는다** — 그건 호출부의
+//    경로 소스 중재(control_loop 0-b)에서 `gated==false`를 보고 소스를 갈아타야 한다.
+//    2026-08-07 run_0807_174227이 정확히 그 경우였다.
+// 반환 {최단거리, 인덱스, 게이트 적용 여부}.
+std::tuple<double, size_t, bool> scan_closest_heading_gated(
+    const std::vector<Waypoint>& wps, double x, double y, double yaw, double max_heading_err) {
+    if (max_heading_err <= 0.0) {   // 0이면 게이트 비활성 = 구 거동
+        auto [d, i] = scan_closest(wps, x, y);
+        return {d, i, false};
+    }
+    double min_dist = std::numeric_limits<double>::max();
+    size_t closest_idx = 0;
+    bool found = false;
+    for (size_t i = 0; i < wps.size(); ++i) {
+        if (std::abs(wrap_pi(wps[i].yaw - yaw)) > max_heading_err) continue;
+        double dist = std::hypot(wps[i].x - x, wps[i].y - y);
+        if (dist < min_dist) { min_dist = dist; closest_idx = i; found = true; }
+    }
+    if (found) return {min_dist, closest_idx, true};
+    auto [d, i] = scan_closest(wps, x, y);
+    return {d, i, false};
+}
+
 // start_idx에서 경로를 따라 호 길이 max_dist만큼 전진하며 각 웨이포인트를 방문한다.
 // visit(idx, accum_dist)가 false면 중단. 닫힌 경로는 한 바퀴에서, 열린 경로는 끝점에서 멈춘다.
 // 반환값은 마지막으로 도달한 인덱스. (곡률 사전감속 / L1 목표점 탐색 공용)
@@ -284,6 +312,19 @@ public:
 
         // 경로 소스 중재
         local_fresh_timeout_ = declare_parameter<double>("local_fresh_timeout", 0.3);
+
+        // 경로 진행방향 게이트 [rad]. 0이면 비활성(구 거동).
+        // 경로 접선이 차량 헤딩과 이 값 넘게 어긋나면 그 웨이포인트를 최근접 후보에서 제외하고,
+        // 로컬 경로에 정합 후보가 하나도 없으면 로컬을 통째로 버리고 글로벌로 폴백한다.
+        // 🔑 기본 1.40 rad(80°) — run_0807_174227을 50 Hz 전수 재생해 정한 값이다.
+        //    "로컬 경로 전체에서 헤딩이 가장 잘 맞는 점의 오차" 분포가 깨끗하게 갈린다:
+        //      정상 주행 159샘플 : 중앙 1.1° / p95 18.9° / **최대 24.3°**
+        //      경로 반전  10샘플 : **88 ~ 107°**
+        //    80°면 오탐 0/159, 검출 10/10이고 반전 구간(13.38~13.83 s) 내내 게이트가 유지된다.
+        // ⚠️ 구 기본값 1.75(100°)를 그대로 쓰면 안 된다 — 10샘플 중 3개만 잡고 13.60 s에
+        //    풀린다. 풀리는 이유는 그때쯤 차가 이미 풀락으로 뒤집힌 경로 방향에 정렬해버려서다.
+        closest_idx_max_heading_err_ =
+            declare_parameter<double>("closest_idx_max_heading_err", 1.40);
 
         acc_now_ = std::vector<double>(10, 0.0);
 
@@ -603,6 +644,37 @@ private:
         // 0. 경로 소스 중재: 로컬(신선) → 글로벌 → 둘 다 없으면 안전 정지
         bool local_fresh = !local_waypoints_.empty() &&
                            (current_time - local_last_recv_time_).seconds() < local_fresh_timeout_;
+
+        // 0-b. 로컬 경로 진행방향 게이트 — 상류가 반대 브랜치로 튄 경로를 보내면 버린다.
+        // 🔴 2026-08-07 run_0807_174227 크래시 방어. /local_waypoints는 state_machine_node가
+        //    Frenet s로 잘라 발행하는데, frenet 투영이 무상태 전역 최근접이라 마주 보는 두
+        //    브랜치(간격 2.54 m·진행방향 157° 차)의 중간선을 넘는 순간 s가 12.16→25.21 m로
+        //    튀었다. 그 결과 경로 전체가 반대 방향으로 뒤집힌 채 발행됐고, 컨트롤러는 그것을
+        //    충실히 추종해 좌 풀락으로 벽에 박았다.
+        // 배열 전체가 뒤집히면 scan_closest_heading_gated의 폴백이 다시 뒤집힌 점을 고르므로,
+        // "정합 후보가 하나도 없다"(gated==false)를 소스 교체 신호로 쓰는 이 지점이 유일한 방어선이다.
+        if (local_fresh && closest_idx_max_heading_err_ > 0.0) {
+            auto [ld, li, lgated] = scan_closest_heading_gated(
+                local_waypoints_, current_x_, current_y_, current_yaw_,
+                closest_idx_max_heading_err_);
+            (void)ld; (void)li;
+            if (!lgated) {
+                ++local_heading_reject_count_;
+                if (!waypoints_.empty()) {
+                    local_fresh = false;   // 글로벌로 폴백
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                        "로컬 경로가 차량 헤딩과 ±%.0f° 안에서 정합하는 점이 하나도 없다 — "
+                        "상류(state_machine/frenet) 경로 반전 의심, 글로벌로 폴백 (누적 %u회)",
+                        closest_idx_max_heading_err_ * 180.0 / M_PI, local_heading_reject_count_);
+                } else {
+                    // 글로벌이 없으면 재획득 불능을 만들지 않기 위해 로컬을 그대로 쓴다.
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                        "로컬 경로 진행방향 불일치(±%.0f°) — 글로벌이 없어 그대로 추종한다 (누적 %u회)",
+                        closest_idx_max_heading_err_ * 180.0 / M_PI, local_heading_reject_count_);
+                }
+            }
+        }
+
         if (!local_fresh && waypoints_.empty()) {
             publish_safe_stop();
             return;
@@ -646,12 +718,33 @@ private:
                 if (dist < min_dist) { min_dist = dist; closest_idx = idx; }
             }
             // Fail-safe: 경로와 2.5m 넘게 멀어지면 전역 재탐색.
+            // ⚠️ 이 전역 재탐색이 pose 붕괴 시 인덱스 텔레포트의 통로다 — 헤딩 게이트를 건다.
             if (min_dist > 2.5) {
-                std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
+                std::tie(min_dist, closest_idx, std::ignore) = scan_closest_heading_gated(
+                    wps, current_x_, current_y_, current_yaw_, closest_idx_max_heading_err_);
             }
         } else {
             // 열린 구간(짧은 회피경로): 전체 최근접 스캔(저렴, wrap 인덱스 미사용)
-            std::tie(min_dist, closest_idx) = scan_closest(wps, current_x_, current_y_);
+            std::tie(min_dist, closest_idx, std::ignore) = scan_closest_heading_gated(
+                wps, current_x_, current_y_, current_yaw_, closest_idx_max_heading_err_);
+        }
+
+        // 1-a. 고른 인덱스의 진행방향 재확인. 로컬→글로벌 폴백 직후에는 글로벌 추적기
+        // (last_target_idx_)가 로컬 추종 중 얼어붙어 stale이고, 그 stale 인덱스가 우연히
+        // 2.5 m 안이면 위 failsafe가 안 돌아 반대 브랜치에 잠긴 채로 나온다. 그래서 결과를
+        // 한 번 더 검사해 어긋나면 헤딩 정합 전역 재탐색으로 되잡는다.
+        if (closest_idx_max_heading_err_ > 0.0 && n > 0 &&
+            std::abs(wrap_pi(wps[closest_idx].yaw - current_yaw_)) > closest_idx_max_heading_err_) {
+            auto [d, i, gated] = scan_closest_heading_gated(
+                wps, current_x_, current_y_, current_yaw_, closest_idx_max_heading_err_);
+            if (gated) {
+                min_dist = d; closest_idx = i;
+            } else {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "전역 재탐색: 헤딩 정합(±%.0f°) 후보가 없어 게이트 없이 선택 — "
+                    "차량이 경로 반대 방향이거나 pose가 깨졌을 수 있음",
+                    closest_idx_max_heading_err_ * 180.0 / M_PI);
+            }
         }
 
         // ⚠️ 추적기 갱신은 두 분기 공통이어야 한다. 예전엔 닫힌 분기에서만 되써서 로컬 추종 중
@@ -993,11 +1086,11 @@ private:
             //    연속이다. 이 표기가 없으면 "룩어헤드가 트랙 반대쪽으로 튀었다"로 오독된다.
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), status_log_period_ms_,
                 "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %c%zu -> %c%zu | Steer: %.4f | "
-                "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f | 점프 %lu/뒤쪽 %lu",
+                "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f | 점프 %lu/뒤쪽 %lu/경로반전 %u",
                 current_x_, current_y_, current_yaw_, L1_x, L1_y,
                 following_local ? 'L' : 'G', closest_idx, following_local ? 'L' : 'G', idx_a,
                 steering_angle, final_speed, current_speed_, L1_distance, acc_mean,
-                l1_jump_count_, l1_behind_count_);
+                l1_jump_count_, l1_behind_count_, local_heading_reject_count_);
         }
 
         // 9. 발행. ⚠️ acceleration 필드는 **명령 속도의 시간미분**이다 —
@@ -1152,6 +1245,8 @@ private:
     bool local_is_closed_ = false, last_logged_local_closed_ = false;
     rclcpp::Time local_last_recv_time_;
     double local_fresh_timeout_ = 0.3;
+    double closest_idx_max_heading_err_ = 1.40;  // 경로 진행방향 게이트 [rad], 0=비활성
+    uint32_t local_heading_reject_count_ = 0;    // 로컬 경로 반전 거부 누적(진단용)
     // 자율 체결 게이트 (bumpless transfer)
     bool engage_gate_enable_ = true;
     std::string drive_mode_topic_ = "/drive_mode", engaged_mode_value_ = "autonomous";

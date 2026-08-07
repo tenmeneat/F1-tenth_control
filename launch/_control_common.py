@@ -65,6 +65,17 @@ def declare_common_args():
             'local_fresh_timeout', default_value='0.3',
             description='이 시간(s) 넘게 /local_waypoints 미수신 시 글로벌 경로로 폴백'
         ),
+        # 경로 진행방향 게이트 — 2026-08-07 run_0807_174227 크래시 방어.
+        # state_machine이 Frenet s로 잘라 발행하는 /local_waypoints가 반대 브랜치로 튀면
+        # 경로 전체가 뒤집힌 채 들어온다. 접선-헤딩 오차가 이 값을 넘는 점은 최근접 후보에서
+        # 빼고, 로컬에 정합 후보가 하나도 없으면 로컬을 버리고 글로벌로 폴백한다.
+        # 실측(run_0807_174227 50Hz 전수): 정상 주행 최소헤딩오차 최대 24.3°(p95 18.9°),
+        # 경로 반전 구간 88~107°. 1.40 rad(80°)에서 오탐 0/159·검출 10/10.
+        # ⚠️ 구 기본값 1.75(100°)는 3/10만 잡고 중간에 풀린다 — 되돌리지 말 것.
+        DeclareLaunchArgument(
+            'closest_idx_max_heading_err', default_value='1.40',
+            description='경로 접선과 차량 헤딩의 허용 오차 [rad]. 0이면 게이트 비활성(구 거동)'
+        ),
         # ── L1 Guidance 룩어헤드 거리 ──
         # 공식: L1 = clamp(l1_offset + v*l1_speed_gain, max(t_clip_min, sqrt2*lat_err), t_clip_max)
         # ⚠️ 2026-07-30 개명: l1_gain → l1_offset, l1_distance → l1_speed_gain.
@@ -342,6 +353,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'speed_lookahead': LaunchConfiguration('speed_lookahead'),
             'speed_lookahead_for_steering': LaunchConfiguration('speed_lookahead_for_steering'),
             'local_fresh_timeout': LaunchConfiguration('local_fresh_timeout'),
+            'closest_idx_max_heading_err': LaunchConfiguration('closest_idx_max_heading_err'),
         }]
     )
 
