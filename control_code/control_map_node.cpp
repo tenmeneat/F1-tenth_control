@@ -213,6 +213,17 @@ public:
         base_max_decel_ = declare_parameter<double>("base_max_decel", 8.0);
         prebrake_decel_ = declare_parameter<double>("prebrake_decel", 1.5);
 
+        // 램프 안티와인드업 — control_loop 8-a1. 램프 상태가 실측보다 이만큼 이상 앞서지 못한다.
+        //   🔑 값은 취향이 아니라 VESC 속도 PID에서 유일하게 결정된다: s_pid_kp(0.006)로
+        //      l_current_max(60 A)를 뽑는 데 필요한 명령 선행이 60/0.006 = 10000 ERPM
+        //      ÷ speed_to_erpm_gain(4336) = **2.31 m/s**다. 이걸 넘는 선행은 전류를 1 A도
+        //      더 만들지 못하는 **순수 와인드업**이라, 2.4는 가속 권한을 100% 남기고 자른다.
+        //   ⚠️ ramp_speed()의 "lead-clamp 금지" 주석(아래)과 모순이 아니다. 그 경고는 선행을
+        //      **좁혀** 전류를 굶기는 것(07-22 시도값은 0.5급)을 말하고, 2.4는 포화점 위다.
+        //   ⚠️ 젯슨 vesc.yaml/mcconf의 s_pid_kp·l_current_max·speed_to_erpm_gain이 바뀌면
+        //      이 기본값도 같이 다시 계산할 것 — 셋이 한 묶음이다.
+        ramp_lead_max_ = declare_parameter<double>("ramp_lead_max", 2.4);
+
         // 런치 킥(자율 정지출발 시 센서리스 데드존 관통) — control_loop 8-c
         launch_boost_enable_ = declare_parameter<bool>("launch_boost_enable", true);
         launch_boost_speed_ = declare_parameter<double>("launch_boost_speed", 2.2);
@@ -597,6 +608,8 @@ private:
     // ⚠️ 증분은 **실측 속도** 기준 오차로 정하고 직전 **명령**에 더한다(원본 MAP 컨트롤러 규약).
     //    VESC 속도 PID는 ERPM 오차에 비례해 전류를 만들므로 명령이 실측보다 앞서 있어야
     //    가속이 나온다 — 이 선행을 좁히면 가속이 그대로 죽는다(07-22 lead-clamp 금지 사유).
+    // ℹ️ 단 **선행 자체를 금지하는 건 아니다.** 전류가 포화하는 2.31 m/s 위로는 선행이
+    //    아무 일도 안 하므로, 그 위를 자르는 상한은 가속을 안 죽인다 — control_loop 8-a1.
     double ramp_speed(double last_cmd, double target, double dt,
                       double max_accel, double max_decel) const {
         double speed_error = target - current_speed_;
@@ -1021,6 +1034,28 @@ private:
                                         base_max_accel_, base_max_decel_);
         last_target_speed_ = final_speed;
 
+        // 8-a1. 램프 안티와인드업 (2026-08-08 신설, 선언부 주석에 값 유도 있음).
+        //   ramp_speed()는 차가 서 있든 말든 base_max_accel로 계속 올라간다. VESC 센서리스
+        //   탈조로 출발이 0.6~5.4 s 지연되는 동안 램프가 통째로 감겨, 바퀴가 물리는 순간엔
+        //   **rate limit이 이미 소진된 상태**로 물리 한계까지 가속한다.
+        //   0807 bag 10회 실측: 관통 순간 쌓여 있던 명령 2.85~5.81 m/s, 관통 후 실가속
+        //   3.6~6.4 m/s²(의도한 base_max_accel 3.5의 최대 1.8배, VESC 램프 천장 4.88도 초과).
+        //   그 속도로 첫 코너에 들어가 언더스티어 — 요구 a_lat은 v²이라 4.7 vs 3.4면 1.9배다.
+        //   ⚠️ 실측이 명령을 넘는 오버슛은 아니다(초과 +0.02~+0.38 m/s). 컨트롤러가 진짜로
+        //      그 속도를 명령하고 있었다 → VESC가 아니라 여기서 막는 게 맞다.
+        //   ⚠️ final_speed만 자르고 last_target_speed_를 안 되감으면 램프 상태에 와인드업이
+        //      그대로 남아, 관통 순간 다시 계단으로 튀어나간다. **둘 다** 되감아야 한다.
+        //   ℹ️ 08-06에 제거한 stall_guard와 다르다 — "지금 탈조다"를 판정하지 않고 플래닝의
+        //      vx_mps도 건드리지 않는다. 컨트롤러 자기 램프 상태가 현실에서 벗어날 수 있는
+        //      폭만 제한하는 액추에이터 포화 안티와인드업이라, 속도 레버는 planning에 남는다.
+        if (ramp_lead_max_ > 0.0) {
+            const double lead_cap = std::max(0.0, current_speed_) + ramp_lead_max_;
+            if (final_speed > lead_cap) {
+                final_speed = lead_cap;
+                last_target_speed_ = final_speed;
+            }
+        }
+
         // 8-a2. 자율 미체결 중 램프 고정 — bumpless transfer (선언부 주석 참고).
         const bool disengaged = engage_gate_active() && !is_engaged_;
         if (disengaged) {
@@ -1195,6 +1230,7 @@ private:
 
     // 종방향
     double base_max_accel_;
+    double ramp_lead_max_ = 2.4;   // 램프 안티와인드업 선행 상한 [m/s], 0이면 비활성
     double base_max_decel_;                  // 명령 속도 하강 rate limit [m/s²]
     double prebrake_decel_ = 1.5;            // 곡률 사전감속용 실측 감속 권한 [m/s²]
     double max_speed_, min_speed_;

@@ -180,6 +180,19 @@ def declare_common_args():
             'prebrake_decel', default_value='2.6',
             description='곡률 사전감속 제동거리 산출용 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
         ),
+        # ── 램프 안티와인드업 (2026-08-08 신설) ──
+        # 램프는 차가 서 있어도 base_max_accel로 계속 올라간다. VESC 센서리스 탈조로 출발이
+        # 지연되면 그동안 램프가 통째로 감겨, 바퀴가 물리는 순간 rate limit이 이미 소진된 채
+        # 물리 한계로 튀어나간다 → 그 속도로 첫 코너 진입 = 언더스티어.
+        # 0807 bag 10회: 관통 순간 명령 2.85~5.81 m/s, 관통 후 실가속 3.6~6.4 m/s²(의도 3.5).
+        # 🔑 기본값 2.4는 VESC에서 유도된다 — s_pid_kp(0.006)로 l_current_max(60A)를 뽑는 데
+        #    필요한 선행이 60/0.006 = 10000 ERPM ÷ 4336 = 2.31 m/s. 그 위 선행은 전류를 더
+        #    만들지 못하는 순수 와인드업이라, 자르는 데 가속 손실이 없다.
+        # ⚠️ 젯슨 s_pid_kp·l_current_max·speed_to_erpm_gain이 바뀌면 같이 재계산할 것.
+        DeclareLaunchArgument(
+            'ramp_lead_max', default_value='2.4',
+            description='명령 속도 램프가 실측보다 앞설 수 있는 최대폭 [m/s]. 0이면 비활성(구 거동)'
+        ),
         # ── 조향 권한 속도 캡 ──
         # 곡률 캡이 그립만 보던 구멍을 메운다. 그립("타이어가 그 횡가속을 낼 수 있나")과
         # 조향("바퀴가 그만큼 꺾일 수 있나")은 다른 물리다: δ = L·κ + K_us·κ·v² ≤ δ_avail 이면
@@ -318,6 +331,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'base_max_accel': base_max_accel,
             'base_max_decel': LaunchConfiguration('base_max_decel'),
             'prebrake_decel': LaunchConfiguration('prebrake_decel'),
+            'ramp_lead_max': LaunchConfiguration('ramp_lead_max'),
             'launch_boost_enable': ParameterValue(LaunchConfiguration('launch_boost_enable'), value_type=bool),
             'launch_boost_speed': LaunchConfiguration('launch_boost_speed'),
             'launch_boost_time': LaunchConfiguration('launch_boost_time'),
