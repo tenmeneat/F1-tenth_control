@@ -78,7 +78,7 @@
     <foc_d_gain_scale_max_mod>0.2</foc_d_gain_scale_max_mod>
     <foc_sl_openloop_hyst>0.1</foc_sl_openloop_hyst>
     <foc_sl_openloop_time_lock>0.2</foc_sl_openloop_time_lock>
-    <foc_sl_openloop_time_ramp>0.3</foc_sl_openloop_time_ramp>
+    <foc_sl_openloop_time_ramp>0.5</foc_sl_openloop_time_ramp>
     <foc_sl_openloop_time>0.2</foc_sl_openloop_time>
     <foc_sl_openloop_boost_q>25</foc_sl_openloop_boost_q>
     <foc_sl_openloop_max_q>40</foc_sl_openloop_max_q>
@@ -113,12 +113,12 @@
     <foc_hfi_obs_ovr_sec>0.001</foc_hfi_obs_ovr_sec>
     <foc_hfi_samples>1</foc_hfi_samples>
     <foc_offsets_cal_on_boot>1</foc_offsets_cal_on_boot>
-    <foc_offsets_current__0>2051.14</foc_offsets_current__0>
-    <foc_offsets_current__1>2051.14</foc_offsets_current__1>
-    <foc_offsets_current__2>2051.16</foc_offsets_current__2>
-    <foc_offsets_voltage__0>-0.0002</foc_offsets_voltage__0>
+    <foc_offsets_current__0>2051.2</foc_offsets_current__0>
+    <foc_offsets_current__1>2051.13</foc_offsets_current__1>
+    <foc_offsets_current__2>2051.18</foc_offsets_current__2>
+    <foc_offsets_voltage__0>-0.0003</foc_offsets_voltage__0>
     <foc_offsets_voltage__1>0.0006</foc_offsets_voltage__1>
-    <foc_offsets_voltage__2>-0.0004</foc_offsets_voltage__2>
+    <foc_offsets_voltage__2>-0.0003</foc_offsets_voltage__2>
     <foc_offsets_voltage_undriven__0>0</foc_offsets_voltage_undriven__0>
     <foc_offsets_voltage_undriven__1>0</foc_offsets_voltage_undriven__1>
     <foc_offsets_voltage_undriven__2>0</foc_offsets_voltage_undriven__2>
