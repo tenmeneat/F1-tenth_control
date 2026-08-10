@@ -192,7 +192,7 @@ scp ~/slam_toolbox/map.png ~/slam_toolbox/map.yaml \
     miru@10.1.1.3:~/2026_IFAC/src/monte_carlo_localization/maps/
 
 # 글로벌 패스 — 재빌드 불필요
-ssh miru@10.1.1.3 'mkdir -p ~/2026_IFAC/offline_trajectory_generator/output/map'
+ssh miru@10.1.1.1 'mkdir -p ~/2026_IFAC/offline_trajectory_generator/output/map'
 scp -r ~/2026_IFAC/offline_trajectory_generator/output/map \
     miru@10.1.1.3:~/2026_IFAC/offline_trajectory_generator/output/
 ```
