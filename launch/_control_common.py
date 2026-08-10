@@ -10,12 +10,15 @@ from launch.substitutions import LaunchConfiguration
 # 두 환경에서 100% 동일한 파라미터/노드 정의를 여기 한 곳에만 두어 드리프트를 막는다.
 #
 # IMU 단위 보정 계수 — 하드웨어 상수, 여기가 유일한 정의 위치.
-# control_map_node의 조향 가감속 스케일러(acc_mean)가 소비한다.
-# ⚠️ 2026-08-06: 각속도 계수(IMU_ANGULAR_SCALE_*)는 요레이트 카운터스티어 제거로 소비처가
-#    없어져 함께 삭제했다. 자이로를 다시 쓰게 되면 **VESC는 deg/s로 발행**하므로
-#    real = pi/180 = 0.0174533, sim = 1.0(sim_imu_bridge_node는 이미 rad/s 중계)로 되살릴 것.
+# 소비처: 종가속(acc_mean) → 조향 가감속 스케일러 / 요레이트 → 조향 트림 자동 보상.
+# ⚠️ 2026-08-10: 각속도 계수를 **되살렸다**. 08-06에 요레이트 카운터스티어를 제거하면서
+#    소비처가 없어져 지웠는데, 조향 트림 자동 보상이 자이로를 다시 쓴다.
+#    **VESC는 sensor_msgs/Imu의 rad/s 규약을 어기고 deg/s로 발행한다**(2026-07-19 실차 확인)
+#    — 빠뜨리면 요레이트가 57.3배가 되어 트림 추정이 즉시 한계까지 튄다.
 IMU_LINEAR_SCALE_REAL = 9.80665      # g → m/s². VESC가 g로 발행(2026-07-19 소스 확인)
 IMU_LINEAR_SCALE_SIM  = 1.0          # sim_imu_bridge_node는 0 고정
+IMU_ANGULAR_SCALE_REAL = 0.0174533   # deg/s → rad/s (pi/180). VESC가 deg/s로 발행
+IMU_ANGULAR_SCALE_SIM  = 1.0         # sim_imu_bridge_node는 이미 rad/s로 중계
 
 # ⚠️ 조이스틱 드라이버·sim_imu_bridge_node 포함 여부 등 안전 관련 구조 차이는
 # 일부러 여기로 옮기지 않고 각 진입점 파일에 그대로 둔다(환경을 잘못 골라 안전
@@ -158,6 +161,38 @@ def declare_common_args():
             'max_steering_rate', default_value='20.0',
             description='조향 rate limit [rad/s] (dt 비례). 20.0 = 구 거동(사이클당 0.4rad)'
         ),
+        # ── 조향 트림 자동 보상 (2026-08-10 신설, 기본 비활성) ──────────────────────
+        # 조향 기계 중립이 매 주행마다 다르다(0810 bag 실측 −2.2°/−1.9°/+1.6°, 21분 사이에도
+        # +0.5° 이동). 프레임 자체 유격이라 정적 정렬로는 못 잡는다. L1엔 적분기가 없어 이
+        # 상수 외란을 **정상상태 횡오차 21~28 cm**로 버티고 있었다.
+        # 백래시(데드밴드)가 아님을 먼저 확인했다 — 조향 증가/감소 이력폭 0805 bag(10,902샘플)
+        # 기준 +0.04°. 그래서 데드존 보상이 아니라 **오프셋 보상**이 맞는 처방이다.
+        # 자이로 기반이라 MCL 지터(우리가 줄이려는 대상)에 의존하지 않는다.
+        DeclareLaunchArgument(
+            'steering_trim_adapt_gain', default_value='0.0',
+            description='조향 트림 자동 보상 LPF 게인 1/τ [1/s]. 0 = 비활성(기본). '
+                        '0.25 = τ 4초 권장 — L1 대역(0.5~1Hz)보다 한 자릿수 아래라 안 싸운다'
+        ),
+        DeclareLaunchArgument(
+            'steering_trim_limit', default_value='0.06',
+            description='추정 트림 절대값 상한 [rad]. 0.06 ≈ 3.4° = 조향 권한의 8%'
+        ),
+        DeclareLaunchArgument(
+            'steering_trim_max_steer', default_value='0.10',
+            description='이 조향각[rad]을 넘으면 학습 정지 — 선형 자전거모델 유효 영역 밖'
+        ),
+        DeclareLaunchArgument(
+            'steering_trim_min_speed', default_value='2.0',
+            description='이 속도[m/s] 미만이면 학습 정지 (저속은 요레이트 역산이 폭발)'
+        ),
+        DeclareLaunchArgument(
+            'steering_trim_max_lat_acc', default_value='2.0',
+            description='이 횡가속[m/s²]을 넘으면 학습 정지'
+        ),
+        DeclareLaunchArgument(
+            'steering_trim_lag', default_value='0.14',
+            description='조향→요레이트 지연 [s]. 0810 bag 상호상관 실측 140 ms (상관 0.96~0.98)'
+        ),
         # 가감속 조향 스케일러가 완전히 적용되는 기준 |종가속| [m/s²]. 예전엔 ±1.0 하드 임계라
         # 넘는 순간 조향이 5% 계단 점프했고, 실측 coast 감속 −0.4에선 감속측이 급제동
         # 스파이크에서만 드물게 튀었다. 0~ref 선형 블렌딩으로 바꿨다(ref 이상은 구 거동).
@@ -295,7 +330,7 @@ def declare_common_args():
 
 
 def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max_accel,
-                            imu_linear_scale,
+                            imu_linear_scale, imu_angular_scale,
                             max_steering_left, max_steering_right,
                             lookup_table_file='', remappings=None):
     """control_map_node — 환경별로 다른 값만 인자로 받고 나머지는 공용 정의.
@@ -347,6 +382,12 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             # 조향 체인 (2026-07-30)
             'steering_reach_ratio': LaunchConfiguration('steering_reach_ratio'),
             'max_steering_rate': LaunchConfiguration('max_steering_rate'),
+            'steering_trim_adapt_gain': LaunchConfiguration('steering_trim_adapt_gain'),
+            'steering_trim_limit': LaunchConfiguration('steering_trim_limit'),
+            'steering_trim_max_steer': LaunchConfiguration('steering_trim_max_steer'),
+            'steering_trim_min_speed': LaunchConfiguration('steering_trim_min_speed'),
+            'steering_trim_max_lat_acc': LaunchConfiguration('steering_trim_max_lat_acc'),
+            'steering_trim_lag': LaunchConfiguration('steering_trim_lag'),
             'steering_scaler_accel_ref': LaunchConfiguration('steering_scaler_accel_ref'),
             # 자율 미체결 중 램프 고정 (2026-07-28)
             'engage_gate_enable': ParameterValue(
@@ -357,6 +398,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'lookup_table_file': lookup_table_file,
             'use_imu': ParameterValue(LaunchConfiguration('use_imu'), value_type=bool),
             'imu_linear_scale': imu_linear_scale,
+            'imu_angular_scale': imu_angular_scale,
             'curvature_ff_blend': 0.0,
             'heading_damping_gain': 0.2,
             'acceleration_scaler_for_steering': LaunchConfiguration('acceleration_scaler_for_steering'),

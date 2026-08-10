@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <memory>
 #include <vector>
 #include <algorithm>
@@ -231,12 +232,49 @@ public:
         launch_exit_speed_ = declare_parameter<double>("launch_exit_speed", 0.8);
         launch_standstill_speed_ = declare_parameter<double>("launch_standstill_speed", 0.3);
 
-        // IMU. 단위 보정 계수의 실제 값은 런치가 넘긴다(_control_common.py IMU_LINEAR_SCALE).
-        // ⚠️ 2026-08-06: 요레이트 카운터스티어(yaw_rate_gain + StabilityController)를 제거해
-        //    자이로 소비처가 없어졌다 → imu_angular_scale도 함께 삭제. IMU는 이제 종가속
-        //    (조향 가감속 스케일러)에만 쓰인다.
+        // IMU. 단위 보정 계수의 실제 값은 런치가 넘긴다(_control_common.py IMU_*_SCALE).
+        // ⚠️ 2026-08-10: imu_angular_scale을 **되살렸다**. 08-06에 요레이트 카운터스티어를
+        //    제거하면서 자이로 소비처가 없어져 같이 지웠는데, 아래 조향 트림 자동 보상이
+        //    자이로를 다시 쓴다. **VESC는 sensor_msgs/Imu 규약을 어기고 deg/s로 발행**하므로
+        //    real = pi/180 = 0.0174533, sim = 1.0(sim_imu_bridge_node는 이미 rad/s 중계).
+        //    빠뜨리면 요레이트가 57.3배가 되어 트림 추정이 즉시 한계까지 튄다.
         use_imu_ = declare_parameter<bool>("use_imu", true);
         imu_linear_scale_ = declare_parameter<double>("imu_linear_scale", 1.0);
+        imu_angular_scale_ = declare_parameter<double>("imu_angular_scale", 1.0);
+
+        // ── 조향 트림 자동 보상 (2026-08-10 신설) ────────────────────────────────
+        // 문제: 조향 기계 중립이 "servo 0.4672 = 바퀴 0°"에서 벗어나 있고, 그 값이
+        //   **매 주행마다 다르다**(0810 bag 실측 트림 −2.2° / −1.9° / +1.6°, 같은 날
+        //   21분 사이에도 +0.5° 이동). 프레임 자체 유격이라 기계적으로 못 없앤다.
+        // L1에는 적분기가 없어 이 상수 외란을 지울 수단이 없다 → 대신 **정상상태 횡오차**
+        //   (0810 실측 21~28 cm, 항상 같은 쪽)를 만들어 버티고 있었다.
+        //
+        // 🔑 백래시(유격 데드밴드)가 아니라는 걸 먼저 확인했다. 조향→요레이트 지연(실측
+        //    140 ms)을 보정하고 조향 증가/감소 방향별 이력폭을 재면 0805 bag(10,902샘플)
+        //    기준 **+0.04°**(전 구간 ±0.6° 이내)다. 백래시면 부호가 일정해야 하는데 그렇지
+        //    않다 → 데드밴드 보상이 아니라 **오프셋 보상**이 맞는 처방이다.
+        //
+        // 원리: published = ratio·δ_wheel + b 이므로
+        //         e ≡ published(t−lag) − δ_wheel_meas(t)/ratio = −b/ratio
+        //   e는 **현재 트림값과 무관한 순수 측정치**다. 따라서 이 추정기는 차량을 통과하는
+        //   되먹임 루프가 아니라 단순 1차 LPF다 — 구조적으로 발산할 수 없다.
+        //   δ_wheel_meas는 선형 자전거모델 역산: ψ̇·(L/v + K_us·v).
+        //
+        // ⚠️ MCL이 아니라 **자이로**를 쓴다. MCL 헤딩 지터(0810 실측 자이로 대비 p95 4.7°)가
+        //    바로 우리가 줄이려는 대상이라 거기 의존하면 안 된다.
+        // ⚠️ 기본값 0.0 = 비활성. 켜기 전 게이팅 조건(아래 update_steering_trim)을 읽을 것.
+        steering_trim_gain_ =
+            std::max(0.0, declare_parameter<double>("steering_trim_adapt_gain", 0.0));
+        steering_trim_limit_ =
+            std::clamp(declare_parameter<double>("steering_trim_limit", 0.06), 0.0, 0.15);
+        steering_trim_max_steer_ =
+            std::max(0.01, declare_parameter<double>("steering_trim_max_steer", 0.10));
+        steering_trim_min_speed_ =
+            std::max(0.5, declare_parameter<double>("steering_trim_min_speed", 2.0));
+        steering_trim_max_lat_acc_ =
+            std::max(0.1, declare_parameter<double>("steering_trim_max_lat_acc", 2.0));
+        steering_trim_lag_ =
+            std::clamp(declare_parameter<double>("steering_trim_lag", 0.14), 0.0, 0.5);
 
         max_speed_ = declare_parameter<double>("max_speed", 12.0);
         min_speed_ = declare_parameter<double>("min_speed", 2.0);
@@ -443,6 +481,13 @@ private:
         //    여기 부호도 같이 바뀌어야 한다(조용히 깨지는 결합).
         std::rotate(acc_now_.rbegin(), acc_now_.rbegin() + 1, acc_now_.rend());
         acc_now_[0] = -msg->linear_acceleration.x * imu_linear_scale_;
+
+        // 요레이트 — 조향 트림 자동 보상 전용(2026-08-10 부활).
+        // ⚠️ 부호는 정상이다: 반시계 양수(REP-103) = 좌회전 = δ>0 과 같은 방향.
+        // ⚠️ imu_angular_scale을 안 넘기면 real에서 deg/s가 그대로 들어와 57.3배가 된다.
+        yaw_rate_now_ = msg->angular_velocity.z * imu_angular_scale_;
+        yaw_rate_last_recv_ = this->now();
+        yaw_rate_seen_ = true;
     }
 
     void drive_mode_callback(const std_msgs::msg::String::ConstSharedPtr msg) {
@@ -462,6 +507,53 @@ private:
     // 나머지(1 − steer_authority_ratio)는 횡오차 보정·요레이트 피드백 여유로 남긴다.
     double steer_avail() const {
         return steer_authority_ratio_ * steer_limit_min_ * steering_reach_ratio_;
+    }
+
+    // 조향 트림 추정기 갱신 — 발행한 조향 명령과 자이로 실측 요레이트의 DC 차이를 학습한다.
+    //   published = ratio·δ_wheel + b  →  e = published(t−lag) − δ_wheel_meas(t)/ratio = −b/ratio
+    // e는 현재 trim 값이 안 들어간 **순수 측정치**라 이건 되먹임이 아니라 1차 LPF다
+    // (τ = 1/gain). 구조적으로 발산하지 않고, 최악에도 ±steering_trim_limit에서 멈춘다.
+    //
+    // 게이팅이 이 함수의 본체다 — 없으면 코너에서 모델 오차를 트림으로 오학습한다:
+    //   ① 자율 체결 중이고 런치 킥이 끝났을 것 (정지출발 과도구간 배제)
+    //   ② v ≥ min_speed — 저속은 ψ̇ 분모가 작아 δ_wheel_meas가 폭발한다
+    //   ③ |published| ≤ max_steer, |a_lat| ≤ max_lat_acc — 선형 자전거모델이 유효한 영역
+    //   ④ 자이로 신선도 — 끊긴 값으로 학습하면 조용히 틀어진다
+    void update_steering_trim(double dt, double published) {
+        // 발행 이력은 게이트와 무관하게 항상 쌓는다(게이트가 열린 순간 lag만큼 과거가 필요).
+        const double tnow = this->now().seconds();
+        steer_hist_.emplace_back(tnow, published);
+        while (steer_hist_.size() > 2 && tnow - steer_hist_.front().first > steering_trim_lag_ + 0.3)
+            steer_hist_.pop_front();
+
+        if (steering_trim_gain_ <= 0.0 || !use_imu_ || !yaw_rate_seen_) return;
+        if (!is_engaged_ && engage_gate_active()) return;
+        if (launch_active_) return;
+        const double v = std::abs(current_speed_);
+        if (v < steering_trim_min_speed_) return;
+        if ((this->now() - yaw_rate_last_recv_).seconds() > 0.2) return;
+        if (std::abs(published) > steering_trim_max_steer_) return;
+        if (std::abs(v * yaw_rate_now_) > steering_trim_max_lat_acc_) return;
+
+        // lag만큼 과거의 발행값 (선형보간). 이력이 아직 짧으면 학습을 미룬다.
+        const double t_target = tnow - steering_trim_lag_;
+        if (steer_hist_.front().first > t_target) return;
+        double past = steer_hist_.back().second;
+        for (size_t i = 1; i < steer_hist_.size(); ++i) {
+            if (steer_hist_[i].first >= t_target) {
+                const auto &a = steer_hist_[i - 1], &b = steer_hist_[i];
+                const double w = (b.first > a.first) ? (t_target - a.first) / (b.first - a.first) : 0.0;
+                past = a.second + w * (b.second - a.second);
+                break;
+            }
+        }
+
+        // 실측 요레이트가 함의하는 바퀴각 → 명령 공간으로 환산.
+        const double delta_wheel = yaw_rate_now_ * (wheelbase_ / v + understeer_gradient_ * v);
+        const double e = past - delta_wheel / std::max(0.3, steering_reach_ratio_);
+        steering_trim_ += steering_trim_gain_ * (e - steering_trim_) * dt;
+        steering_trim_ = std::clamp(steering_trim_, -steering_trim_limit_, steering_trim_limit_);
+        steering_trim_samples_++;
     }
 
     // engage 게이트가 지금 실제로 작동 중인가. /drive_mode를 한 번도 못 받았거나 timeout 넘게
@@ -1001,6 +1093,14 @@ private:
         //         같은 링키지를 통과하므로 함께 보상돼야 한다.
         if (steering_reach_ratio_ < 0.999) steering_angle /= steering_reach_ratio_;
 
+        // 6-6b) 조향 트림 자동 보상 (2026-08-10) — 기계 중립 오프셋을 피드포워드로 상쇄한다.
+        //   ⚠️ 자리가 중요하다: 도달각 보상 **뒤**여야 한다. 추정치가 애초에 "발행 명령
+        //      공간"에서 측정된 값(published − δ_wheel/ratio)이라 이미 1/ratio를 포함한다.
+        //      앞에 두면 ratio로 한 번 더 나뉘어 과보상된다.
+        //   ⚠️ rate limit **앞**이어야 한다. 뒤에 두면 클램프를 우회해 계단이 그대로 나간다.
+        //   gain=0(기본)이면 steering_trim_은 0에 고정되어 이 줄은 완전한 no-op이다.
+        steering_angle += steering_trim_;
+
         // 6-7) rate limit → 좌우 물리 한계 (δ>0 = 좌). 하드웨어가 못 내는 각을 명령해봐야
         //      vesc_driver의 servo_limit이 조용히 자를 뿐이고 컨트롤러는 그걸 모른다.
         //      ⚠️ rate limit은 dt에 비례해야 한다 — 예전엔 "사이클당 0.4 rad" 하드코딩이라
@@ -1011,6 +1111,10 @@ private:
                                     last_steering_angle_ + steer_step);
         steering_angle = std::clamp(steering_angle, -max_steering_right_, max_steering_left_);
         last_steering_angle_ = steering_angle;
+
+        // 6-8) 트림 추정기 갱신 — **최종 발행값**으로 학습해야 한다. rate limit/클램프에
+        //      걸린 값을 안 쓰고 원래 명령을 쓰면 포화 구간에서 있지도 않은 오차를 학습한다.
+        update_steering_trim(dt, steering_angle);
 
         // 7. 목표 속도 ───────────────────────────────────────────────────────────────
         double global_speed =
@@ -1066,6 +1170,11 @@ private:
             //    킥이 무한 재무장돼 미체결 중에도 발행값이 부스트 값으로 덮인다.
             launch_active_ = false;
             launch_time_ = 0.0;
+            // 조향 트림 추정도 리셋한다 — 미체결 중엔 발행이 하류로 안 나가므로 그 구간의
+            // "명령 vs 요레이트"는 물리적 의미가 없고, 재체결 시 남은 값이 계단으로 나간다.
+            steering_trim_ = 0.0;
+            steering_trim_samples_ = 0;
+            steer_hist_.clear();
             // ⚠️ 2초 throttle이면 대기 중 계속 찍힌다(0807 로그 1007줄 중 156줄). 상태 전이는
             //    이미 위 "자율 체결 상태 변경"이 1회 찍으므로, 여기선 30초 하트비트로 충분하다.
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 30000,
@@ -1121,11 +1230,13 @@ private:
             //    연속이다. 이 표기가 없으면 "룩어헤드가 트랙 반대쪽으로 튀었다"로 오독된다.
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), status_log_period_ms_,
                 "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %c%zu -> %c%zu | Steer: %.4f | "
-                "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f | 점프 %lu/뒤쪽 %lu/경로반전 %u",
+                "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f | 점프 %lu/뒤쪽 %lu/경로반전 %u"
+                " | trim: %+.2f° (n=%ld)",
                 current_x_, current_y_, current_yaw_, L1_x, L1_y,
                 following_local ? 'L' : 'G', closest_idx, following_local ? 'L' : 'G', idx_a,
                 steering_angle, final_speed, current_speed_, L1_distance, acc_mean,
-                l1_jump_count_, l1_behind_count_, local_heading_reject_count_);
+                l1_jump_count_, l1_behind_count_, local_heading_reject_count_,
+                steering_trim_ * 180.0 / M_PI, steering_trim_samples_);
         }
 
         // 9. 발행. ⚠️ acceleration 필드는 **명령 속도의 시간미분**이다 —
@@ -1247,7 +1358,22 @@ private:
     // 카운터스티어 제거와 함께 사라졌다(imu_angular_scale도 같이 삭제).
     bool use_imu_;
     double imu_linear_scale_ = 1.0;
+    double imu_angular_scale_ = 1.0;         // deg/s → rad/s (real=pi/180, sim=1.0)
     std::vector<double> acc_now_;            // 종가속 rolling buffer
+    double yaw_rate_now_ = 0.0;              // 실측 요레이트 [rad/s] (트림 추정 전용)
+    rclcpp::Time yaw_rate_last_recv_{0, 0, RCL_ROS_TIME};
+    bool yaw_rate_seen_ = false;
+
+    // 조향 트림 자동 보상 (2026-08-10)
+    double steering_trim_ = 0.0;             // 추정된 트림 [rad], 발행 명령에 더해진다
+    double steering_trim_gain_ = 0.0;        // 1/τ [1/s], 0 = 비활성
+    double steering_trim_limit_ = 0.06;      // |trim| 상한 [rad] (≈3.4°)
+    double steering_trim_max_steer_ = 0.10;  // 이 각을 넘는 조향 중엔 학습 정지 [rad]
+    double steering_trim_min_speed_ = 2.0;   // 이 속도 미만에선 학습 정지 [m/s]
+    double steering_trim_max_lat_acc_ = 2.0; // 이 횡가속을 넘으면 학습 정지 [m/s²]
+    double steering_trim_lag_ = 0.14;        // 조향→요레이트 지연 [s] (0810 bag 실측 140 ms)
+    long   steering_trim_samples_ = 0;       // 학습 샘플 수 (로그용)
+    std::deque<std::pair<double, double>> steer_hist_;   // (t, 발행 조향) — lag 조회용
 
     // 곡률 사전감속
     size_t curvature_lookahead_count_;
