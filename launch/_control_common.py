@@ -169,7 +169,7 @@ def declare_common_args():
         # 기준 +0.04°. 그래서 데드존 보상이 아니라 **오프셋 보상**이 맞는 처방이다.
         # 자이로 기반이라 MCL 지터(우리가 줄이려는 대상)에 의존하지 않는다.
         DeclareLaunchArgument(
-            'steering_trim_adapt_gain', default_value='0.0',
+            'steering_trim_adapt_gain', default_value='0.25',
             description='조향 트림 자동 보상 LPF 게인 1/τ [1/s]. 0 = 비활성(기본). '
                         '0.25 = τ 4초 권장 — L1 대역(0.5~1Hz)보다 한 자릿수 아래라 안 싸운다'
         ),
@@ -178,7 +178,7 @@ def declare_common_args():
             description='추정 트림 절대값 상한 [rad]. 0.06 ≈ 3.4° = 조향 권한의 8%'
         ),
         DeclareLaunchArgument(
-            'steering_trim_max_steer', default_value='0.10',
+            'steering_trim_max_steer', default_value='0.15',
             description='이 조향각[rad]을 넘으면 학습 정지 — 선형 자전거모델 유효 영역 밖'
         ),
         DeclareLaunchArgument(
