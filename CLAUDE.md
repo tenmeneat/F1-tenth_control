@@ -1039,6 +1039,33 @@ odom·SLAM·MCL 문제를 **추측 없이 숫자로** 가르는 관찰 전용 �
 충돌 구간 혼입, 스캔 단위 임계가 소수 빔을 놓침, 끝점 계산의 취약성, 프로세스 잔재 오염,
 zsh 단어 분할로 인한 파라미터 무시, A/B 전 산포 측정 누락 등. **새 분석을 짜기 전에 읽을 것.**
 
+## 진단 도구 — `tools/f1net_client.sh` (2026-08-10 신설)
+
+"젯슨 토픽이 내 랩탑에 안 보인다"를 원인별로 가르는 **팀원 배포용 자가진단**. 젯슨 ssh도
+sudo도 필요 없다(마지막에 고칠 명령만 출력). `bash tools/f1net_client.sh`.
+
+🔑 **핵심은 [4]단계다** — 젯슨 스택이 떠 있으면 DDS가 자기 존재를 `239.255.0.1`의
+**`7400 + 250×도메인`**(도메인 70 → **24900**)으로 계속 방송하므로, 그 SPDP 패킷을 직접
+받아보면 "패킷이 내 랩탑까지 오는가 + 도메인이 맞는가"가 한 번에 판정된다. `RTPS`
+매직바이트까지 확인해 잡음에 안 속는다.
+
+⚠️ **`ros2 topic list`로는 이게 안 갈린다.** 방화벽이든 도메인 불일치든 스택 미기동이든
+**전부 똑같이 "토픽 0개"**로 보인다 — 2026-08-10에 AP 멀티캐스트를 헛짚은 원인이 이거였다.
+
+🔴 **실제 원인이었던 것: 랩탑의 ufw.** `DEFAULT_INPUT_POLICY="DROP"`이라 DDS 디스커버리
+(상대가 먼저 쏘는 unsolicited inbound UDP)만 막혔다. ping·ssh는 conntrack이 통과시켜서
+"네트워크 정상"으로 보였다. 고치기:
+```bash
+sudo ufw allow from 10.1.1.0/24 comment 'jetson AP (ROS2 DDS)'
+sudo ufw reload && ros2 daemon stop     # ← daemon stop 빼면 빈 캐시가 그대로 보인다
+```
+`ufw disable`은 쓰지 말 것(대회장 공용 WiFi에서 랩탑이 통째로 열린다). AP(HY_MIRU)의
+멀티캐스트 전달 자체는 정상임이 확인됐으므로 `ROS_STATIC_PEERS`·랜선은 불필요하다.
+
+⚠️ **`ssh host 'cmd'`로 젯슨 상태를 재면 안 된다** — 비대화형이라 ROS를 안 소싱해서
+`ros2: not found`가 "토픽 0개"로 둔갑한다. `bash -lc`도 젯슨 유저가 zsh면 `~/.zshrc`
+(=`ROS_DOMAIN_ID` 정의처)를 안 읽는다. 노드의 진짜 도메인은 `/proc/<pid>/environ`으로 볼 것.
+
 ## 참고 / 비활성 자산 (계속)
 
 - `vesc_mcconf.xml` / `vesc_appconf.xml` — VESC 모터/앱 설정. 🔑 **이건 참고용이 아니라 실차 플래시의 최신 사본이다**(08-05 실물 대조 확인) — `l_current_max` 60A, `l_max_erpm` **45000**, `s_pid_kp` **0.006**, `s_pid_ramp_erpms_s` **21160**, 오픈루프 `boost_q` **25** / `max_q` **40** / `time_lock` **0.1** / `time_ramp` **0.2**(08-06 갱신), `foc_sl_erpm_start` **2250**(= 데드존 상단), `foc_motor_r` 0.0063. 출발 덜그럭 진단은 위 "출발 시 덜그럭" 참고

@@ -21,7 +21,9 @@
 #
 # ⚠️ 랩탑 녹화의 전제 (하나라도 빠지면 토픽이 안 잡힌다):
 #   1) ROS_DOMAIN_ID가 젯슨과 같아야 한다(70).
-#   2) wifi는 DDS 멀티캐스트를 막는다 → ROS_DISCOVERY_SERVER=10.1.1.3:11811 필요.
+#   2) wifi는 DDS 멀티캐스트를 막는다 → ROS_DISCOVERY_SERVER=10.1.1.1:11811 필요
+#      (2026-08-09 젯슨 핫스팟, 주소 10.1.1.3→10.42.0.1→10.1.1.1로 계속 바뀌는 중 —
+#      바뀌면 이 줄이 아니라 실제 IP를 `ip -4 addr show`로 다시 확인할 것).
 #      유선(피트)에서는 불필요. 이 스크립트는 env가 이미 있으면 그대로 쓰고, 없으면 경고만 한다.
 #   3) 메시지 타입이 랩탑에 있어야 한다. f110_msgs는 ~/2026_IFAC에 있고,
 #      **vesc_msgs는 랩탑에 없어서 /sensors/core는 랩탑 녹화로는 안 잡힌다**(경고 후 스킵).
@@ -90,7 +92,7 @@ if [ -n "${ROS_DISCOVERY_SERVER:-}" ]; then
   echo "ROS_DISCOVERY_SERVER=$ROS_DISCOVERY_SERVER"
 else
   echo "ℹ  ROS_DISCOVERY_SERVER 미설정 — 유선이면 정상, wifi면 토픽이 안 잡힐 수 있다:"
-  echo "     export ROS_DISCOVERY_SERVER=\"10.1.1.3:11811\""
+  echo "     export ROS_DISCOVERY_SERVER=\"10.1.1.1:11811\""
 fi
 
 DAY=$(date +%m%d)
