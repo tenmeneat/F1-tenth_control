@@ -426,6 +426,27 @@ public:
         }
         drive_mode_last_recv_time_ = this->now();
 
+        // 조향 트림 자동 보상 설정을 기동 시 1회 남긴다 — 나중에 로그만 보고 "그때 켜져
+        // 있었나 / 단위 계수가 맞았나"를 확인할 수 있어야 한다. imu_angular_scale이
+        // 1.0으로 남아 있으면(real인데 pi/180이 아니면) 요레이트가 57.3배가 되므로 경고한다.
+        if (steering_trim_gain_ > 0.0) {
+            RCLCPP_INFO(this->get_logger(),
+                        "조향 트림 자동 보상 활성 — gain %.2f (τ=%.1fs), 한계 ±%.2f°, "
+                        "학습게이트: v≥%.1f m/s, |δ|≤%.1f°, |a_lat|≤%.1f m/s², lag %.0f ms | "
+                        "imu_angular_scale %.6f",
+                        steering_trim_gain_, 1.0 / steering_trim_gain_,
+                        steering_trim_limit_ * 180.0 / M_PI, steering_trim_min_speed_,
+                        steering_trim_max_steer_ * 180.0 / M_PI, steering_trim_max_lat_acc_,
+                        steering_trim_lag_ * 1000.0, imu_angular_scale_);
+            if (std::abs(imu_angular_scale_ - 1.0) < 1e-6) {
+                RCLCPP_WARN(this->get_logger(),
+                    "⚠️ imu_angular_scale=1.0 — 시뮬(sim_imu_bridge_node)이면 정상이지만 "
+                    "실차면 VESC가 deg/s로 발행하므로 요레이트가 57.3배가 된다. "
+                    "그 경우 트림이 즉시 한계(±%.1f°)에 붙는다.",
+                    steering_trim_limit_ * 180.0 / M_PI);
+            }
+        }
+
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             "/drive_autonomous", 10);
         l1_marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
