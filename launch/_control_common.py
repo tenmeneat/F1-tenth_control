@@ -265,11 +265,11 @@ def declare_common_args():
             description='데드존 관통용 펀치 속도 명령 [m/s]'
         ),
         DeclareLaunchArgument(
-            'launch_boost_time', default_value='0.6',
+            'launch_boost_time', default_value='1.5',
             description='관통 실패 시 포기까지 최대 펀치 시간 [s]'
         ),
         DeclareLaunchArgument(
-            'launch_exit_speed', default_value='0.8',
+            'launch_exit_speed', default_value='1.2',
             description='실측이 이 속도[m/s] 넘으면 관통 성공 판정 → 킥 종료(데드존 상단 0.59보다 위)'
         ),
         DeclareLaunchArgument(

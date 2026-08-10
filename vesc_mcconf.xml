@@ -52,7 +52,7 @@
     <hall_table__7>-1</hall_table__7>
     <hall_sl_erpm>2000</hall_sl_erpm>
     <foc_current_kp>0.0054</foc_current_kp>
-    <foc_current_ki>12.68</foc_current_ki>
+    <foc_current_ki>12.76</foc_current_ki>
     <foc_f_zv>30000</foc_f_zv>
     <foc_dt_us>0.08</foc_dt_us>
     <foc_encoder_inverted>0</foc_encoder_inverted>
@@ -61,11 +61,11 @@
     <foc_sensor_mode>0</foc_sensor_mode>
     <foc_pll_kp>2000</foc_pll_kp>
     <foc_pll_ki>20000</foc_pll_ki>
-    <foc_motor_l>2.7e-06</foc_motor_l>
-    <foc_motor_ld_lq_diff>3.3e-07</foc_motor_ld_lq_diff>
-    <foc_motor_r>0.0063</foc_motor_r>
-    <foc_motor_flux_linkage>0.000709</foc_motor_flux_linkage>
-    <foc_observer_gain>1.98933e+09</foc_observer_gain>
+    <foc_motor_l>2.69e-06</foc_motor_l>
+    <foc_motor_ld_lq_diff>3.2e-07</foc_motor_ld_lq_diff>
+    <foc_motor_r>0.0064</foc_motor_r>
+    <foc_motor_flux_linkage>0.000711</foc_motor_flux_linkage>
+    <foc_observer_gain>1.97816e+09</foc_observer_gain>
     <foc_observer_gain_slow>0.3</foc_observer_gain_slow>
     <foc_observer_offset>-1</foc_observer_offset>
     <foc_duty_dowmramp_kp>10</foc_duty_dowmramp_kp>
@@ -73,12 +73,12 @@
     <foc_start_curr_dec>1</foc_start_curr_dec>
     <foc_start_curr_dec_rpm>3500</foc_start_curr_dec_rpm>
     <foc_openloop_rpm>3500</foc_openloop_rpm>
-    <foc_openloop_rpm_low>0.1</foc_openloop_rpm_low>
+    <foc_openloop_rpm_low>1</foc_openloop_rpm_low>
     <foc_d_gain_scale_start>0.9</foc_d_gain_scale_start>
     <foc_d_gain_scale_max_mod>0.2</foc_d_gain_scale_max_mod>
     <foc_sl_openloop_hyst>0.1</foc_sl_openloop_hyst>
     <foc_sl_openloop_time_lock>0.2</foc_sl_openloop_time_lock>
-    <foc_sl_openloop_time_ramp>0.3</foc_sl_openloop_time_ramp>
+    <foc_sl_openloop_time_ramp>0.55</foc_sl_openloop_time_ramp>
     <foc_sl_openloop_time>0.2</foc_sl_openloop_time>
     <foc_sl_openloop_boost_q>30</foc_sl_openloop_boost_q>
     <foc_sl_openloop_max_q>40</foc_sl_openloop_max_q>
@@ -113,12 +113,12 @@
     <foc_hfi_obs_ovr_sec>0.001</foc_hfi_obs_ovr_sec>
     <foc_hfi_samples>2</foc_hfi_samples>
     <foc_offsets_cal_on_boot>1</foc_offsets_cal_on_boot>
-    <foc_offsets_current__0>2049.62</foc_offsets_current__0>
-    <foc_offsets_current__1>2049.17</foc_offsets_current__1>
-    <foc_offsets_current__2>2049.17</foc_offsets_current__2>
-    <foc_offsets_voltage__0>-0.0004</foc_offsets_voltage__0>
-    <foc_offsets_voltage__1>0.0009</foc_offsets_voltage__1>
-    <foc_offsets_voltage__2>-0.0004</foc_offsets_voltage__2>
+    <foc_offsets_current__0>2049.57</foc_offsets_current__0>
+    <foc_offsets_current__1>2049.16</foc_offsets_current__1>
+    <foc_offsets_current__2>2049.12</foc_offsets_current__2>
+    <foc_offsets_voltage__0>-0.0002</foc_offsets_voltage__0>
+    <foc_offsets_voltage__1>0.0006</foc_offsets_voltage__1>
+    <foc_offsets_voltage__2>-0.0003</foc_offsets_voltage__2>
     <foc_offsets_voltage_undriven__0>0</foc_offsets_voltage_undriven__0>
     <foc_offsets_voltage_undriven__1>0</foc_offsets_voltage_undriven__1>
     <foc_offsets_voltage_undriven__2>0</foc_offsets_voltage_undriven__2>
