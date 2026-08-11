@@ -168,8 +168,9 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='섹터 경계 선형 블렌딩 폭 [m]. MCL Frenet s 지터 실측 σ 47mm/max 159mm — '
                         '단 근본 대책은 경계를 κ 최소점에 두는 것(bag_analyzer가 그렇게 뽑아준다)'
         ),
+  
         DeclareLaunchArgument(
-            'sector_scale_track_len_tol', default_value='0.20',
+            'sector_scale_track_len_tol', default_value='0.02',
             description='테이블 선언 랩길이 vs 실제 글로벌 경로 길이 허용 오차 [m]. '
                         '넘으면 테이블 폐기 — 라인을 재생성하면 s가 다른 코너를 가리킨다'
         ),

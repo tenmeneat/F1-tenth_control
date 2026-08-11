@@ -319,7 +319,7 @@ public:
         // 놓는 것**이다(그러면 그립 캡이 프로파일에 져서 스케일이 출력에 도달하지 못한다).
         // bag_analyzer가 내보내는 sectors.yaml은 이미 κ 최소점으로 스냅해서 준다.
         sector_scale_blend_ = declare_parameter<double>("sector_scale_blend", 0.5);
-        sector_scale_track_len_tol_ = declare_parameter<double>("sector_scale_track_len_tol", 0.20);
+        sector_scale_track_len_tol_ = declare_parameter<double>("sector_scale_track_len_tol", 0.02);
         // 회피/추월 중에는 스케일을 끄고 보수적 전역 MLA로 돌아간다. scale의 근거인 벽 여유는
         // **차가 라인 위에 있을 때** 잰 값이라, 라인에서 0.5 m 밀려나면 그 여유가 성립하지 않는다.
         // (0810 섹터2: 여유 p5 0.453인데 벽 쪽으로 0.4 m 밀리면 0.05가 된다)
@@ -1703,7 +1703,7 @@ private:
     // ── 섹터 스케일 상태 ──
     bool sector_scale_enable_ = false, sector_scale_global_only_ = true;
     std::string sector_scale_topic_ = "/sector_scales", sector_scale_state_topic_ = "/state";
-    double sector_scale_max_ = 1.5, sector_scale_blend_ = 0.5, sector_scale_track_len_tol_ = 0.20;
+    double sector_scale_max_ = 1.5, sector_scale_blend_ = 0.5, sector_scale_track_len_tol_ = 0.02;
     std::vector<Sector> sectors_;
     std::vector<SectorTrans> sector_trans_;
     bool sector_table_seen_ = false;   // 테이블을 한 번이라도 받았나

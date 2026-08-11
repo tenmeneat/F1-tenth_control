@@ -395,7 +395,7 @@ rad/s 규약 위반). `imu_angular_scale`을 real = π/180 = 0.0174533, sim = 1.
 | `sector_scale_topic` | `/sector_scales` | 섹터 테이블 토픽. `std_msgs/Float32MultiArray`, 레이아웃 `[track_length, (s0,s1,scale)×N]`, transient_local. ⚠️ f110_msgs를 안 건드리려는 선택 — 검증 후 타입 있는 msg로 승격할 것 |
 | `sector_scale_max` | 1.5 | 허용 최대 scale. 넘으면 **테이블 전체를 버린다**(부분 적용 금지) |
 | `sector_scale_blend` | 0.5 | 전이점 선형 블렌딩 폭 [m]. ⚠️ 근본 대책은 이 필터가 아니라 **경계를 κ 최소점에 두는 것** — bag_analyzer가 그렇게 스냅해서 준다 |
-| `sector_scale_track_len_tol` | 0.20 | 테이블 선언 랩길이 vs 실제 글로벌 경로 길이 허용 오차 [m]. 넘으면 폐기 — 라인을 재생성하면 같은 s가 다른 코너를 가리킨다 |
+| `sector_scale_track_len_tol` | **0.02** | 테이블 선언 랩길이 vs 실제 글로벌 경로 길이 허용 오차 [m]. 넘으면 폐기 — 라인을 재생성하면 같은 s가 다른 코너를 가리킨다 |
 | `sector_scale_global_only` | true | 회피/추월(`/state` != GLOBAL) 중 스케일을 끄고 전역 MLA로 복귀 |
 | `sector_scale_state_topic` / `sector_scale_state_timeout` | `/state` / 1.0 | 회피 판정 입력. **미수신이면 자동 비활성**(모르면 끈다 → 시뮬은 항상 꺼짐) |
 
@@ -781,7 +781,7 @@ pose 홀드 뒤에 두면 `last_steering_angle_`(이미 보상된 값)에 매 �
 | 가속 램프 | `s_pid_ramp_erpms_s` **21160** | **4.88 m/s²** | VESC mcconf |
 | 제동 전류 | `brake_max_current` 8.0 A | **~4.8 m/s²** | 젯슨 `vesc.yaml` |
 | 최고속 | `l_max_erpm` **45000** / 젯슨 `speed_max` **40000** | **9.22 m/s**(젯슨이 구속) | VESC mcconf / 젯슨 `vesc.yaml` |
-| 오픈루프 전류 | `foc_sl_openloop_boost_q` **25** / `max_q` **40** A | 정지출발 구간에만 적용(08-06 상향) | VESC mcconf |
+| 오픈루프 전류 | `foc_sl_openloop_boost_q` **30** / `max_q` **40** A | 정지출발 구간에만 적용. ⚠️ **상향은 07-08·07-25 두 번 무효 확인** — 판별 변수가 아니다 | VESC mcconf |
 | 전체 전류 | `l_current_max` 60 A | — | VESC mcconf |
 
 - 🔑 **젯슨 `speed_max`는 더 이상 병목이 아니다** — 07-26 후속과제로 23250(5.49 m/s) →
@@ -903,7 +903,7 @@ VESC는 speed/brake 모드가 배타적(나중 명령이 이김)이라 이 중�
 
 #### 🔴 2026-08-06: ①+②를 **동시에** 적용했더니 데드존이 더 심해졌다
 
-현재 플래시 = `boost_q` **25** / `max_q` **40** / `time_lock` **0.1** / `time_ramp` **0.2**
+당시 플래시 = `boost_q` **25** / `max_q` **40** / `time_lock` **0.1** / `time_ramp` **0.2**
 (= ①과 ②를 한 번에 넣음. `vesc_mcconf.xml` 사본도 이 값으로 갱신됨). 결과는 **악화**.
 
 원인은 ②다. 핸드오버 조건이 "**로터**가 `foc_sl_erpm_start`(2250) 이상"인데, 오픈루프 램프를
@@ -927,6 +927,38 @@ VESC는 speed/brake 모드가 배타적(나중 명령이 이김)이라 이 중�
 
 ⚠️ **한 번에 하나씩 바꿀 것.** 이번에 ①②를 같이 넣어서 어느 쪽이 악화 원인인지 bag 없이는
 가릴 수 없게 됐다(07-28 스윕이 이 값들을 **올린** 것도 같은 이유였다).
+
+#### 🔴 HFI는 이 모터에서 불가능하다 — 다시 제안하지 말 것 (2026-08-11 최종)
+
+`vesc_mcconf.xml`에 HFI 파라미터가 **전부 들어 있어서** "켜면 되지 않나"로 보이지만,
+**`foc_sensor_mode`가 0(순수 센서리스)인 건 의도된 상태다.**
+
+- 07-25 실차에서 **기본 HFI와 Coupled V0V7 HFI 둘 다 시험했고 부하(땅) 위에서 붕괴**했다
+  (기본: ERPM ±1100/−700 왕복 25~30 A로 안 나감 / Coupled: ERPM ±200 왕복, 25~50 A, 회전 0).
+- 원인은 **돌극성 부족**: 실측 Lq−Ld = **0.39 µH**. 무부하에선 깨끗한데 기동 전류의
+  **자기포화에 먹혀** 위치추정이 무너진다. 시험 후 Sensorless로 원복+Write 했다.
+- **2026-08-08, 2026-08-11 두 번 재확인** — 사용자가 "어떻게 해도 안 됐다"고 확정.
+- ⚠️ XML의 `foc_motor_ld_lq_diff`(3.2e-07 / L 대비 11.9%)만 보고 "돌극성 충분하니 되겠다"고
+  판단하면 안 된다. **무부하 인덕턴스 비율이지 부하 시 유효 돌극성이 아니다** — 실차에서
+  이미 두 번 실패한 게 정답이다.
+
+남은 카드는 ① 오픈루프 시퀀스 품질(dwell·램프율) ② 런치 킥 ③ **센서드 모터 교체**뿐이다.
+
+#### 🔑 오픈루프 전류는 판별 변수가 아니다 (A/B에서 고정할 것)
+
+`foc_sl_openloop_boost_q`/`max_q` **상향은 이미 두 번 무효 확인**됐다 — 07-08(15 A)·07-25(~20 A).
+그런데도 08-06에 18/30 → 25/40, 이후 **30/40**까지 올라가 있다. 기동 성공률은 이걸로 안 바뀌고,
+**수동 조종에서 저속 덜그럭만 사납게** 만든다(오픈루프가 가벼운 스로틀 명령과 싸운다).
+→ 출발 튜닝 A/B에서는 **전류를 고정**하고 `time_*`·`foc_openloop_rpm`만 움직일 것.
+
+#### ⚠️ 자율과 수동은 오픈루프에 정반대를 원한다 (2026-08-11)
+
+- **자율**: 체결 직후 명령이 램프 선행 상한(`ramp_lead_max` 2.4)까지 즉시 올라가므로 부하가
+  크다 → 길고 센 오픈루프가 관통에 유리
+- **수동**: 사람이 스로틀을 살살 주므로 부하가 가볍다 → 길고 센 오픈루프가 **명령과 싸워
+  덜그럭**으로 체감된다. 실제로 "이전 설정에선 수동이 매끄러웠다"는 보고가 있다
+- ⚠️ **수동에서 버벅인다 = 컨트롤러 무죄**다. Mux(`ackermann_mux`)가 `ackermann_to_vesc`
+  **위**에 있어 수동도 자율과 똑같이 VESC 속도모드를 타므로, `control_map_node`와 무관하다
 
 ### ⚠️ 젯슨 odom은 2026-07-28부터 자이로 기반이다 (제어 전제 조건)
 
@@ -1134,7 +1166,7 @@ sudo ufw reload && ros2 daemon stop     # ← daemon stop 빼면 빈 캐시가 �
 
 ## 참고 / 비활성 자산 (계속)
 
-- `vesc_mcconf.xml` / `vesc_appconf.xml` — VESC 모터/앱 설정. 🔑 **이건 참고용이 아니라 실차 플래시의 최신 사본이다**(08-05 실물 대조 확인) — `l_current_max` 60A, `l_max_erpm` **45000**, `s_pid_kp` **0.006**, `s_pid_ramp_erpms_s` **21160**, 오픈루프 `boost_q` **25** / `max_q` **40** / `time_lock` **0.1** / `time_ramp` **0.2**(08-06 갱신), `foc_sl_erpm_start` **2250**(= 데드존 상단), `foc_motor_r` 0.0063. 출발 덜그럭 진단은 위 "출발 시 덜그럭" 참고
+- `vesc_mcconf.xml` / `vesc_appconf.xml` — VESC 모터/앱 설정. 🔑 **이건 참고용이 아니라 실차 플래시의 최신 사본이다**(08-05 실물 대조 확인) — `l_current_max` 60A, `l_max_erpm` **45000**, `s_pid_kp` **0.006**, `s_pid_ramp_erpms_s` **21160**, 오픈루프 `boost_q` **30** / `max_q` **40** / `time_lock` **0.2** / `time_ramp` **0.52** / `time`(dwell) **0.2** / `foc_openloop_rpm` **3500**(2026-08-11 실물 확인), `foc_sl_erpm_start` **2250**(= 데드존 상단) / `foc_sl_erpm` **2500**, `foc_motor_r` 0.0064, `foc_sensor_mode` **0 = 센서리스**(HFI 불가 확정, 위 참고). 🔑 **오픈루프 총시간 = 0.2+0.52+0.2 = 0.92 s**이고, 0811 실측 출발 탈조가 **1.08~1.27 s**(6회)로 정확히 대응한다 — 덜그럭 길이는 이 합이 직접 정한다. 출발 덜그럭 진단은 위 "출발 시 덜그럭" 참고
 - `docs/` — 하드웨어/IMU 통합 가이드, Technical Description Paper, `lookup_steer_angle.py`(C++
   `SteeringLookupTable`의 포팅 원본, 실행 안 됨 — 2026-07-14 `control_code/`에서 이동) (.gitignore로
   git 제외됨)
