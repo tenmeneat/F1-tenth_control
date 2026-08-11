@@ -702,7 +702,7 @@ control_map_node    충실히 추종 → 조향 −0.30 → +0.39 → 좌 풀락
 | 직선 5개 | — | **0.000 s** | **0.000 s** |
 
 **쓰는 법**: `analyze_sector_clearance.py --yaml sectors.yaml`(또는 웹앱의 '섹터 YAML 내려받기')로
-초안을 받아 🟢 섹터의 `scale`만 올리고, `tools/sector_pub.py sectors.yaml --watch`로 발행한다.
+초안을 받아 🟢 섹터의 `scale`만 올리고, `scripts/sector_pub.py sectors.yaml --watch`로 발행한다.
 발행기가 컨트롤러와 **같은 검증을 먼저** 걸어 이유를 찍어주고(`scale < 1.0`, 랩 넘는 구간,
 겹침, 랩길이 누락), `--watch`는 파일 저장마다 재발행하되 **실패하면 직전 테이블을 유지**한다 —
 차 옆에서 오타 한 번에 스케일이 통째로 날아가지 않는다.

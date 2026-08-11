@@ -10,9 +10,9 @@ sector_pub.py — 섹터 스케일 테이블 발행기 (control_map_node의 sect
 
 사용법:
   source /opt/ros/<distro>/setup.bash && source ~/2026_IFAC/install/setup.bash
-  python3 tools/sector_pub.py sectors.yaml            # latch 발행 후 대기
-  python3 tools/sector_pub.py sectors.yaml --watch    # 파일 저장할 때마다 재발행(라이브 튜닝)
-  python3 tools/sector_pub.py sectors.yaml --dry-run  # 검증만 하고 안 쏨
+  python3 scripts/sector_pub.py sectors.yaml            # latch 발행 후 대기
+  python3 scripts/sector_pub.py sectors.yaml --watch    # 파일 저장할 때마다 재발행(라이브 튜닝)
+  python3 scripts/sector_pub.py sectors.yaml --dry-run  # 검증만 하고 안 쏨
 
 🔑 컨트롤러가 거는 검증을 **여기서 먼저** 똑같이 건다. 차 옆에서 YAML을 고치다 오타를 내면
    컨트롤러는 조용히 테이블 전체를 버리고 1.0으로 돌아가는데(설계상 안전한 동작),
