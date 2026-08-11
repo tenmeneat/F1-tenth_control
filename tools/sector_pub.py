@@ -107,18 +107,46 @@ def to_msg(track_len, sectors):
     return m
 
 
+def resolve_yaml_path(raw_path: str) -> str:
+    if raw_path:
+        p = os.path.expanduser(raw_path)
+        if os.path.isfile(p):
+            return p
+
+    candidates = [
+        os.path.expanduser("~/2026_IFAC/src/f1tenth_control/config/sectors.yaml"),
+        os.path.expanduser("~/F1tenth_control/config/sectors.yaml"),
+    ]
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        candidates.append(os.path.join(get_package_share_directory("f1tenth_control"), "config", "sectors.yaml"))
+    except Exception:
+        pass
+
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+
+    if raw_path:
+        return os.path.expanduser(raw_path)
+    return candidates[0]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="섹터 스케일 테이블 발행")
-    ap.add_argument("yaml_path")
+    ap.add_argument("yaml_path", nargs="?", default="", help="sectors.yaml 경로 (생략 시 자동 탐색)")
     ap.add_argument("--topic", default="/sector_scales")
     ap.add_argument("--scale-max", type=float, default=1.5,
                     help="컨트롤러 sector_scale_max와 같은 값 (기본 1.5)")
     ap.add_argument("--watch", action="store_true",
                     help="파일이 바뀌면 자동 재발행 (랩 사이 라이브 튜닝용)")
     ap.add_argument("--dry-run", action="store_true", help="검증만 하고 발행하지 않음")
-    args = ap.parse_args()
 
-    path = os.path.expanduser(args.yaml_path)
+    # ROS 2 런치에서 띄웠을 때 --ros-args 제거
+    clean_argv = rclpy.utilities.remove_ros_args(sys.argv)[1:]
+    args = ap.parse_args(clean_argv)
+
+    path = resolve_yaml_path(args.yaml_path)
     track_len, sectors = load_and_validate(path, args.scale_max)
     print(f"랩 길이 {track_len:.2f} m / 섹터 {len(sectors)}개")
     for s0, s1, sc in sectors:

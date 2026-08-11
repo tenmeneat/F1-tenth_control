@@ -125,4 +125,9 @@ install(FILES config/sectors.yaml
   DESTINATION share/${PROJECT_NAME}/config
 )
 
+# 섹터 스케일 발행기 실행 파일 설치 (런치 노드로 구동 가능하도록)
+install(PROGRAMS tools/sector_pub.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

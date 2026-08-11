@@ -2,6 +2,7 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
 
 # ============================================================================
 # 시뮬/실차 런치파일 공용 헬퍼 (control_sim.launch.py / control_real.launch.py)
@@ -25,7 +26,7 @@ IMU_ANGULAR_SCALE_SIM  = 1.0         # sim_imu_bridge_node는 이미 rad/s로 �
 # 기능이 빠진 채 기동되는 실수를 구조적으로 차단하기 위함).
 
 
-def declare_common_args():
+def declare_common_args(sector_scale_enable_default='false'):
     """두 런치파일에서 동일하게 쓰는 인자 선언 목록."""
     return [
         # ⚠️ force_autonomous·speed_to_erpm_gain 인자는 teleop 제거(2026-07-29)와 함께 폐지됐다 —
@@ -136,7 +137,7 @@ def declare_common_args():
             description='L1 목표점이 차량보다 이만큼[m] 더 튀면 경고+카운트. 0 = 검출 끔'
         ),
 
-        # ── 섹터별 횡가속 권한 스케일 (2026-08-11 신설, 기본 꺼짐) ──
+        # ── 섹터별 횡가속 권한 스케일 (2026-08-11 신설, 실차 기본 켜짐) ──
         # 전역 max_lateral_accel 하나로는 코너별 차이를 못 담는다. 0810 실측에서 같은 라인의
         # 코너별 벽 여유 p5가 0.145~0.453 m로 3배 갈렸고, 랩타임 감도는 코너 3개에 83%가 몰려
         # 있다(직선 5개는 정확히 0.000 s — 그립 캡이 κ≈0에서 비활성이라 구조적으로 그렇다).
@@ -145,9 +146,13 @@ def declare_common_args():
         # ⚠️ 켜기 전에 반드시 `tools/bag_analyzer/analyze_sector_clearance.py`(또는 웹앱의
         #    '섹터별 벽 여유')로 그 코너가 🟢인지 확인할 것. 판정 없이 올리면 0807 전복 재현이다.
         DeclareLaunchArgument(
-            'sector_scale_enable', default_value='false',
+            'sector_scale_enable', default_value=sector_scale_enable_default,
             description='섹터별 max_lateral_accel 스케일 사용 (true/false). '
                         'false면 전 구간 전역 MLA — 구 거동과 완전히 동일'
+        ),
+        DeclareLaunchArgument(
+            'sector_scale_file', default_value='',
+            description='섹터 스케일 sectors.yaml 파일 경로 (비워두면 자동 탐색)'
         ),
         DeclareLaunchArgument(
             'sector_scale_topic', default_value='/sector_scales',
@@ -477,3 +482,21 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
 # ⚠️ build_joy_teleop_monitor()는 teleop 제거(2026-07-29)와 함께 삭제됐다. 수동/자율/E-stop
 #    Mux는 이 저장소 담당이 아니다 — 실차는 f1tenth_stack(drive_mode_manager + ackermann_mux),
 #    시뮬은 Mux 없이 drive_source_selector가 자율 명령을 /drive로 직결한다.
+
+
+def build_sector_pub_node():
+    """섹터 스케일 테이블 발행기 노드 (control_map_node의 sector_scale_* 짝).
+    sector_scale_enable:=true 일 때 --watch 모드로 기동되어 파일 저장 시 자동 재발행."""
+    return Node(
+        package='f1tenth_control',
+        executable='sector_pub.py',
+        name='sector_pub',
+        output='screen',
+        arguments=[
+            LaunchConfiguration('sector_scale_file'),
+            '--watch',
+            '--scale-max', LaunchConfiguration('sector_scale_max'),
+            '--topic', LaunchConfiguration('sector_scale_topic'),
+        ],
+        condition=IfCondition(LaunchConfiguration('sector_scale_enable')),
+    )

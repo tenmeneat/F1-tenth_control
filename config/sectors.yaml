@@ -7,11 +7,10 @@
 #   예) 전역 6.0에서  scale 1.10 → 6.60 / 1.17 → 7.02 / 1.25 → 7.50
 #
 # 쓰는 법:
-#   1) 이 파일의 🟢 섹터만 scale을 +0.1 올린다 (한 번에 하나씩!)
-#   2) python3 tools/sector_pub.py config/sectors.yaml --watch   ← 저장하면 즉시 재발행
-#   3) ros2 launch f1tenth_control control_real.launch.py sector_scale_enable:=true
-#   4) 컨트롤러 로그 끝에서 `| 섹터 MLA 6.60 (×1.10)` 확인
-#   5) 새 bag 녹화 → analyze_sector_clearance.py로 그 섹터가 여전히 🟢인지 재확인
+#   1) ros2 launch f1tenth_control control_real.launch.py (sector_scale_enable 기본값: true, sector_pub 자동 기동)
+#   2) 이 파일의 🟢 섹터 scale을 변경 후 저장하기만 하면 --watch에 의해 즉시 자동 재발행! (별도 터미널 불필요)
+#   3) 컨트롤러 로그 끝에서 `| 섹터 MLA 6.60 (×1.10)` 확인
+#   4) 새 bag 녹화 → analyze_sector_clearance.py로 그 섹터가 여전히 🟢인지 재확인
 #
 # ⚠️ scale < 1.0은 금지(발행기·컨트롤러 양쪽에서 거부). 느리게 하려면 전역 max_lateral_accel을
 #    낮출 것 — 1.0 미만을 허용하면 "테이블을 잃으면 위험 코너가 빨라지는" 구조가 된다.

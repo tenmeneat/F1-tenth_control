@@ -391,7 +391,7 @@ rad/s 규약 위반). `imu_angular_scale`을 real = π/180 = 0.0174533, sim = 1.
 | `engage_gate_enable` | true | 자율 미체결(`/drive_mode` != autonomous) 중 속도 램프를 실측에 고정(bumpless transfer) |
 | `drive_mode_topic` / `engaged_mode_value` / `drive_mode_timeout` | `/drive_mode` / `autonomous` / 1.0 | engage 게이트 입력. timeout 넘게 미수신이면 게이트 자동 비활성(시뮬 호환) |
 | `max_steering_left` / `max_steering_right` | **0.410 / 0.410** (real·sim 공통) | 좌/우 조향 한계 [rad] = **실제 바퀴 각**(젯슨 좌우 개별 게인이 변환). **젯슨 `vesc.yaml`의 `offset`(0.4672)·`gain_left`(−0.5785)/`gain_right`(−0.4702)·`servo_min`(0.23)/`servo_max`(0.66)과 반드시 한 묶음** — 이 조합에서만 좌우가 대칭 0.410이 된다(유도는 문서 최상단 참고). 조향 권한 캡은 둘 중 작은 쪽을 쓰는데 지금은 좌우가 같다. ⚠️ **servo 값은 좌우 대칭이 아니다**: 같은 18.6°가 좌 servo 0.279 / 우 0.620이다. 벤치 실측 시 헷갈리지 말 것(2026-08-07 우 0.62 실측 18°, 예측 18.62°로 우측 게인 검증됨) |
-| `sector_scale_enable` | **false** | 🔴 2026-08-11 신설. 섹터별 `max_lateral_accel` 스케일 사용 (true/false). false면 전 구간 전역 MLA = **구 거동과 완전히 동일**(A/B 정상상태 명령 완전 일치 확인). 켜기 전 반드시 `tools/bag_analyzer/analyze_sector_clearance.py`(또는 웹앱 '섹터별 벽 여유')로 그 코너가 🟢인지 볼 것 — 아래 ②-j |
+| `sector_scale_enable` | **true**(real) / false(sim) | 🔴 2026-08-11 신설. 섹터별 `max_lateral_accel` 스케일 사용. real 런치는 기본 `true`이며 `sector_pub` 노드가 `--watch` 모드로 자동 기동되어 `config/sectors.yaml` 저장 시 라이브 재발행됨. (기본 `sectors.yaml`은 scale 1.0이라 기존 거동과 완전히 동일) |
 | `sector_scale_topic` | `/sector_scales` | 섹터 테이블 토픽. `std_msgs/Float32MultiArray`, 레이아웃 `[track_length, (s0,s1,scale)×N]`, transient_local. ⚠️ f110_msgs를 안 건드리려는 선택 — 검증 후 타입 있는 msg로 승격할 것 |
 | `sector_scale_max` | 1.5 | 허용 최대 scale. 넘으면 **테이블 전체를 버린다**(부분 적용 금지) |
 | `sector_scale_blend` | 0.5 | 전이점 선형 블렌딩 폭 [m]. ⚠️ 근본 대책은 이 필터가 아니라 **경계를 κ 최소점에 두는 것** — bag_analyzer가 그렇게 스냅해서 준다 |

@@ -212,8 +212,10 @@ def generate_launch_description():
     #      ⚠️ gain·servo_min/max는 서보가 스토퍼를 상시 밀던 결함을 고친 것이라 offset과 달리
     #      07-21 값이 유효하다. 이 게인은 `/**:` 공유 파라미터라 vesc_to_odom에도 함께 걸린다.
 
+    sector_pub_node = common.build_sector_pub_node()
+
     return LaunchDescription([
-        *common.declare_common_args(),
+        *common.declare_common_args(sector_scale_enable_default='true'),
         odom_topic_arg,
         max_speed_arg,
         max_lateral_accel_arg,
@@ -223,4 +225,5 @@ def generate_launch_description():
         base_max_accel_arg,
         steering_control,
         drive_source_selector,
+        sector_pub_node,
     ])
