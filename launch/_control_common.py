@@ -136,6 +136,53 @@ def declare_common_args():
             description='L1 목표점이 차량보다 이만큼[m] 더 튀면 경고+카운트. 0 = 검출 끔'
         ),
 
+        # ── 섹터별 횡가속 권한 스케일 (2026-08-11 신설, 기본 꺼짐) ──
+        # 전역 max_lateral_accel 하나로는 코너별 차이를 못 담는다. 0810 실측에서 같은 라인의
+        # 코너별 벽 여유 p5가 0.145~0.453 m로 3배 갈렸고, 랩타임 감도는 코너 3개에 83%가 몰려
+        # 있다(직선 5개는 정확히 0.000 s — 그립 캡이 κ≈0에서 비활성이라 구조적으로 그렇다).
+        # 🔑 전역 MLA는 **보수값 그대로 두고** 이 스케일로 특정 코너만 연다. scale ≥ 1.0만
+        #    허용하므로 토픽 미수신·라인 불일치·회피 진입 등 모든 실패가 "느려지는 방향"이다.
+        # ⚠️ 켜기 전에 반드시 `tools/bag_analyzer/analyze_sector_clearance.py`(또는 웹앱의
+        #    '섹터별 벽 여유')로 그 코너가 🟢인지 확인할 것. 판정 없이 올리면 0807 전복 재현이다.
+        DeclareLaunchArgument(
+            'sector_scale_enable', default_value='false',
+            description='섹터별 max_lateral_accel 스케일 사용 (true/false). '
+                        'false면 전 구간 전역 MLA — 구 거동과 완전히 동일'
+        ),
+        DeclareLaunchArgument(
+            'sector_scale_topic', default_value='/sector_scales',
+            description='섹터 테이블 토픽 (std_msgs/Float32MultiArray, '
+                        '[track_length, (s0,s1,scale)×N], transient_local)'
+        ),
+        DeclareLaunchArgument(
+            'sector_scale_max', default_value='1.5',
+            description='허용 최대 scale. 이보다 큰 값이 오면 테이블 전체를 버린다'
+        ),
+        DeclareLaunchArgument(
+            'sector_scale_blend', default_value='0.5',
+            description='섹터 경계 선형 블렌딩 폭 [m]. MCL Frenet s 지터 실측 σ 47mm/max 159mm — '
+                        '단 근본 대책은 경계를 κ 최소점에 두는 것(bag_analyzer가 그렇게 뽑아준다)'
+        ),
+        DeclareLaunchArgument(
+            'sector_scale_track_len_tol', default_value='0.20',
+            description='테이블 선언 랩길이 vs 실제 글로벌 경로 길이 허용 오차 [m]. '
+                        '넘으면 테이블 폐기 — 라인을 재생성하면 s가 다른 코너를 가리킨다'
+        ),
+        DeclareLaunchArgument(
+            'sector_scale_global_only', default_value='true',
+            description='회피/추월(/state != GLOBAL) 중에는 스케일을 끄고 전역 MLA로 복귀. '
+                        'scale의 근거인 벽 여유는 차가 라인 위에 있을 때 잰 값이라 필수'
+        ),
+        DeclareLaunchArgument(
+            'sector_scale_state_topic', default_value='/state',
+            description='주행 상태 토픽 (f110_msgs/StateMachine). '
+                        '미수신이면 회피 여부를 모르므로 스케일이 자동 비활성'
+        ),
+        DeclareLaunchArgument(
+            'sector_scale_state_timeout', default_value='1.0',
+            description='/state 신선도 [s]. 넘으면 스케일 비활성(모르면 끈다)'
+        ),
+
         # ── 조향 체인 (2026-07-30 신설) ──
         # 명령각 중 바퀴가 실제로 내는 비율. 0.41 명령 → 실측 ~0.30(74%, 07-28 3회 재현,
         # 횡가속 1.09 m/s²라 슬립으론 설명 불가 = 기계적).
@@ -410,6 +457,15 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'speed_lookahead_for_steering': LaunchConfiguration('speed_lookahead_for_steering'),
             'local_fresh_timeout': LaunchConfiguration('local_fresh_timeout'),
             'closest_idx_max_heading_err': LaunchConfiguration('closest_idx_max_heading_err'),
+            # 섹터별 횡가속 권한 스케일 (기본 꺼짐 — 켜기 전 bag_analyzer 판정 필수)
+            'sector_scale_enable': LaunchConfiguration('sector_scale_enable'),
+            'sector_scale_topic': LaunchConfiguration('sector_scale_topic'),
+            'sector_scale_max': LaunchConfiguration('sector_scale_max'),
+            'sector_scale_blend': LaunchConfiguration('sector_scale_blend'),
+            'sector_scale_track_len_tol': LaunchConfiguration('sector_scale_track_len_tol'),
+            'sector_scale_global_only': LaunchConfiguration('sector_scale_global_only'),
+            'sector_scale_state_topic': LaunchConfiguration('sector_scale_state_topic'),
+            'sector_scale_state_timeout': LaunchConfiguration('sector_scale_state_timeout'),
         }]
     )
 

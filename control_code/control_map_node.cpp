@@ -16,10 +16,12 @@
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/float32_multi_array.hpp"
 
 #include "f1tenth_control/types.hpp"
 #include "f1tenth_control/steering_lookup_table.hpp"
 #include "f110_msgs/msg/wpnt_array.hpp"
+#include "f110_msgs/msg/state_machine.hpp"
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
 
@@ -295,6 +297,36 @@ public:
         curvature_ff_blend_ = declare_parameter<double>("curvature_ff_blend", 0.0);
         odom_topic_ = declare_parameter<std::string>("odom_topic", "/ego_racecar/odom");
 
+        // ── 섹터별 횡가속 권한 스케일 (2026-08-11 신설) ───────────────────────────
+        // 전역 max_lateral_accel 하나로는 "이 코너는 여유가 있고 저 코너는 없다"를 표현 못 한다.
+        // 0810 실측: 같은 라인에서 코너별 벽 여유 p5가 0.145~0.453 m로 3배 갈렸다.
+        // 그래서 s 구간별 스케일을 **외부에서 받아** 그립 캡에만 곱한다.
+        //
+        // 🔑 안전 불변식 — 이 셋이 같이 지켜져야 의미가 있다:
+        //   ① scale ≥ 1.0만 허용(clamp). 전역 MLA는 **보수값**으로 두고 여기서만 연다
+        //      → 토픽 미수신·검증실패·노드 재시작 등 모든 실패가 "느려지는 방향"이 된다.
+        //      반대로 짜면(전역 7.0 + 위험코너 0.85) 메시지를 잃는 순간 위험 코너가 빨라진다.
+        //   ② v_cap = min(프로파일, √(MLA·scale/κ)) 은 여전히 min()이다 → 플래너의 속도
+        //      인하(장애물·정지)를 절대 못 덮는다. 회피 중 권한 침범이 원리적으로 불가능.
+        //   ③ track_length 검증. s 구간은 **특정 글로벌 라인에 묶여 있다** — 라인을
+        //      재생성하면(길이 34.93 → 35.40 같은 일이 실제로 있었다) 같은 s가 다른 코너를
+        //      가리키고, scale≥1.0이라 그 오적용은 "빨라지는" 쪽이다. 길이가 다르면 통째로 버린다.
+        sector_scale_enable_ = declare_parameter<bool>("sector_scale_enable", false);
+        sector_scale_topic_ = declare_parameter<std::string>("sector_scale_topic", "/sector_scales");
+        sector_scale_max_ = declare_parameter<double>("sector_scale_max", 1.5);
+        // 경계 블렌딩 폭 [m]. MCL Frenet s 지터 실측 σ 47 mm / max 159 mm(0810) — 계단이면
+        // 경계에서 캡이 50 Hz로 토글한다. ⚠️ 근본 대책은 이 필터가 아니라 **경계를 κ 최소점에
+        // 놓는 것**이다(그러면 그립 캡이 프로파일에 져서 스케일이 출력에 도달하지 못한다).
+        // bag_analyzer가 내보내는 sectors.yaml은 이미 κ 최소점으로 스냅해서 준다.
+        sector_scale_blend_ = declare_parameter<double>("sector_scale_blend", 0.5);
+        sector_scale_track_len_tol_ = declare_parameter<double>("sector_scale_track_len_tol", 0.20);
+        // 회피/추월 중에는 스케일을 끄고 보수적 전역 MLA로 돌아간다. scale의 근거인 벽 여유는
+        // **차가 라인 위에 있을 때** 잰 값이라, 라인에서 0.5 m 밀려나면 그 여유가 성립하지 않는다.
+        // (0810 섹터2: 여유 p5 0.453인데 벽 쪽으로 0.4 m 밀리면 0.05가 된다)
+        sector_scale_global_only_ = declare_parameter<bool>("sector_scale_global_only", true);
+        sector_scale_state_topic_ = declare_parameter<std::string>("sector_scale_state_topic", "/state");
+        sector_scale_state_timeout_ = declare_parameter<double>("sector_scale_state_timeout", 1.0);
+
         // L1 횡가속 분모로 목표점까지의 **실제** 직선거리를 쓸지. 목표점은 호 길이 기준으로
         // 고르므로 |목표점−차량| != L1_distance다(07-27 bag 실측 비율 중앙 1.06~1.31, p95 1.72).
         // 명목값을 분모로 쓰면 횡가속 명령이 최대 +70% 과대해지고, 경로에서 벗어날수록
@@ -425,6 +457,38 @@ public:
                         drive_mode_topic_.c_str(), engaged_mode_value_.c_str(), drive_mode_timeout_);
         }
         drive_mode_last_recv_time_ = this->now();
+        sector_state_last_recv_time_ = this->now();   // 노드 클럭 타입으로 초기화
+
+        // 섹터 스케일 구독. transient_local이라 컨트롤러가 늦게 떠도 마지막 테이블을 받는다.
+        if (sector_scale_enable_) {
+            sector_scale_sub_ = this->create_subscription<std_msgs::msg::Float32MultiArray>(
+                sector_scale_topic_,
+                rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local(),
+                std::bind(&ControlMapNode::sector_scale_callback, this, std::placeholders::_1));
+            if (sector_scale_global_only_) {
+                sector_state_sub_ = this->create_subscription<f110_msgs::msg::StateMachine>(
+                    sector_scale_state_topic_, 10,
+                    [this](const f110_msgs::msg::StateMachine::SharedPtr msg) {
+                        const bool was = sector_on_global_ && sector_state_seen_;
+                        sector_on_global_ = (msg->state == f110_msgs::msg::StateMachine::STATE_GLOBAL);
+                        sector_state_last_recv_time_ = this->now();
+                        sector_state_seen_ = true;
+                        if (was != sector_on_global_) {
+                            // 상태가 바뀌면 이미 받아둔 경로의 mla를 즉시 다시 해소해야 한다 —
+                            // 안 그러면 회피에 들어갔는데 다음 경로 메시지까지 옛 스케일이 남는다.
+                            apply_sector_scales(waypoints_);
+                            apply_sector_scales(local_waypoints_);
+                        }
+                    });
+            }
+            RCLCPP_INFO(this->get_logger(),
+                        "섹터 횡가속 스케일 활성 — %s 구독 (scale ∈ [1.0, %.2f], 블렌딩 %.2f m, "
+                        "전역 MLA %.2f, %s)",
+                        sector_scale_topic_.c_str(), sector_scale_max_, sector_scale_blend_,
+                        max_lateral_accel_,
+                        sector_scale_global_only_
+                            ? "회피/추월 중 자동 1.0 복귀" : "⚠️ 회피 중에도 적용(global_only=false)");
+        }
 
         // 조향 트림 자동 보상 설정을 기동 시 1회 남긴다 — 나중에 로그만 보고 "그때 켜져
         // 있었나 / 단위 계수가 맞았나"를 확인할 수 있어야 한다. imu_angular_scale이
@@ -632,6 +696,11 @@ private:
 
         smooth_curvature(waypoints_, /*closed=*/true);
 
+        // 섹터 테이블이 이 라인 기준인지 확인한 뒤 mla를 해소한다. 순서가 중요하다 —
+        // 검증 결과(sector_len_ok_)가 apply_sector_scales의 활성 조건에 들어간다.
+        validate_sector_track_length(total_path_length);
+        apply_sector_scales(waypoints_);
+
         // 플래너가 **같은 경로를 2초마다 재발행**하므로 매번 찍으면 로그의 16%가 이 줄이 된다
         // (0807 실차 로그 1007줄 중 158줄). 내용이 실제로 바뀐 경우에만 찍는다.
         const size_t path_sig = waypoints_.size() ^
@@ -690,6 +759,12 @@ private:
         }
 
         smooth_curvature(local_waypoints_, local_is_closed_);
+
+        // 로컬도 s_m은 글로벌 Frenet 호길이라 같은 섹터 테이블이 그대로 먹는다.
+        // 🔑 s로 키잉하는 이유가 이것이다 — 로컬(재기준 배열)과 글로벌은 **인덱스 체계가
+        //    다르다**(실측 L53→G134 같은 점프가 정상). 인덱스로 섹터를 잡으면 소스가 바뀌는
+        //    순간 엉뚱한 코너에 걸린다.
+        apply_sector_scales(local_waypoints_);
 
         // 배열이 교체되면 로컬 추적기를 초기화.
         if (n != prev_size) last_local_idx_ = 0;
@@ -905,7 +980,12 @@ private:
             double v_cap_i = wps[i].speed;
             double k_i = std::abs(wps[i].smoothed_curvature);
             if (k_i > 0.01) {
-                v_cap_i = std::min(v_cap_i, std::sqrt(max_lateral_accel_ / k_i));   // (a) 그립
+                // 🔑 조회 키는 **룩어헤드 지점 i**의 값이지 에고 현재 위치가 아니다. 이 루프는
+                //    backward-pass("전방 지점 i의 상한까지 감속 가능한 현재 속도")이므로, 에고
+                //    기준으로 잡으면 빠른 섹터→느린 섹터 진입에서 사전감속이 통째로 무효가 된다.
+                //    수신 콜백에서 미리 해소해 두는 구조가 그 실수를 구조적으로 막아준다.
+                const double mla_i = (wps[i].mla > 0.0) ? wps[i].mla : max_lateral_accel_;
+                v_cap_i = std::min(v_cap_i, std::sqrt(mla_i / k_i));                // (a) 그립
                 if (understeer_gradient_ > 1e-6) {                                  // (b) 조향 권한
                     // ⚠️ 좌우 중 **작은** 한계를 쓰고, 거기에 도달각 비율까지 곱한다 —
                     //    캡은 "바퀴가 실제로 꺾이는 각"으로 계산해야 의미가 있다(0.379를 다
@@ -1252,12 +1332,15 @@ private:
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), status_log_period_ms_,
                 "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %c%zu -> %c%zu | Steer: %.4f | "
                 "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f | 점프 %lu/뒤쪽 %lu/경로반전 %u"
-                " | trim: %+.2f° (n=%ld)",
+                " | trim: %+.2f° (n=%ld)%s",
                 current_x_, current_y_, current_yaw_, L1_x, L1_y,
                 following_local ? 'L' : 'G', closest_idx, following_local ? 'L' : 'G', idx_a,
                 steering_angle, final_speed, current_speed_, L1_distance, acc_mean,
                 l1_jump_count_, l1_behind_count_, local_heading_reject_count_,
-                steering_trim_ * 180.0 / M_PI, steering_trim_samples_);
+                steering_trim_ * 180.0 / M_PI, steering_trim_samples_,
+                // 섹터가 켜져 있으면 **지금 이 지점에 실제로 적용된 MLA**를 같이 찍는다.
+                // 파라미터가 아니라 적용값을 찍어야 "켜졌는데 왜 안 빨라지나"를 로그만으로 가른다.
+                sector_status_suffix(wps[closest_idx].mla).c_str());
         }
 
         // 9. 발행. ⚠️ acceleration 필드는 **명령 속도의 시간미분**이다 —
@@ -1312,6 +1395,191 @@ private:
     }
 
     // 룩어헤드 투영점(현재 속도로 lookahead_time만큼 직진한 위치) 기준 최근접 웨이포인트.
+    // ── 섹터 스케일 ─────────────────────────────────────────────────────────────
+    // 메시지 레이아웃: data[0] = track_length, 이후 [s_start, s_end, scale] × N.
+    // f110_msgs를 안 건드리려고 Float32MultiArray를 쓴다 — 메시지 변경은 팀 전 패키지 +
+    // 젯슨 락스텝 재빌드라 대회 직전에 감당할 조율 비용이 아니다. 검증이 끝나면 타입 있는
+    // msg로 승격할 것. track_length를 **메시지가 직접 들고 오게** 한 건 별도 파라미터로
+    // 빼두면 테이블만 갈고 파라미터를 안 고치는 실수가 나기 때문이다(그 조합이 정확히
+    // "다른 라인의 s를 그대로 적용"이라 가장 위험하다).
+    // 랩을 넘는 구간(s_start > s_end)은 발행 쪽에서 두 개로 쪼개서 보낸다.
+    struct Sector { double s0, s1, scale; };
+    struct SectorTrans { double s, before, after; };   // 값이 실제로 바뀌는 지점만
+
+    void sector_scale_callback(const std_msgs::msg::Float32MultiArray::SharedPtr msg) {
+        const auto& d = msg->data;
+        // ⚠️ 하나라도 이상하면 **메시지 전체를 버리고 직전 값을 유지**한다. 부분 적용하면
+        //    어느 구간이 새 값이고 어느 구간이 옛 값인지 알 수 없는 상태가 된다.
+        if (d.empty() || (d.size() - 1) % 3 != 0) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "섹터 테이블 무시: 길이 %zu — [track_length, (s0,s1,scale)×N] 형식이 아님", d.size());
+            return;
+        }
+        const double decl_len = d[0];
+        if (!std::isfinite(decl_len) || decl_len <= 1.0) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "섹터 테이블 무시: track_length %.3f가 비정상", decl_len);
+            return;
+        }
+        std::vector<Sector> parsed;
+        parsed.reserve((d.size() - 1) / 3);
+        for (size_t i = 1; i + 2 < d.size(); i += 3) {
+            const double s0 = d[i], s1 = d[i + 1], sc = d[i + 2];
+            if (!std::isfinite(s0) || !std::isfinite(s1) || !std::isfinite(sc) ||
+                s1 <= s0 || s0 < 0.0 || s1 > decl_len + 1e-6) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "섹터 테이블 무시: %zu번 항목이 비정상 (s %.2f→%.2f, 랩길이 %.2f, scale %.2f)",
+                    i / 3, s0, s1, decl_len, sc);
+                return;
+            }
+            if (sc < 1.0 || sc > sector_scale_max_) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "섹터 테이블 무시: %zu번 scale %.2f이 [1.0, %.2f] 밖 — 1.0 미만은 "
+                    "설계상 금지다(미수신 시 위험 코너가 빨라지는 방향이 된다)",
+                    i / 3, sc, sector_scale_max_);
+                return;
+            }
+            parsed.push_back({s0, s1, sc});
+        }
+        sectors_ = std::move(parsed);
+        sector_decl_track_len_ = decl_len;
+        rebuild_sector_profile();
+        sector_table_seen_ = true;
+        if (sector_track_len_ > 0.0) validate_sector_track_length(sector_track_len_);
+        apply_sector_scales(waypoints_);
+        apply_sector_scales(local_waypoints_);
+        RCLCPP_INFO(this->get_logger(), "섹터 테이블 갱신: %zu구간 / 랩길이 %.2f m%s",
+                    sectors_.size(), decl_len,
+                    sector_len_ok_ ? "" : " (⚠️ 라인 길이 미검증 — 글로벌 경로 수신 대기)");
+    }
+
+    // 블렌딩 없는 계단 함수. 구간이 겹치면 큰 쪽(발행 쪽에서 겹침을 금지하지만 방어적으로).
+    double sector_scale_step(double s) const {
+        double v = 1.0;
+        for (const auto& sec : sectors_) {
+            if (s >= sec.s0 && s < sec.s1) v = std::max(v, static_cast<double>(sec.scale));
+        }
+        return v;
+    }
+
+    // 🔴 블렌딩은 **값이 실제로 바뀌는 전이점에만** 걸어야 한다. 2026-08-11 첫 구현은 각
+    //    섹터의 s0/s1마다 무조건 램프를 걸었는데, 그러면
+    //      ① 인접한 두 섹터가 같은 scale이어도 이음매에서 절반으로 파인다
+    //      ② 랩을 넘는 구간을 두 개로 쪼개 보내면 결승선에서 파인다 — 그 파임이 하필
+    //         코너 한복판에 생긴다(지터를 막으려고 넣은 장치가 딥을 만드는 꼴)
+    //    런타임 검증에서 전 구간 ×1.20을 줬는데 ×1.10이 적용되며 잡혔다.
+    void rebuild_sector_profile() {
+        sector_trans_.clear();
+        const double L = sector_decl_track_len_;
+        if (sectors_.empty() || L <= 0.0) return;
+        std::vector<double> bounds;
+        bounds.reserve(sectors_.size() * 2);
+        for (const auto& sec : sectors_) { bounds.push_back(sec.s0); bounds.push_back(sec.s1); }
+        std::sort(bounds.begin(), bounds.end());
+        bounds.erase(std::unique(bounds.begin(), bounds.end()), bounds.end());
+        const double eps = 1e-4;
+        for (double b : bounds) {
+            const double before = sector_scale_step(std::fmod(b - eps + L, L));
+            const double after = sector_scale_step(std::fmod(b + eps, L));
+            if (std::abs(after - before) > 1e-9) sector_trans_.push_back({b, before, after});
+        }
+    }
+
+    // s에 적용할 스케일. 전이점 ±blend/2에서만 선형 램프.
+    double sector_scale_at(double s) const {
+        const double L = sector_decl_track_len_;
+        if (sectors_.empty() || L <= 0.0) return 1.0;
+        s = std::fmod(std::fmod(s, L) + L, L);
+        const double v = sector_scale_step(s);
+        const double h = 0.5 * sector_scale_blend_;
+        if (h <= 1e-9) return v;
+        for (const auto& t : sector_trans_) {
+            double d = s - t.s;
+            if (d > L * 0.5) d -= L; else if (d < -L * 0.5) d += L;
+            if (std::abs(d) >= h) continue;
+            // 전이 간격이 blend보다 좁으면 겹치지만, 그건 발행 쪽에서 금지한다
+            // (bag_analyzer는 경계를 κ 최소점으로 스냅해 충분히 벌려서 준다).
+            return t.before + (t.after - t.before) * std::clamp((d + h) / (2.0 * h), 0.0, 1.0);
+        }
+        return v;
+    }
+
+    // 웨이포인트 배열의 mla를 한 번에 해소한다. 🔑 50 Hz 루프가 아니라 **수신 콜백**에서
+    // 부르는 것이 이 설계의 핵심이다 — 제어 루프에는 배열 읽기만 남고, 조회 키가
+    // wps[i].s(룩어헤드 지점)로 구조적으로 고정된다. 에고 s로 조회하면 빠른 섹터에서
+    // 느린 섹터로 진입할 때 사전감속이 통째로 무효가 되는데, 그 실수를 못 하게 된다.
+    void apply_sector_scales(std::vector<Waypoint>& wps) {
+        const bool active = sector_active();
+        for (auto& w : wps) {
+            w.mla = active ? max_lateral_accel_ * sector_scale_at(w.s) : max_lateral_accel_;
+        }
+    }
+
+    // 스케일을 지금 적용해도 되는가. ⚠️ "모르겠으면 끈다"가 원칙이다 — 여기서 애매한 걸
+    // 켜는 쪽으로 처리하면 불변식(모든 실패는 느려지는 방향)이 깨진다.
+    bool sector_active() const {
+        if (!sector_scale_enable_ || !sector_table_seen_ || !sector_len_ok_) return false;
+        if (!sector_scale_global_only_) return true;
+        // /state를 한 번도 못 받았거나 끊겼으면 회피 중인지 알 수 없다 → 끈다.
+        // (state_machine을 안 띄우는 시뮬에서는 이 경로로 항상 비활성이 된다. 의도된 것 —
+        //  검증 근거인 벽 여유가 실차 bag에서만 나오므로 시뮬에서 켤 이유가 없다.)
+        if (!sector_state_seen_) return false;
+        if ((this->now() - sector_state_last_recv_time_).seconds() > sector_scale_state_timeout_)
+            return false;
+        return sector_on_global_;
+    }
+
+    // 상태 로그 꼬리표. 꺼져 있으면 빈 문자열이라 기존 로그 형식이 그대로 유지된다.
+    std::string sector_status_suffix(double applied_mla) const {
+        if (!sector_scale_enable_) return "";
+        char buf[96];
+        if (!sector_active()) {
+            // ⚠️ "/state 끊김"과 "회피 중"을 구분해서 찍는다. 둘 다 비활성이지만 원인이
+            //    정반대다 — 전자는 배선 문제(고쳐야 함), 후자는 의도된 동작(정상)이다.
+            const bool state_stale =
+                sector_state_seen_ &&
+                (this->now() - sector_state_last_recv_time_).seconds() > sector_scale_state_timeout_;
+            const char* why = !sector_table_seen_ ? "테이블 미수신"
+                            : !sector_len_ok_     ? "라인 불일치"
+                            : !sector_state_seen_ ? "/state 미수신"
+                            : state_stale         ? "/state 끊김"
+                                                  : "회피/추월 중";
+            std::snprintf(buf, sizeof(buf), " | 섹터: 비활성(%s)", why);
+        } else {
+            const double m = (applied_mla > 0.0) ? applied_mla : max_lateral_accel_;
+            std::snprintf(buf, sizeof(buf), " | 섹터 MLA %.2f (×%.2f)", m, m / max_lateral_accel_);
+        }
+        return std::string(buf);
+    }
+
+    // 섹터 테이블이 지금 들어온 글로벌 라인과 같은 라인 기준인지 확인한다.
+    // 다르면 s가 다른 코너를 가리키고, scale ≥ 1.0이라 그 오적용은 "빨라지는" 쪽이다.
+    void validate_sector_track_length(double track_len) {
+        if (!sector_scale_enable_) return;
+        sector_track_len_ = track_len;
+        if (sector_decl_track_len_ <= 0.0) {
+            // 발행 쪽이 길이를 안 알려준 경우 — 검증 없이 쓰는 건 위험하니 비활성.
+            sector_len_ok_ = false;
+            if (sector_table_seen_)
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "섹터 스케일 비활성: 발행 쪽이 track_length를 안 줬다 "
+                    "(sector_scale_track_length 파라미터 또는 테이블 헤더 필요)");
+            return;
+        }
+        const bool ok = std::abs(track_len - sector_decl_track_len_) <= sector_scale_track_len_tol_;
+        if (ok != sector_len_ok_) {
+            if (ok) RCLCPP_INFO(this->get_logger(),
+                        "섹터 스케일 라인 검증 통과 (테이블 %.2f m / 현재 %.2f m)",
+                        sector_decl_track_len_, track_len);
+            else RCLCPP_ERROR(this->get_logger(),
+                        "🔴 섹터 스케일 폐기: 테이블이 다른 라인 기준이다 (%.2f m vs 현재 %.2f m, "
+                        "허용 %.2f) — 전 구간 scale 1.0으로 되돌린다. 라인을 재생성했으면 "
+                        "섹터 파일도 새 bag으로 다시 뽑을 것",
+                        sector_decl_track_len_, track_len, sector_scale_track_len_tol_);
+        }
+        sector_len_ok_ = ok;
+    }
+
     size_t find_lookahead_wp_idx(const std::vector<Waypoint>& wps, bool closed, size_t base_idx,
                                  double lookahead_time) const {
         const size_t nn = wps.size();
@@ -1432,6 +1700,24 @@ private:
     uint32_t local_heading_reject_count_ = 0;    // 로컬 경로 반전 거부 누적(진단용)
     // 자율 체결 게이트 (bumpless transfer)
     bool engage_gate_enable_ = true;
+    // ── 섹터 스케일 상태 ──
+    bool sector_scale_enable_ = false, sector_scale_global_only_ = true;
+    std::string sector_scale_topic_ = "/sector_scales", sector_scale_state_topic_ = "/state";
+    double sector_scale_max_ = 1.5, sector_scale_blend_ = 0.5, sector_scale_track_len_tol_ = 0.20;
+    std::vector<Sector> sectors_;
+    std::vector<SectorTrans> sector_trans_;
+    bool sector_table_seen_ = false;   // 테이블을 한 번이라도 받았나
+    bool sector_len_ok_ = false;       // 그 테이블이 지금 라인과 같은 라인 기준인가
+    // ⚠️ 기본 false다. "글로벌 추종 중"이 확인되기 전에는 켜지 않는다 — true로 두면
+    //    /state 발행자가 없을 때 회피 여부를 모르는 채로 스케일이 먹는다.
+    bool sector_on_global_ = false, sector_state_seen_ = false;
+    double sector_scale_state_timeout_ = 1.0;
+    double sector_decl_track_len_ = 0.0;  // 테이블이 선언한 랩 길이
+    double sector_track_len_ = 0.0;       // 실제 글로벌 경로에서 잰 랩 길이
+    rclcpp::Time sector_state_last_recv_time_;
+    rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr sector_scale_sub_;
+    rclcpp::Subscription<f110_msgs::msg::StateMachine>::SharedPtr sector_state_sub_;
+
     std::string drive_mode_topic_ = "/drive_mode", engaged_mode_value_ = "autonomous";
     double drive_mode_timeout_ = 1.0;
     bool is_engaged_ = false, drive_mode_seen_ = false;

@@ -121,6 +121,12 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
 .tcell .sw{width:8px;height:8px;border-radius:50%;flex:none}
 .bintbl tbody tr[data-turn]{cursor:default}
 .bintbl tbody tr.turnhot td{background:#1a2130}
+/* 섹터 YAML 출력 — 다운로드가 막히는 환경(아티팩트 샌드박스)에서도 항상 보이게 */
+#sec_yaml_out{margin-top:10px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+.secyhdr{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-bottom:6px}
+#sec_yaml_pre{margin:0;padding:10px;background:#0a0d12;border:1px solid var(--line);border-radius:6px;
+  color:#a5d6ff;font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow-x:auto;
+  user-select:text;-webkit-user-select:text}
 /* 속도 구간별 가감속 표 */
 .tblscroll{overflow-x:auto;margin-top:9px}
 .bintbl{width:100%;border-collapse:collapse;font-size:12.5px}
@@ -216,6 +222,15 @@ a.reload{color:var(--accent);cursor:pointer;font-size:13px;margin-left:auto}
       <div class="tblscroll"><table id="cornertbl" class="bintbl"></table></div>
     </div>
     <div class="explain" id="ex_corner" style="margin-top:8px"></div>
+
+    <h2 id="h_sector">섹터별 벽 여유 <span class="hint">— <code>/scan</code> 실측. "이 코너의 <code>max_lateral_accel</code>을 올려도 되나"</span>
+      <span class="mlabox"><button id="sec_yaml" class="pjbtn">섹터 YAML 내려받기</button></span></h2>
+    <div id="sectorbox">
+      <div class="tblscroll"><table id="sectortbl" class="bintbl"></table></div>
+      <div class="tblscroll" style="margin-top:10px"><table id="sectorlaptbl" class="bintbl"></table></div>
+      <div id="sec_yaml_out" style="display:none"></div>
+      <div class="explain" id="ex_sector" style="margin-top:8px"></div>
+    </div>
 
     <h2>플롯 <span class="hint">— 아무 토픽·아무 필드나 골라 그린다 (bag이 스키마를 자체 포함)</span>
       <span class="mlabox"><button id="pj_add" class="pjbtn">+ 플롯 추가</button>
@@ -937,7 +952,7 @@ async function analyze(buffers){
       else start=null;}
   }
 
-  const S={track,scans,wp,laps,wpFull:wpnts,wpIdx,plotG:G,imu:IMU,estop,mppi,hasMap,dur,alatSource,
+  const S={track,scans,scanRaw,wp,laps,wpFull:wpnts,wpIdx,plotG:G,imu:IMU,estop,mppi,hasMap,dur,alatSource,
     cmd,plannedVx,xtrack,plannedStats,vesc:vescS,cmdErpm,cmdBrake,cmdServo,modeStr,odomLabel,poseSrc,
     loc,scanRate,stallDur,hasLocal:!!(lwpnts&&lwpnts.length)};
   const D=diagnose(S);
@@ -1237,6 +1252,194 @@ function measureMapCorners(tr,wpIdx,M,laps,mapCorners,grip){
   }
   out.sort((x,y)=>x.t0-y.t0);
   return out;
+}
+
+// ══ 섹터별 벽 여유 (2026-08-11) ═══════════════════════════════════════════════
+// "이 코너의 max_lateral_accel 권한을 올려도 되는가"를 /scan 실측으로 판정한다.
+// 🔴 플래너가 주는 d_left/d_right로 판정하면 안 된다 — 0807 실측에서 0.16~0.23 m
+//    낙관적이었다(같은 웨이포인트를 3랩 통과하며 전부 음수 오차). 라이다로 다시 잰다.
+// ⚠️ 경계를 **전 스캔·전 빔의 최소값**으로 모으면 안 된다. 이상 빔(바닥 반사·트랙 밖
+//    물체) 하나가 그 칸을 영구히 끌어내린다 — 2026-08-11에 실제로 그렇게 짰다가 트랙 폭을
+//    0.4~1.2 m 과소평가했고, 포즈·라인을 안 쓰는 독립 추정과 대조해서야 발견했다.
+//    스캔마다 하나씩만 뽑아 **중앙값**으로 모은다.
+const SEC_S_WINDOW=0.30;      // 이 s 창 안의 빔만 "지금 차 옆의 벽"으로 본다 [m]
+const SEC_LASER_FWD=0.27;     // base_link → laser (tf_static 실측, 회전 없음)
+const SEC_BEAM_STRIDE=2;      // 0.5° 간격이면 1 m에서 0.9 cm — 벽 검출에 충분
+const SEC_RANGE_MAX=6.0;      // 이보다 먼 빔은 벽이 아니다 [m]
+// 임계값 근거: 0807 전복은 라이다 실측 여유 0.117 m에서 벽에 닿았고, 직전 랩들이
+// 0.381 → 0.187로 이미 깎이고 있었다. p5 0.20 = 접촉 지점의 1.7배, min 0.12 = 바로 위.
+const SEC_CLR_P5_MIN=0.20, SEC_CLR_ABS_MIN=0.12, SEC_ERR_P95_MAX=0.35, SEC_TREND_MIN=-0.010;
+
+// 라인을 촘촘히(0.05 m) 재샘플 + 균일격자 해시. 웨이포인트 간격(0.25 m)에서 바로 최근접을
+// 잡으면 d 오차가 최대 간격/2만큼 실려 벽 여유 판정을 그대로 오염시킨다.
+function buildLineIndex(wp,step){
+  const M=wp.length,seg=new Float64Array(M),sw=new Float64Array(M);
+  for(let i=0;i<M;i++){const j=(i+1)%M;seg[i]=Math.hypot(wp[j].x-wp[i].x,wp[j].y-wp[i].y);}
+  for(let i=1;i<M;i++)sw[i]=sw[i-1]+seg[i-1];
+  const L=sw[M-1]+seg[M-1],n=Math.max(16,Math.floor(L/step));
+  const px=new Float64Array(n),py=new Float64Array(n),ps=new Float64Array(n);
+  let k=0;
+  for(let i=0;i<n;i++){const s=i*L/n;ps[i]=s;
+    while(k<M-1&&sw[k+1]<=s)k++;
+    const a=wp[k],b=wp[(k+1)%M],f=seg[k]>1e-9?(s-sw[k])/seg[k]:0;
+    px[i]=a.x+(b.x-a.x)*f;py[i]=a.y+(b.y-a.y)*f;}
+  const tx=new Float64Array(n),ty=new Float64Array(n);
+  for(let i=0;i<n;i++){const a=(i-1+n)%n,b=(i+1)%n;
+    const dx=px[b]-px[a],dy=py[b]-py[a],m=Math.hypot(dx,dy)||1;tx[i]=dx/m;ty[i]=dy/m;}
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  for(let i=0;i<n;i++){if(px[i]<x0)x0=px[i];if(px[i]>x1)x1=px[i];if(py[i]<y0)y0=py[i];if(py[i]>y1)y1=py[i];}
+  const cell=0.5,nx=Math.ceil((x1-x0)/cell)+2,ny=Math.ceil((y1-y0)/cell)+2,buckets=new Array(nx*ny);
+  for(let i=0;i<n;i++){const gx=Math.floor((px[i]-x0)/cell),gy=Math.floor((py[i]-y0)/cell),c=gy*nx+gx;
+    (buckets[c]||(buckets[c]=[])).push(i);}
+  return {n,px,py,ps,tx,ty,L,x0,y0,cell,nx,ny,buckets,sw,seg,M};
+}
+// (x,y) → {s, d}. d는 진행방향 기준 **왼쪽이 양수**.
+function lineProject(I,x,y){
+  const cx=Math.floor((x-I.x0)/I.cell),cy=Math.floor((y-I.y0)/I.cell);
+  let best=-1,bd=Infinity;
+  for(let r=0;r<=8;r++){
+    for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){
+      if(r>0&&Math.max(Math.abs(dx),Math.abs(dy))<r)continue;      // 새로 생긴 링만 훑는다
+      const gx=cx+dx,gy=cy+dy;if(gx<0||gy<0||gx>=I.nx||gy>=I.ny)continue;
+      const b=I.buckets[gy*I.nx+gx];if(!b)continue;
+      for(let q=0;q<b.length;q++){const i=b[q],ex=I.px[i]-x,ey=I.py[i]-y,d=ex*ex+ey*ey;
+        if(d<bd){bd=d;best=i;}}}
+    // 링 하나를 다 본 뒤에도 그 반경 안에 확실히 들어왔을 때만 확정 — 안 그러면 대각 셀의
+    // 더 가까운 점을 놓친다(격자 최근접 탐색의 고전적 오류).
+    if(best>=0&&bd<=(r*I.cell)*(r*I.cell))break;
+  }
+  if(best<0)return null;
+  const rx=x-I.px[best],ry=y-I.py[best];
+  return {s:((I.ps[best]+I.tx[best]*rx+I.ty[best]*ry)%I.L+I.L)%I.L,
+          d:I.tx[best]*ry-I.ty[best]*rx};
+}
+function secPct(a,q){if(!a.length)return NaN;const b=a.slice().sort((x,y)=>x-y);
+  const i=Math.min(b.length-1,Math.max(0,Math.round((b.length-1)*q)));return b[i];}
+function secMedian(a){return secPct(a,0.5);}
+
+function computeSectorClearance(S,mapCorners){
+  const wp=S.wpFull;
+  if(!wp||wp.length<20)return null;
+  const I=buildLineIndex(wp,0.05),tr=S.track,N=tr.length;
+  const L=I.L;
+  const arcDiff=(a,b)=>{let d=(a-b)%L;if(d>L/2)d-=L;if(d<-L/2)d+=L;return d;};
+
+  // ── 차량 Frenet + 자율/속도 게이트 ──
+  const cs=new Float64Array(N),cd=new Float64Array(N),okv=new Uint8Array(N);
+  const modeAt=(()=>{const m=S.modeStr||[];if(!m.length)return ()=>true;
+    return t=>{let lo=0,hi=m.length-1;if(t<=m[0][0])return m[0][1]==='autonomous';
+      while(lo+1<hi){const k=(lo+hi)>>1;if(m[k][0]<=t)lo=k;else hi=k;}return m[lo][1]==='autonomous';};})();
+  for(let i=0;i<N;i++){const p=lineProject(I,tr[i][1],tr[i][2]);
+    if(!p){cs[i]=NaN;continue;}
+    cs[i]=p.s;cd[i]=p.d;okv[i]=(tr[i][4]>1.5&&modeAt(tr[i][0]))?1:0;}
+
+  // ── 랩 번호: 보고서 나머지와 같은 정의를 쓰려고 computeLaps 결과를 재사용 ──
+  const lapList=(S.laps&&S.laps.list)?S.laps.list:[];
+  const lapAt=t=>{for(let i=0;i<lapList.length;i++)if(t>=lapList[i].t0&&t<=lapList[i].t1)return lapList[i].n;return -1;};
+
+  // ── 스캔 → 벽 여유 ──
+  const raw=S.scanRaw||[];
+  const clrL=[],clrR=[],clrS=[],clrLap=[];
+  const bndL=new Array(wp.length),bndR=new Array(wp.length);
+  for(let i=0;i<wp.length;i++){bndL[i]=[];bndR[i]=[];}
+  const poseAtT=t=>{let lo=0,hi=N-1;if(t<=tr[0][0])return 0;if(t>=tr[N-1][0])return N-1;
+    while(lo+1<hi){const k=(lo+hi)>>1;if(tr[k][0]<=t)lo=k;else hi=k;}return lo;};
+  for(let k=0;k<raw.length;k++){
+    const sc=raw[k],j=poseAtT(sc.t);
+    if(!okv[j]||!isFinite(cs[j]))continue;
+    const cx=tr[j][1],cy=tr[j][2],yaw=tr[j][3],cyaw=Math.cos(yaw),syaw=Math.sin(yaw);
+    const cap=Math.min(sc.rmax||SEC_RANGE_MAX,SEC_RANGE_MAX);
+    let nl=Infinity,nr=-Infinity,got=0;
+    for(let b=0;b<sc.ranges.length;b+=SEC_BEAM_STRIDE){
+      const r=sc.ranges[b];if(!(r>0.05&&r<cap))continue;
+      const a=sc.amin+b*sc.ainc,bx=SEC_LASER_FWD+r*Math.cos(a),by=r*Math.sin(a);
+      const p=lineProject(I,cx+cyaw*bx-syaw*by,cy+syaw*bx+cyaw*by);
+      if(!p)continue;
+      if(Math.abs(arcDiff(p.s,cs[j]))>SEC_S_WINDOW)continue;
+      got++;
+      if(p.d>cd[j]){if(p.d<nl)nl=p.d;}
+      else{if(p.d>nr)nr=p.d;}
+    }
+    if(got<3)continue;
+    const wi=Math.max(0,Math.min(wp.length-1,Math.round(cs[j]/L*wp.length)%wp.length));
+    const lp=lapAt(sc.t);
+    clrS.push(cs[j]);clrLap.push(lp);
+    clrL.push(isFinite(nl)?(nl-cd[j])-CAR_W/2:NaN);
+    clrR.push(isFinite(nr)?(cd[j]-nr)-CAR_W/2:NaN);
+    if(isFinite(nl))bndL[wi].push(nl);
+    if(isFinite(nr))bndR[wi].push(-nr);
+  }
+  const bndLm=bndL.map(v=>v.length>=3?secMedian(v):NaN);
+  const bndRm=bndR.map(v=>v.length>=3?secMedian(v):NaN);
+
+  // ── 섹터 = 코너(detectMapCorners 결과) + 그 사이 직선 ──
+  const M=wp.length,isC=new Uint8Array(M);
+  const cornerOf=new Array(M).fill(null);
+  (mapCorners||[]).forEach(c=>{let i=c.i0;for(let n=0;n<M;n++){isC[i]=1;cornerOf[i]=c.id;if(i===c.i1)break;i=(i+1)%M;}});
+  let start=0;while(start<M&&isC[start])start++;
+  if(start>=M)start=0;
+  const runs=[];let cur=null;
+  for(let n=0;n<M;n++){const i=(start+n)%M;
+    if(!cur||cur.c!==isC[i]||(isC[i]&&cornerOf[i]!==cur.turn)){cur={c:isC[i],turn:cornerOf[i],idx:[i]};runs.push(cur);}
+    else cur.idx.push(i);}
+  const segLen=new Float64Array(M);
+  for(let i=0;i<M;i++)segLen[i]=I.seg[i];
+
+  const wpOf=s=>Math.max(0,Math.min(M-1,Math.round(((s%L+L)%L)/L*M)%M));
+  const kap=wp.map(w=>Math.abs(w.kap));
+  const sectors=[];
+  runs.forEach((r,ri)=>{
+    const idx=r.idx,inSet=new Uint8Array(M);idx.forEach(i=>inSet[i]=1);
+    const len=idx.reduce((a,i)=>a+segLen[i],0);
+    if(len<0.4)return;
+    const err=[],al=[];
+    for(let i=0;i<N;i++){if(!okv[i]||!isFinite(cs[i]))continue;
+      if(!inSet[wpOf(cs[i])])continue;
+      err.push(Math.abs(cd[i]));if(isFinite(tr[i][5]))al.push(Math.abs(tr[i][5]));}
+    const cl=[],perLap={};
+    for(let i=0;i<clrS.length;i++){if(!inSet[wpOf(clrS[i])])continue;
+      [clrL[i],clrR[i]].forEach(v=>{if(isFinite(v)){cl.push(v);(perLap[clrLap[i]]||(perLap[clrLap[i]]=[])).push(v);}});}
+    // 주장 폭 vs 실측 폭 (양쪽 다 측정된 칸만)
+    const gaps=[];idx.forEach(i=>{if(isFinite(bndLm[i])&&isFinite(bndRm[i]))
+      gaps.push((wp[i].dl+wp[i].dr)-(bndLm[i]+bndRm[i]));});
+    // 랩별 p5 + 추세 [m/랩]
+    const lapRows=Object.keys(perLap).map(Number).filter(n=>n>=0).sort((a,b)=>a-b)
+      .map(n=>({lap:n,p5:secPct(perLap[n],0.05),n:perLap[n].length})).filter(o=>o.n>=5);
+    let trend=NaN;
+    if(lapRows.length>=4){let sx=0,sy=0,sxx=0,sxy=0;const m=lapRows.length;
+      lapRows.forEach((o,k)=>{sx+=k;sy+=o.p5;sxx+=k*k;sxy+=k*o.p5;});
+      const den=m*sxx-sx*sx;if(Math.abs(den)>1e-9)trend=(m*sxy-sx*sy)/den;}
+    sectors.push({i:sectors.length,corner:!!r.c,turn:r.turn,
+      s0:I.sw[idx[0]],s1:I.sw[idx[idx.length-1]]+segLen[idx[idx.length-1]],len,
+      k90:secPct(idx.map(i=>kap[i]),0.90),
+      alat50:secPct(al,0.5),alat95:secPct(al,0.95),
+      err50:secPct(err,0.5),err95:secPct(err,0.95),
+      clrP5:secPct(cl,0.05),clrMin:cl.length?Math.min(...cl):NaN,
+      gap:gaps.length?secMedian(gaps):NaN,trend,lapRows,nClr:cl.length});
+  });
+
+  // 판정 + 경계 스냅(YAML용). 분석 경계는 |κ| 임계 교차점이라 그립 캡이 이미 활성인 곳이다 —
+  // 거기서 스케일이 바뀌면 MCL s 지터(실측 σ 47 mm)가 캡을 계단으로 토글시킨다.
+  // ±1.5 m 안의 |κ| 최소점으로 옮기면 캡이 비활성인 곳에서 전환되어 지터가 출력에 도달 못 한다.
+  const snap=s=>{let best=s,bk=Infinity;
+    for(let i=0;i<M;i++){if(Math.abs(arcDiff(I.sw[i],s))>1.5)continue;
+      if(kap[i]<bk){bk=kap[i];best=I.sw[i];}}
+    return {s:best,k:isFinite(bk)?bk:NaN};};
+  sectors.forEach(x=>{
+    const rs=[];
+    if(!(x.nClr>0))rs.push('벽여유 미측정(/scan 없음)');
+    else{
+      if(!(x.clrP5>=SEC_CLR_P5_MIN))rs.push(`벽여유 p5 ${x.clrP5.toFixed(3)} < ${SEC_CLR_P5_MIN}`);
+      if(!(x.clrMin>=SEC_CLR_ABS_MIN))rs.push(`벽여유 min ${x.clrMin.toFixed(3)} < ${SEC_CLR_ABS_MIN}`);
+    }
+    if(x.err95>SEC_ERR_P95_MAX)rs.push(`횡오차 p95 ${x.err95.toFixed(3)} > ${SEC_ERR_P95_MAX}`);
+    if(isFinite(x.trend)&&x.trend<SEC_TREND_MIN)rs.push(`랩마다 여유 ${(x.trend*100).toFixed(1)} cm씩 감소`);
+    if(!x.corner)rs.push('직선 — 그립 캡이 비활성이라 올려도 이득 0');
+    x.reasons=rs;x.ok=rs.length===0;
+    if(x.corner){const a=snap(x.s0),b=snap(x.s1);x.ys0=a.s;x.ys1=b.s;x.yk0=a.k;x.yk1=b.k;}
+  });
+  const allLaps=[...new Set(sectors.flatMap(x=>x.lapRows.map(o=>o.lap)))].sort((a,b)=>a-b);
+  return {sectors,trackLen:L,laps:allLaps,nScan:raw.length,nUsed:clrS.length};
 }
 
 function segmentCorners(tr,grip){
@@ -1553,7 +1756,10 @@ function diagnose(S){
                   return pts;})()};}),
        idOf:corners.map(c=>mapCorners.findIndex(mc=>mc.id===c.turn))}
     : clusterTurns(corners,tr);
-  return {stats,gripUsed:grip,mlaAtAnalysis:MLA,corners,cornerSrc,mapCorners,turnInfo};
+  let sectorClr=null;
+  try{sectorClr=computeSectorClearance(S,mapCorners);}
+  catch(e){console.warn('섹터 벽여유 계산 실패',e);}
+  return {stats,gripUsed:grip,mlaAtAnalysis:MLA,corners,cornerSrc,mapCorners,turnInfo,sectorClr};
 }
 
 // ══ 렌더/뷰어 (데스크톱 도구의 3D 뷰어 코드 기반) ══
@@ -1846,6 +2052,138 @@ const CORNER_SLACK=0.85;   // 에이펙스가 한계속도의 이 비율 미만�
 // (주행 요레이트에서 뽑은 minRad는 랩마다 흔들려 기준으로 부적합).
 function mlaSpeed(c){const R=(c.mapBased&&isFinite(c.R))?c.R:c.minRad;
   return (isFinite(R)&&R<50)?Math.sqrt(MLA*R):null;}
+// ══ 섹터별 벽 여유 표 ═════════════════════════════════════════════════════════
+function fmtSec(v,n){return isFinite(v)?v.toFixed(n===undefined?3:n):'—';}
+function drawSectorTable(){
+  const el=document.getElementById('sectortbl'),el2=document.getElementById('sectorlaptbl');
+  const SC=DATA.sectorClr;
+  if(!el)return;
+  if(!SC||!SC.sectors.length){
+    el.innerHTML='<tbody><tr><td class="thin">글로벌 경로(<code>/global_waypoints</code>)가 없어 섹터를 자를 수 없습니다.</td></tr></tbody>';
+    if(el2)el2.innerHTML='';
+    setEx('ex_sector','섹터별 벽 여유·그립·추종오차.','판정 불가 — bag에 글로벌 경로가 없습니다.','#9aa4b2');return;}
+  const noScan=!SC.nUsed;
+  const H=['섹','종류','턴','s 구간 [m]','길이','κ p90',`실측 a_lat p50/p95 (설정 ${MLA.toFixed(1)})`,
+           '횡오차 p50/p95','벽여유 p5/min','주장−실측폭','랩 추세','판정'];
+  el.innerHTML='<thead><tr>'+H.map(h=>`<th>${h}</th>`).join('')+'</tr></thead><tbody>'
+    +SC.sectors.map(x=>{
+      const over=isFinite(x.alat95)&&x.alat95>MLA;
+      const verdict=x.ok?'<b style="color:#7ee787">🟢 상향 가능</b>'
+        :`<span style="color:${x.corner?'#e5484d':'#9aa4b2'}">${x.corner?'🔴 보류':'—'}</span>`;
+      const why=x.reasons.length?`<div class="tsub">${x.reasons.join(' · ')}</div>`:'';
+      return '<tr>'+[
+        x.i,x.corner?'<b>코너</b>':'직선',x.turn||'—',
+        `${x.s0.toFixed(1)}~${x.s1.toFixed(1)}`,fmtSec(x.len,2),fmtSec(x.k90),
+        `${fmtSec(x.alat50,2)} / <b style="color:${over?'#f5a623':'inherit'}">${fmtSec(x.alat95,2)}</b>`,
+        `${fmtSec(x.err50)} / ${fmtSec(x.err95)}`,
+        `${fmtSec(x.clrP5)} / ${fmtSec(x.clrMin)}`,
+        (isFinite(x.gap)?(x.gap>=0?'+':'')+x.gap.toFixed(3):'—'),
+        (isFinite(x.trend)?(x.trend>=0?'+':'')+(x.trend*100).toFixed(1)+' cm/랩':'—'),
+        verdict+why].map(v=>`<td>${v}</td>`).join('')+'</tr>';}).join('')+'</tbody>';
+
+  // 랩별 p5 — 단조 감소가 가장 중요한 신호
+  if(el2){
+    if(noScan||!SC.laps.length)el2.innerHTML='';
+    else{
+      const H2=['섹','종류'].concat(SC.laps.map(l=>'랩'+l)).concat(['추세']);
+      el2.innerHTML='<thead><tr><th colspan="'+H2.length+'">랩별 벽 여유 p5 [m] — 🔴 랩마다 단조 감소면 라인이 아니라 드리프트/누적 오차</th></tr><tr>'
+        +H2.map(h=>`<th>${h}</th>`).join('')+'</tr></thead><tbody>'
+        +SC.sectors.map(x=>{
+          const m={};x.lapRows.forEach(o=>m[o.lap]=o.p5);
+          return '<tr>'+[x.i,x.corner?'<b>코너</b>':'직선'].concat(
+            SC.laps.map(l=>{const v=m[l];if(!isFinite(v))return '—';
+              const col=v<SEC_CLR_ABS_MIN?'#e5484d':(v<SEC_CLR_P5_MIN?'#f5a623':'inherit');
+              return `<span style="color:${col}">${v.toFixed(3)}</span>`;}),
+            [isFinite(x.trend)?(x.trend>=0?'+':'')+(x.trend*100).toFixed(1):'—'])
+            .map(v=>`<td>${v}</td>`).join('')+'</tr>';}).join('')+'</tbody>';}
+  }
+  const green=SC.sectors.filter(x=>x.ok);
+  const worst=SC.sectors.filter(x=>x.corner&&isFinite(x.clrMin)).sort((a,b)=>a.clrMin-b.clrMin)[0];
+  const concl=noScan
+    ? '<code>/scan</code>이 bag에 없어 벽 여유를 못 쟀습니다 — 녹화 토픽에 <code>/scan</code>을 넣으세요. 나머지 열만 유효합니다.'
+    : (green.length
+        ? `<b style="color:#7ee787">섹터 ${green.map(x=>x.i).join(', ')}</b>가 여유·추종오차 기준을 통과했습니다. `
+          +`한 섹터씩 <code>sector scale</code> +0.1만 올리고 매번 재측정하세요.`
+        : `상향 가능한 코너가 없습니다. 가장 빡빡한 곳은 ${worst?`섹터 ${worst.i} (min ${worst.clrMin.toFixed(3)} m)`:'—'} — `
+          +`여기가 풀리기 전에는 <code>max_lateral_accel</code> 전역 상향도 위험합니다.`);
+  setEx('ex_sector',
+    '섹터별로 라이다 실측 벽 여유·실측 그립·추종오차를 재서 그 코너의 횡가속 권한을 올려도 되는지 판정합니다. '
+    +`기준: 벽여유 p5 ≥ ${SEC_CLR_P5_MIN} · min ≥ ${SEC_CLR_ABS_MIN} · 횡오차 p95 ≤ ${SEC_ERR_P95_MAX} · 랩 추세 ≥ ${(SEC_TREND_MIN*100).toFixed(0)} cm/랩 `
+    +'(0807 전복이 실측 여유 0.117 m에서 접촉했고 직전 랩들이 이미 깎이고 있었다 — 거기서 잡은 값). '
+    +'⚠️ 벽여유는 <b>차의 실제 위치</b> 기준이라 라인 품질이 아니라 “지금 안 부딪히는가”를 잽니다. '
+    +'“주장−실측폭”이 크게 +면 플래너 경계 데이터가 낙관적이라는 뜻(0807: 0.16~0.23 m). '
+    +'트랙에 장애물이 있으면 <code>/scan</code>은 그걸 벽으로 봅니다 — 클린 랩 bag으로 재세요.',
+    concl,green.length?'#7ee787':'#f5a623');
+
+  const btn=document.getElementById('sec_yaml');
+  if(btn)btn.onclick=()=>{
+    const y=sectorYamlText(SC);
+    // 🔑 파일 저장에 **의존하지 않는다**. 이 페이지는 아티팩트(샌드박스 iframe)로도 배포되는데,
+    //    거기서는 sandbox에 allow-downloads가 없으면 브라우저가 다운로드를 **조용히 차단**한다
+    //    (예외도 안 나서 코드로 감지할 수 없다). 그래서 항상 화면에 뿌리고, 저장은 덤으로 시도한다.
+    showSectorYaml(y);
+    trySectorDownload(y);
+  };
+}
+
+// 섹터 YAML 본문. 다운로드/화면표시가 같은 문자열을 쓰도록 한 곳에서 만든다.
+function sectorYamlText(SC){
+  const cs=SC.sectors.filter(x=>x.corner);
+  return ['# bag_analyzer 웹앱 자동 생성 — 검토 후 scale 조정',
+    '# scale은 max_lateral_accel에 곱해진다. 1.0 미만은 컨트롤러가 clamp로 막는다',
+    '# (전역 MLA를 보수값으로 두고 여기서만 여는 설계 — 미수신 시 항상 느려지는 쪽)',
+    '# 여기 없는 구간은 자동으로 scale 1.0. 직선은 그립 캡이 비활성이라 넣어도 이득 0.',
+    `track_length: ${SC.trackLen.toFixed(3)}   # 컨트롤러가 이 값으로 라인 동일성을 검증한다`,
+    'blend_len: 0.5',
+    'sectors:'].concat(cs.flatMap(x=>{
+    const s0=x.ys0??x.s0, s1=x.ys1??x.s1, L=SC.trackLen;
+    const tag=`${x.turn||('섹터'+x.i)} κp90 ${fmtSec(x.k90)}, 경계κ ${fmtSec(x.yk0)}/${fmtSec(x.yk1)}, ${x.ok?'🟢 상향 가능':'🔴 보류'}`;
+    const row=(a,b,note)=>`  - { s_start: ${a.toFixed(2)}, s_end: ${b.toFixed(2)}, scale: 1.0 }   # ${tag}${note}`;
+    // 🔴 랩을 넘는 구간(s0 > s1)은 **두 줄로 쪼개야** 한다. 컨트롤러도 sector_pub.py도
+    //    s_start < s_end만 받는다(그래야 구간 판정이 단순하고, 값이 바뀌는 전이점에만
+    //    블렌딩이 걸려 결승선에서 파이지 않는다). 안 쪼개면 발행 단계에서 통째로 거부된다.
+    return (s0<=s1) ? [row(s0,s1,'')]
+                    : [row(s0,L,' (랩 넘어감 1/2)'), row(0,s1,' (랩 넘어감 2/2)')];
+  })).join('\n')+'\n';
+}
+
+function trySectorDownload(text){
+  try{
+    const url=URL.createObjectURL(new Blob([text],{type:'text/yaml'}));
+    const a=document.createElement('a');
+    a.href=url;a.download='sectors.yaml';a.rel='noopener';
+    // Firefox는 앵커가 DOM에 붙어 있어야 click()이 먹는다.
+    document.body.appendChild(a);a.click();document.body.removeChild(a);
+    // ⚠️ click() 직후 revoke하면 다운로드가 시작되기 전에 URL이 죽는다(레이스). 늦게 푼다.
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+  }catch(e){/* 화면 표시가 이미 있으므로 조용히 넘어간다 */}
+}
+
+function showSectorYaml(text){
+  const box=document.getElementById('sec_yaml_out');if(!box)return;
+  box.style.display='';
+  box.innerHTML='<div class="secyhdr">sectors.yaml <span class="hint">— 파일 저장이 차단되는 환경'
+    +'(아티팩트 샌드박스)에서는 아래를 복사해 <code>sectors.yaml</code>로 저장하세요. '
+    +'발행: <code>python3 tools/sector_pub.py sectors.yaml --watch</code></span>'
+    +'<button class="pjbtn" id="sec_yaml_copy">복사</button></div>'
+    +'<pre id="sec_yaml_pre"></pre>';
+  document.getElementById('sec_yaml_pre').textContent=text;
+  const cp=document.getElementById('sec_yaml_copy');
+  cp.onclick=()=>{
+    const done=()=>{cp.textContent='복사됨 ✓';setTimeout(()=>cp.textContent='복사',1500);};
+    // 클립보드 API도 샌드박스에서 막힐 수 있다 → 실패하면 텍스트를 선택해 Ctrl+C가 되게 한다.
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(done,()=>selectSectorYaml(cp));
+    }else selectSectorYaml(cp);
+  };
+}
+function selectSectorYaml(cp){
+  const pre=document.getElementById('sec_yaml_pre');if(!pre)return;
+  const r=document.createRange();r.selectNodeContents(pre);
+  const s=window.getSelection();s.removeAllRanges();s.addRange(r);
+  if(cp){cp.textContent='선택됨 — Ctrl+C';setTimeout(()=>cp.textContent='복사',2500);}
+}
+
 function drawCornerTable(){
   const el=document.getElementById('cornertbl');if(!el)return;
   const C=DATA.corners||[],L=DATA.laps;
@@ -2591,10 +2929,10 @@ function renderReport(D,name){
       const v=parseFloat(mlaIn.value);
       if(!isFinite(v)||v<=0)return;
       MLA=v;localStorage.setItem(MLA_KEY,String(v));
-      drawCornerTable();computeClusterScales();
+      drawCornerTable();drawSectorTable();computeClusterScales();
       drawTrajectory();fillExplain(DATA);draw();};
   }
-  fillExplain(D);drawSpeedBinTable();drawCornerTable();renderLaps();computeClusterScales();
+  fillExplain(D);drawSpeedBinTable();drawCornerTable();drawSectorTable();renderLaps();computeClusterScales();
   pjInit();   // 플롯 탭: 토픽 트리 구성 + 빈 플롯 1개
   computeBounds();defcam();cur=T0;playing=false;
   wireControls();

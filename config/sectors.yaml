@@ -1,0 +1,35 @@
+# sectors.yaml — 섹터별 max_lateral_accel 스케일 (control_map_node의 sector_scale_*)
+#
+# 이 파일이 **주행에 적용되는 실물**이다. 고치는 값은 `scale` 하나뿐이고, 나머지(s 구간·
+# track_length)는 bag 분석 결과라 손대지 말 것 — 라인이 바뀌면 도구로 다시 뽑는다.
+#
+#   적용되는 횡가속 권한 = max_lateral_accel(런치 인자) × scale
+#   예) 전역 6.0에서  scale 1.10 → 6.60 / 1.17 → 7.02 / 1.25 → 7.50
+#
+# 쓰는 법:
+#   1) 이 파일의 🟢 섹터만 scale을 +0.1 올린다 (한 번에 하나씩!)
+#   2) python3 tools/sector_pub.py config/sectors.yaml --watch   ← 저장하면 즉시 재발행
+#   3) ros2 launch f1tenth_control control_real.launch.py sector_scale_enable:=true
+#   4) 컨트롤러 로그 끝에서 `| 섹터 MLA 6.60 (×1.10)` 확인
+#   5) 새 bag 녹화 → analyze_sector_clearance.py로 그 섹터가 여전히 🟢인지 재확인
+#
+# ⚠️ scale < 1.0은 금지(발행기·컨트롤러 양쪽에서 거부). 느리게 하려면 전역 max_lateral_accel을
+#    낮출 것 — 1.0 미만을 허용하면 "테이블을 잃으면 위험 코너가 빨라지는" 구조가 된다.
+# ⚠️ 🔴 보류 섹터는 벽 여유/횡오차 기준을 통과 못 한 곳이다. 올리지 말 것.
+# ⚠️ 라인(글로벌 경로)을 재생성했으면 이 파일은 **폐기**하고 새 bag으로 다시 뽑는다.
+#    track_length가 안 맞으면 컨트롤러가 테이블을 통째로 버린다(로그에 🔴로 찍힌다).
+#
+# 아래 초안: run_0810_205943 (12랩) 기준, 전부 1.0(= 현 거동과 동일)에서 시작한다.
+# bag_analyzer 웹앱 자동 생성 — 검토 후 scale 조정
+# scale은 max_lateral_accel에 곱해진다. 1.0 미만은 컨트롤러가 clamp로 막는다
+# (전역 MLA를 보수값으로 두고 여기서만 여는 설계 — 미수신 시 항상 느려지는 쪽)
+# 여기 없는 구간은 자동으로 scale 1.0. 직선은 그립 캡이 비활성이라 넣어도 이득 0.
+track_length: 35.401   # 컨트롤러가 이 값으로 라인 동일성을 검증한다
+blend_len: 0.5
+sectors:
+  - { s_start: 13.31, s_end: 20.34, scale: 1.0 }   # T2 κp90 0.549, 경계κ 0.000/0.320, 🟢 상향 가능
+  - { s_start: 20.34, s_end: 24.60, scale: 1.0 }   # T3 κp90 0.539, 경계κ 0.320/0.032, 🟢 상향 가능
+  - { s_start: 24.60, s_end: 29.62, scale: 1.0 }   # T4 κp90 0.469, 경계κ 0.032/0.000, 🔴 보류
+  - { s_start: 31.89, s_end: 35.40, scale: 1.0 }   # T5 κp90 0.632, 경계κ 0.000/0.316, 🔴 보류 (랩 넘어감 1/2)
+  - { s_start: 0.00, s_end: 2.01, scale: 1.0 }   # T5 κp90 0.632, 경계κ 0.000/0.316, 🔴 보류 (랩 넘어감 2/2)
+  - { s_start: 2.01, s_end: 6.28, scale: 1.0 }   # T1 κp90 0.554, 경계κ 0.316/0.000, 🟢 상향 가능
