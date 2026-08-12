@@ -326,6 +326,15 @@ public:
         sector_scale_global_only_ = declare_parameter<bool>("sector_scale_global_only", true);
         sector_scale_state_topic_ = declare_parameter<std::string>("sector_scale_state_topic", "/state");
         sector_scale_state_timeout_ = declare_parameter<double>("sector_scale_state_timeout", 1.0);
+        // 🔴 테이블 데드맨. 발행자가 이 시간 넘게 조용하면 스케일을 버리고 전역 MLA로 돌아간다.
+        //   `sector_pub.py`는 latch(transient_local) 한 번만 쏘고 조용해도 되지만,
+        //   `sector_learner.py`처럼 **주행 중 값을 바꾸는** 발행자가 붙으면 얘기가 달라진다 —
+        //   학습기가 코너 직전에 scale을 올리고 죽으면, latch된 마지막 표가 거버넌스 없이
+        //   영구히 살아남는다(불변식 "모든 실패는 느려지는 방향"이 깨지는 유일한 구멍이었다).
+        //   그래서 발행자는 1 Hz로 같은 표를 재발행하고, 여기서 신선도를 본다.
+        // ⚠️ 0이면 비활성 = 구 거동(한 번 받은 표를 영구 유지). latch만 쓰는 구성에서
+        //   `sector_pub.py`를 띄웠다 내리는 운용을 하고 있다면 0으로 둘 것.
+        sector_scale_timeout_ = declare_parameter<double>("sector_scale_timeout", 3.0);
 
         // L1 횡가속 분모로 목표점까지의 **실제** 직선거리를 쓸지. 목표점은 호 길이 기준으로
         // 고르므로 |목표점−차량| != L1_distance다(07-27 bag 실측 비율 중앙 1.06~1.31, p95 1.72).
@@ -458,6 +467,7 @@ public:
         }
         drive_mode_last_recv_time_ = this->now();
         sector_state_last_recv_time_ = this->now();   // 노드 클럭 타입으로 초기화
+        sector_table_last_recv_time_ = this->now();
 
         // 섹터 스케일 구독. transient_local이라 컨트롤러가 늦게 떠도 마지막 테이블을 받는다.
         if (sector_scale_enable_) {
@@ -481,13 +491,38 @@ public:
                         }
                     });
             }
+            // 테이블 데드맨 감시. 스케일은 **수신 콜백에서 웨이포인트에 구워 두는** 구조라
+            // (50 Hz 루프를 가볍게 유지하려는 설계), 신선도가 끊긴 순간 누가 다시 굽지 않으면
+            // 옛 스케일이 배열에 그대로 남는다. 그래서 전이를 감시해 한 번만 되굽는다.
+            if (sector_scale_timeout_ > 0.0) {
+                sector_deadman_timer_ = this->create_wall_timer(
+                    std::chrono::milliseconds(500), [this]() {
+                        // ⚠️ 테이블을 **한 번도 못 받은** 상태는 "끊김"이 아니다(발행자가 아직
+                        //    안 떴을 뿐). 이걸 안 거르면 기동 직후 매번 가짜 경고가 뜬다.
+                        if (!sector_table_seen_) return;
+                        const bool fresh = sector_table_fresh();
+                        if (fresh == sector_table_fresh_prev_) return;
+                        sector_table_fresh_prev_ = fresh;
+                        if (!fresh) {
+                            apply_sector_scales(waypoints_);
+                            apply_sector_scales(local_waypoints_);
+                            RCLCPP_WARN(this->get_logger(),
+                                "🔴 섹터 테이블이 %.1fs 넘게 끊겼다 — 전역 MLA %.2f로 복귀. "
+                                "발행자(sector_pub/sector_learner)가 죽었는지 확인할 것",
+                                sector_scale_timeout_, max_lateral_accel_);
+                        }
+                    });
+            }
             RCLCPP_INFO(this->get_logger(),
                         "섹터 횡가속 스케일 활성 — %s 구독 (scale ∈ [1.0, %.2f], 블렌딩 %.2f m, "
-                        "전역 MLA %.2f, %s)",
+                        "전역 MLA %.2f, %s, 데드맨 %s)",
                         sector_scale_topic_.c_str(), sector_scale_max_, sector_scale_blend_,
                         max_lateral_accel_,
                         sector_scale_global_only_
-                            ? "회피/추월 중 자동 1.0 복귀" : "⚠️ 회피 중에도 적용(global_only=false)");
+                            ? "회피/추월 중 자동 1.0 복귀" : "⚠️ 회피 중에도 적용(global_only=false)",
+                        sector_scale_timeout_ > 0.0
+                            ? (std::to_string(sector_scale_timeout_).substr(0, 4) + "s").c_str()
+                            : "꺼짐(테이블 영구 유지)");
         }
 
         // 조향 트림 자동 보상 설정을 기동 시 1회 남긴다 — 나중에 로그만 보고 "그때 켜져
@@ -1441,16 +1476,32 @@ private:
             }
             parsed.push_back({s0, s1, sc});
         }
+        // 내용 서명 — 재발행이 잦으므로 "실제로 바뀌었나"를 싸게 판정하기 위한 것.
+        double sig = decl_len * 7919.0 + static_cast<double>(parsed.size());
+        for (const auto& p : parsed) sig += p.s0 * 31.0 + p.s1 * 131.0 + p.scale * 1009.0;
+
         sectors_ = std::move(parsed);
         sector_decl_track_len_ = decl_len;
         rebuild_sector_profile();
+        const bool was_stale = sector_table_seen_ && !sector_table_fresh();
         sector_table_seen_ = true;
+        sector_table_last_recv_time_ = this->now();
+        if (was_stale) {
+            RCLCPP_INFO(this->get_logger(), "섹터 테이블 재개 — 발행자가 돌아왔다");
+        }
         if (sector_track_len_ > 0.0) validate_sector_track_length(sector_track_len_);
         apply_sector_scales(waypoints_);
         apply_sector_scales(local_waypoints_);
-        RCLCPP_INFO(this->get_logger(), "섹터 테이블 갱신: %zu구간 / 랩길이 %.2f m%s",
-                    sectors_.size(), decl_len,
-                    sector_len_ok_ ? "" : " (⚠️ 라인 길이 미검증 — 글로벌 경로 수신 대기)");
+        // ⚠️ 데드맨 때문에 발행자가 1 Hz로 **같은 표를 계속 재발행**한다. 수신할 때마다
+        //    로그를 찍으면 초당 한 줄이 쌓이는데, 젯슨에서 로그 폭주는 VESC 시리얼을 굶겨
+        //    odom을 무너뜨리는 실측 경로다(CLAUDE.md "작업 시 주의사항"). 내용이 실제로
+        //    바뀐 경우에만 찍는다.
+        if (sig != sector_table_sig_ || was_stale) {
+            sector_table_sig_ = sig;
+            RCLCPP_INFO(this->get_logger(), "섹터 테이블 갱신: %zu구간 / 랩길이 %.2f m%s",
+                        sectors_.size(), decl_len,
+                        sector_len_ok_ ? "" : " (⚠️ 라인 길이 미검증 — 글로벌 경로 수신 대기)");
+        }
     }
 
     // 블렌딩 없는 계단 함수. 구간이 겹치면 큰 쪽(발행 쪽에서 겹침을 금지하지만 방어적으로).
@@ -1517,8 +1568,16 @@ private:
 
     // 스케일을 지금 적용해도 되는가. ⚠️ "모르겠으면 끈다"가 원칙이다 — 여기서 애매한 걸
     // 켜는 쪽으로 처리하면 불변식(모든 실패는 느려지는 방향)이 깨진다.
+    // 테이블이 신선한가. 데드맨이 꺼져 있으면(0) 항상 참 = 구 거동.
+    bool sector_table_fresh() const {
+        if (sector_scale_timeout_ <= 0.0) return true;
+        if (!sector_table_seen_) return false;
+        return (this->now() - sector_table_last_recv_time_).seconds() <= sector_scale_timeout_;
+    }
+
     bool sector_active() const {
         if (!sector_scale_enable_ || !sector_table_seen_ || !sector_len_ok_) return false;
+        if (!sector_table_fresh()) return false;
         if (!sector_scale_global_only_) return true;
         // /state를 한 번도 못 받았거나 끊겼으면 회피 중인지 알 수 없다 → 끈다.
         // (state_machine을 안 띄우는 시뮬에서는 이 경로로 항상 비활성이 된다. 의도된 것 —
@@ -1539,11 +1598,12 @@ private:
             const bool state_stale =
                 sector_state_seen_ &&
                 (this->now() - sector_state_last_recv_time_).seconds() > sector_scale_state_timeout_;
-            const char* why = !sector_table_seen_ ? "테이블 미수신"
-                            : !sector_len_ok_     ? "라인 불일치"
-                            : !sector_state_seen_ ? "/state 미수신"
-                            : state_stale         ? "/state 끊김"
-                                                  : "회피/추월 중";
+            const char* why = !sector_table_seen_     ? "테이블 미수신"
+                            : !sector_len_ok_         ? "라인 불일치"
+                            : !sector_table_fresh()   ? "테이블 끊김"
+                            : !sector_state_seen_     ? "/state 미수신"
+                            : state_stale             ? "/state 끊김"
+                                                      : "회피/추월 중";
             std::snprintf(buf, sizeof(buf), " | 섹터: 비활성(%s)", why);
         } else {
             const double m = (applied_mla > 0.0) ? applied_mla : max_lateral_accel_;
@@ -1712,6 +1772,11 @@ private:
     //    /state 발행자가 없을 때 회피 여부를 모르는 채로 스케일이 먹는다.
     bool sector_on_global_ = false, sector_state_seen_ = false;
     double sector_scale_state_timeout_ = 1.0;
+    double sector_scale_timeout_ = 3.0;              // 테이블 데드맨, 0이면 비활성
+    rclcpp::Time sector_table_last_recv_time_;
+    bool sector_table_fresh_prev_ = true;            // 데드맨 전이 검출용
+    double sector_table_sig_ = 0.0;                  // 재발행 로그 억제용 내용 서명
+    rclcpp::TimerBase::SharedPtr sector_deadman_timer_;
     double sector_decl_track_len_ = 0.0;  // 테이블이 선언한 랩 길이
     double sector_track_len_ = 0.0;       // 실제 글로벌 경로에서 잰 랩 길이
     rclcpp::Time sector_state_last_recv_time_;

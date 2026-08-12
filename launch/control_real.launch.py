@@ -142,7 +142,11 @@ def generate_launch_description():
     # 경합(조향 덜컹거림)한다.
 
 
-    sector_pub_node = common.build_sector_pub_node()
+    # 섹터 스케일 테이블 발행자. 2026-08-12에 sector_pub.py를 흡수해 이것 하나가 됐다.
+    #   기본 static = 표를 그대로 발행(구 sector_pub 거동) + 랩별 게이트 진단 로그
+    #   연습: sector_learn_mode:=explore sector_learn_out:=~/learned.yaml
+    #   결선: 그 결과를 sector_scale_file로 싣고 sector_learn_mode:=guard (하향만)
+    sector_learner_node = common.build_sector_learner_node()
 
     return LaunchDescription([
         *common.declare_common_args(sector_scale_enable_default='true'),
@@ -155,5 +159,5 @@ def generate_launch_description():
         base_max_accel_arg,
         steering_control,
         drive_source_selector,
-        sector_pub_node,
+        sector_learner_node,
     ])

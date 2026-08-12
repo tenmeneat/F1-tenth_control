@@ -3,14 +3,20 @@
 # 이 파일이 **주행에 적용되는 실물**이다. 고치는 값은 `scale` 하나뿐이고, 나머지(s 구간·
 # track_length)는 bag 분석 결과라 손대지 말 것 — 라인이 바뀌면 도구로 다시 뽑는다.
 #
-#   적용되는 횡가속 권한 = max_lateral_accel(런치 인자) × scale
-#   예) 전역 6.0에서  scale 1.10 → 6.60 / 1.17 → 7.02 / 1.25 → 7.50
+#   적용되는 횡가속 권한 = max_lateral_accel(런치 인자, 실차 기본 7.0) × scale
+#   예) 전역 7.0에서  scale 1.10 → 7.70 / 1.20 → 8.40 / 1.30 → 9.10
 #
 # 쓰는 법:
-#   1) ros2 launch f1tenth_control control_real.launch.py (sector_scale_enable 기본값: true, sector_pub 자동 기동)
-#   2) 이 파일의 🟢 섹터 scale을 변경 후 저장하기만 하면 --watch에 의해 즉시 자동 재발행! (별도 터미널 불필요)
-#   3) 컨트롤러 로그 끝에서 `| 섹터 MLA 6.60 (×1.10)` 확인
+#   1) ros2 launch f1tenth_control control_real.launch.py
+#      (sector_scale_enable 기본: true → sector_learner가 자동 기동해 이 파일을 발행)
+#   2) 이 파일의 🟢 섹터 scale을 변경 후 저장하기만 하면 즉시 자동 재발행! (별도 터미널 불필요)
+#   3) 컨트롤러 로그 끝에서 `| 섹터 MLA 7.70 (×1.10)` 확인
 #   4) 새 bag 녹화 → analyze_sector_clearance.py로 그 섹터가 여전히 🟢인지 재확인
+#
+# 🔵 2026-08-12: 발행기가 sector_learner.py 하나로 통합됐다(sector_pub.py 은퇴).
+#    기본 모드 `static`은 이 파일을 그대로 발행할 뿐 값을 **안 바꾼다** — 구 sector_pub과
+#    동일한 거동에 랩별 게이트 진단 로그만 얹힌다. 자율 학습을 원하면
+#    `sector_learn_mode:=explore`(연습, 상향+하향) / `:=guard`(결선, 하향만).
 #
 # ⚠️ scale < 1.0은 금지(발행기·컨트롤러 양쪽에서 거부). 느리게 하려면 전역 max_lateral_accel을
 #    낮출 것 — 1.0 미만을 허용하면 "테이블을 잃으면 위험 코너가 빨라지는" 구조가 된다.

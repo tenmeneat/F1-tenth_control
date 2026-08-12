@@ -188,6 +188,30 @@ def declare_common_args(sector_scale_enable_default='false'):
             'sector_scale_state_timeout', default_value='1.0',
             description='/state 신선도 [s]. 넘으면 스케일 비활성(모르면 끈다)'
         ),
+        DeclareLaunchArgument(
+            'sector_scale_timeout', default_value='3.0',
+            description='섹터 테이블 데드맨 [s], 0이면 비활성. 발행자가 이만큼 조용하면 '
+                        '전역 MLA로 복귀. 학습기가 값을 올린 채 죽는 경우를 막는다 '
+                        '(발행자는 1 Hz로 같은 표를 재발행한다)'
+        ),
+
+        # ── 섹터 학습기 (2026-08-12 신설) ──
+        DeclareLaunchArgument(
+            'sector_learn_mode', default_value='static',
+            description='static=scale 고정(표를 그대로 발행, 게이트는 로그만 — 구 sector_pub 거동) / '
+                        'guard=하향만(결선, 안전) / explore=상향+하향(연습 전용). '
+                        '⚠️ explore는 차가 스스로 코너 속도를 올린다 — E-stop에 손을 올릴 것'
+        ),
+        DeclareLaunchArgument(
+            'sector_learn_watch', default_value='true',
+            description='sectors.yaml 저장을 감시해 재로드(라이브 튜닝). '
+                        '⚠️ 재로드는 학습 상태를 초기화한다'
+        ),
+        DeclareLaunchArgument(
+            'sector_learn_out', default_value='',
+            description='학습 결과 저장 경로. 비우면 저장 안 함. '
+                        '연습에서 뽑아 결선 sectors.yaml로 쓰는 것이 의도된 흐름'
+        ),
 
         # ── 조향 체인 (2026-07-30 신설) ──
         # 명령각 중 바퀴가 실제로 내는 비율. 0.41 명령 → 실측 ~0.30(74%, 07-28 3회 재현,
@@ -472,6 +496,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'sector_scale_global_only': LaunchConfiguration('sector_scale_global_only'),
             'sector_scale_state_topic': LaunchConfiguration('sector_scale_state_topic'),
             'sector_scale_state_timeout': LaunchConfiguration('sector_scale_state_timeout'),
+            'sector_scale_timeout': LaunchConfiguration('sector_scale_timeout'),
         }]
     )
 
@@ -485,19 +510,28 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
 #    시뮬은 Mux 없이 drive_source_selector가 자율 명령을 /drive로 직결한다.
 
 
-def build_sector_pub_node():
-    """섹터 스케일 테이블 발행기 노드 (control_map_node의 sector_scale_* 짝).
-    sector_scale_enable:=true 일 때 --watch 모드로 기동되어 파일 저장 시 자동 재발행."""
+def build_sector_learner_node():
+    """섹터 scale 발행기 겸 온라인 학습기 (AIMD). /sector_scales의 **유일한** 발행자다
+    (2026-08-12에 sector_pub.py를 흡수해 은퇴시켰다).
+
+    🔑 컨트롤러는 손대지 않는다 — 발행 토픽·레이아웃이 sector_pub과 동일하므로
+       컨트롤러의 검증(scale ≥ 1.0 / track_length 대조 / /state 게이팅 / 데드맨)이
+       출력에 그대로 걸린다. 기본 모드 static은 표를 안 바꾸므로 구 sector_pub과 동일하다.
+
+    ⚠️ `--mode explore`는 **연습 전용**이다. 차가 랩마다 코너 속도를 스스로 올린다.
+    """
     return Node(
         package='f1tenth_control',
-        executable='sector_pub.py',
-        name='sector_pub',
+        executable='sector_learner.py',
+        name='sector_learner',
         output='screen',
         arguments=[
             LaunchConfiguration('sector_scale_file'),
-            '--watch',
-            '--scale-max', LaunchConfiguration('sector_scale_max'),
+            '--mode', LaunchConfiguration('sector_learn_mode'),
+            '--watch', LaunchConfiguration('sector_learn_watch'),
+            '--out', LaunchConfiguration('sector_learn_out'),
             '--topic', LaunchConfiguration('sector_scale_topic'),
+            '--odom', LaunchConfiguration('odom_topic'),
         ],
         condition=IfCondition(LaunchConfiguration('sector_scale_enable')),
     )

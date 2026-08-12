@@ -118,19 +118,19 @@ install(FILES control_code/LUT_calibrated.csv
   DESTINATION share/${PROJECT_NAME}/cfg
 )
 
-# 섹터 스케일 테이블 — scripts/sector_pub.py가 읽어 /sector_scales로 발행한다.
+# 섹터 스케일 테이블 — scripts/sector_learner.py가 읽어 /sector_scales로 발행한다.
 # ⚠️ --symlink-install로 빌드하면 install 쪽이 src를 가리키는 심볼릭 링크가 되어
 #    **재빌드 없이 값 수정이 즉시 반영**된다(런치 파일과 같은 성질).
 install(FILES config/sectors.yaml
   DESTINATION share/${PROJECT_NAME}/config
 )
 
-# 섹터 스케일 발행기 실행 파일 설치 (런치 노드로 구동 가능하도록)
+# 섹터 스케일 발행기/학습기 실행 파일 설치 (런치 노드로 구동)
 # 🔴 위치가 tools/가 아니라 scripts/인 이유: jetsonup이 `--exclude=/src/f1tenth_control/tools/`로
 #    tools/를 **젯슨에 보내지 않는다**(랩탑 전용 분석 도구 5.8 MB를 빼려는 것). 실차 런치가
 #    이 파일을 노드로 띄우게 된 순간부터 이건 분석 도구가 아니라 **런타임 노드**라,
 #    tools/에 두면 젯슨 빌드가 install 단계에서 "No such file or directory"로 실패한다.
-install(PROGRAMS scripts/sector_pub.py
+install(PROGRAMS scripts/sector_learner.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
