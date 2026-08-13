@@ -69,10 +69,6 @@ LATCHED = QoSProfile(depth=1,
                      durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
                      history=QoSHistoryPolicy.KEEP_LAST)
 
-# ⚠️ 센서 스트림은 **BEST_EFFORT로 구독**해야 한다. 라이다·IMU·odom 발행자가
-#    BEST_EFFORT면 RELIABLE 구독자는 QoS 비호환으로 **한 건도 못 받는다**(조용히 0 Hz가
-#    되고 노드는 정상처럼 보인다). 반대로 발행자가 RELIABLE이어도 BEST_EFFORT 구독자는
-#    정상 수신하므로 이쪽이 항상 안전한 선택이다. rosbag 재생에서 실제로 걸렸다.
 SENSOR = QoSProfile(depth=10,
                     reliability=QoSReliabilityPolicy.BEST_EFFORT,
                     durability=QoSDurabilityPolicy.VOLATILE,
@@ -92,14 +88,6 @@ CLR_ABS_MIN  = 0.12    # 벽 여유 최소 [m]
 ERR_P95_MAX  = 0.35    # 횡오차 p95 [m]
 SAT_FRAC_MAX = 0.02    # 조향 포화 허용 비율
 
-# K_us 게이트 — ⚠️ 랩별·섹터별 K_us 추정은 **매우 시끄럽다**(0811 실측: 같은 섹터에서
-#   랩마다 0.0022~0.0096, 4배). 그래서 세 가지를 지킨다:
-#   ① 기준선은 초기 KUS_BASE_LAPS 랩의 중앙값으로 **한 번 정하고 고정**한다.
-#      (러닝 최소값으로 잡으면 기준선이 랩마다 내려가 게이트가 계속 엄격해지고
-#       결국 모든 섹터를 거부한다 — 0811 통합시험에서 실제로 이렇게 됐다)
-#   ② 판정은 단일 랩이 아니라 **최근 KUS_WIN 랩의 중앙값**으로 한다
-#   ③ 허용폭은 30% — 절대값이 아니라 추세만 본다. 절대값은 steering_reach_ratio
-#      가정에 비례해 0.0037~0.0301까지 흔들려서 못 믿는다(0811 reach 스윕).
 KUS_BASE_LAPS = 3
 KUS_WIN       = 3
 KUS_RISE_TOL  = 0.30
@@ -118,7 +106,6 @@ MIN_SPEED    = 1.5     # 이 속도 미만 샘플은 게이트에서 제외
 SIDE_BEAM_HALF = 15.0 * DEG2RAD   # 차 옆 ±90°에서 이 폭의 빔만 벽으로 본다
 SIDE_X_MAX   = 0.60    # |x| 이 범위 안의 빔만 (앞뒤 벽 혼입 차단)
 MIN_SAMPLES  = 20      # 섹터·랩당 최소 샘플 수
-
 
 # ══ 라인 ════════════════════════════════════════════════════════════════════
 class Raceline:
@@ -165,7 +152,6 @@ class Raceline:
         d = -math.sin(yaw) * (x - self.xy[j, 0]) + math.cos(yaw) * (y - self.xy[j, 1])
         return float(self.s[j]), float(d)
 
-
 # ══ 섹터 ════════════════════════════════════════════════════════════════════
 class Sector:
     __slots__ = ("i", "s0", "s1", "scale", "streak", "locked",
@@ -188,7 +174,6 @@ class Sector:
         if self.s0 <= self.s1:
             return self.s0 <= s <= self.s1
         return s >= self.s0 or s <= self.s1   # 랩을 넘는 구간
-
 
 def autobuild_sectors(line, corner_kappa=0.30, min_len=0.6, snap=1.5):
     """라인의 κ만으로 코너 섹터를 만든다 — `analyze_sector_clearance.py`와 **같은 규칙**.
@@ -251,9 +236,6 @@ def autobuild_sectors(line, corner_kappa=0.30, min_len=0.6, snap=1.5):
         s0 = snap_to_flat(float(line.s_wp[idx[0]]))
         s1 = snap_to_flat(float(line.s_wp[idx[-1]]))
         note = f"자동생성 κp90 {np.percentile(k[idx], 90):.3f}"
-        # 🔴 랩을 넘는 구간(s0 > s1)은 두 줄로 쪼갠다 — 컨트롤러도 load_sectors도
-        #    s_start < s_end만 받는다. 컨트롤러가 값이 실제로 바뀌는 전이점에만 블렌딩을
-        #    걸므로 쪼개도 결승선에서 파이지 않는다(2026-08-11 런타임 검증).
         spans = ([(s0, s1, "")] if s0 <= s1
                  else [(s0, line.length, " 랩넘김1/2"), (0.0, s1, " 랩넘김2/2")])
         for a, b, tag in spans:
@@ -262,7 +244,6 @@ def autobuild_sectors(line, corner_kappa=0.30, min_len=0.6, snap=1.5):
             out.append(Sector(i, a, b, 1.0, note + tag))
             i += 1
     return out
-
 
 def resolve_out_dir(yaml_path):
     """자동 저장 위치 = **패키지 소스 폴더의 `learned/`** (2026-08-13).
@@ -291,7 +272,6 @@ def resolve_out_dir(yaml_path):
         pass
     return os.path.expanduser("~")
 
-
 def resolve_yaml(raw_path):
     """구 sector_pub.py와 **같은 규칙**으로 sectors.yaml을 찾는다. 런치가 빈 문자열을
     넘길 수 있으므로(sector_scale_file 기본값이 '') 여기서 자동 탐색해야 한다."""
@@ -315,7 +295,6 @@ def resolve_yaml(raw_path):
     if raw_path:
         return os.path.expanduser(raw_path)
     return candidates[0]
-
 
 def load_sectors(path, scale_max=SCALE_MAX, warn=print):
     """YAML → (track_length, blend_len, [Sector]).
@@ -379,7 +358,6 @@ def load_sectors(path, scale_max=SCALE_MAX, warn=print):
              "sector_scale_blend를 줄일 것")
     return track_len, blend, out
 
-
 # ══ 노드 ════════════════════════════════════════════════════════════════════
 class SectorLearner(Node):
 
@@ -392,9 +370,6 @@ class SectorLearner(Node):
         self.explore = (args.mode == "explore")
         self.static = (args.mode == "static")
         self.auto_sectors = args.auto_sectors
-        # 🔴 2026-08-13: --out 미지정이면 자동 경로로 저장한다. 예전엔 그냥 안 저장했고,
-        #    인자를 깜빡한 주행의 학습 결과가 통째로 사라졌다. 자동 재생성과 짝이다 —
-        #    라인이 바뀌어도 주행만 하면 그 라인용 유효한 표가 항상 파일로 남는다.
         self.out_path = os.path.expanduser(args.out) if args.out else (
             os.path.join(resolve_out_dir(self.yaml_path),
                          f"learned_sectors_{time.strftime('%m%d_%H%M%S')}.yaml")
@@ -743,9 +718,6 @@ class SectorLearner(Node):
         path = self.out_path
         if not path or not self.sectors:
             return
-        # ⚠️ 라인을 한 번도 못 받았으면 자동 저장은 건너뛴다. 그 표는 실제 경로와 대조된 적이
-        #    없어서(랩길이 검증 미실행) 다음 세션에 그대로 실으면 조용히 폐기된다 — 파일만
-        #    그럴듯하게 남는 게 더 나쁘다. --out 을 **명시**했으면 사용자 의도로 보고 저장한다.
         if self.line is None and not self.args.out:
             self.get_logger().warn(
                 "자동 저장 건너뜀 — /global_waypoints를 못 받아 표가 실제 라인과 대조되지 않았다")
@@ -771,7 +743,6 @@ class SectorLearner(Node):
             yaml.safe_dump(doc, f, allow_unicode=True, sort_keys=False)
         self.get_logger().info(f"학습 결과 저장: {path}")
 
-
 def main():
     ap = argparse.ArgumentParser(description="섹터 MLA 스케일 온라인 학습기 (AIMD)")
     ap.add_argument("yaml", nargs="?", default="",
@@ -790,7 +761,6 @@ def main():
     ap.add_argument("--no-auto-save", dest="auto_save", action="store_false",
                     help="--out 미지정 시의 자동 저장을 끈다")
     ap.set_defaults(auto_save=True)
-    # ── 경계 자동 재생성 (2026-08-13) ──────────────────────────────────────
     ap.add_argument("--no-auto-sectors", dest="auto_sectors", action="store_false",
                     help="라인이 바뀌었을 때 섹터 경계를 κ로 자동 재생성하지 않고 발행을 멈춘다(구 거동)")
     ap.set_defaults(auto_sectors=True)
@@ -847,7 +817,6 @@ def main():
         if rclpy.ok():
             rclpy.shutdown()
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
