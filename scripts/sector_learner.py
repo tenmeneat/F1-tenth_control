@@ -129,6 +129,10 @@ class Raceline:
         seg = np.linalg.norm(np.diff(np.vstack([xy, xy[:1]]), axis=0), axis=1)
         s_wp = np.concatenate([[0.0], np.cumsum(seg)[:-1]])
         self.length = float(seg.sum())
+        # 경계 자동 재생성(autobuild_sectors)이 쓰는 웨이포인트 단위 κ·s.
+        # 촘촘한 self.s(0.05 m 재샘플)와 다르다 — κ는 웨이포인트에만 실려 온다.
+        self.s_wp = s_wp
+        self.kappa = np.abs(np.array([w.kappa_radpm for w in wpnts], dtype=float))
         n = max(2, int(self.length / dense_step))
         s_d = np.linspace(0.0, self.length, n, endpoint=False)
         closed_xy = np.vstack([xy, xy[:1]])
@@ -184,6 +188,108 @@ class Sector:
         if self.s0 <= self.s1:
             return self.s0 <= s <= self.s1
         return s >= self.s0 or s <= self.s1   # 랩을 넘는 구간
+
+
+def autobuild_sectors(line, corner_kappa=0.30, min_len=0.6, snap=1.5):
+    """라인의 κ만으로 코너 섹터를 만든다 — `analyze_sector_clearance.py`와 **같은 규칙**.
+
+    🔴 2026-08-13 신설. 예전엔 라인을 재생성하면 학습기가 발행을 중단했고, 그때마다
+    bag 녹화 → 오프라인 분석 → YAML 수동 편집 → 재기동을 돌아야 했다. 라인이 바뀌는 건
+    흔한 일이라(0813 하루에만 33.62 → 33.87) 그 왕복이 자동화의 실질적 장벽이었다.
+    학습기는 이미 `/global_waypoints`로 κ를 받고 있으므로 그 자리에서 만들 수 있다.
+
+    🔑 **안전은 scale 1.0에서 온다.** 새로 만든 섹터는 전부 1.0으로 시작하므로 전역 MLA와
+       동일 = "표가 없는 것과 같다". 옛 표를 새 라인에 **재해석하지 않고 폐기**하는 것도
+       그대로다 — 기존 track_length 검증이 막으려던 위험("같은 s가 다른 코너를 가리킨다")은
+       조금도 완화되지 않는다.
+
+    경계는 ±snap 안의 |κ| 최소점으로 옮긴다. 거기는 그립 캡이 비활성인 지점이라 MCL의 s
+    지터가 경계를 넘나들어도 속도 명령에 도달하지 못한다(필터링보다 경계 배치가 근본 대책).
+    ②-k 지뢰 4번 — 경계 품질이 학습 수익을 지배한다 — 이 오프라인과 같은 코드로 지켜진다.
+
+    직선은 내보내지 않는다(그립 캡이 비활성이라 scale을 걸어도 이득 0).
+    """
+    k = line.kappa
+    n = len(k)
+    if n < 4:
+        return []
+    is_corner = k > corner_kappa
+    # 가장 완만한 점에서 원을 끊는다 → 섹터가 직선에서 시작한다
+    start = int(np.argmin(k))
+    order = [(start + j) % n for j in range(n)]
+
+    raw, cur, begin = [], is_corner[order[0]], 0
+    for j in range(1, n + 1):
+        nxt = is_corner[order[j % n]] if j < n else None
+        if j == n or nxt != cur:
+            raw.append((cur, np.array([order[q] for q in range(begin, j)])))
+            begin, cur = j, nxt
+
+    seg_len = np.r_[np.diff(line.s_wp), line.length - line.s_wp[-1]]
+    # 너무 짧은 조각은 앞 섹터에 흡수 — 안 그러면 노이즈 한 점이 섹터를 쪼갠다
+    merged = []
+    for corner, idx in raw:
+        if merged and seg_len[idx].sum() < min_len:
+            merged[-1] = (merged[-1][0], np.r_[merged[-1][1], idx])
+        else:
+            merged.append((corner, idx))
+    if len(merged) > 1 and seg_len[merged[0][1]].sum() < min_len:
+        merged[-1] = (merged[-1][0], np.r_[merged[-1][1], merged[0][1]])
+        merged.pop(0)
+
+    def snap_to_flat(s):
+        off = np.abs((line.s_wp - s + line.length * 0.5) % line.length - line.length * 0.5)
+        cand = np.flatnonzero(off <= snap)
+        if cand.size == 0:
+            return float(s)
+        return float(line.s_wp[cand[int(np.argmin(k[cand]))]])
+
+    out, i = [], 0
+    for corner, idx in merged:
+        if not corner:
+            continue
+        s0 = snap_to_flat(float(line.s_wp[idx[0]]))
+        s1 = snap_to_flat(float(line.s_wp[idx[-1]]))
+        note = f"자동생성 κp90 {np.percentile(k[idx], 90):.3f}"
+        # 🔴 랩을 넘는 구간(s0 > s1)은 두 줄로 쪼갠다 — 컨트롤러도 load_sectors도
+        #    s_start < s_end만 받는다. 컨트롤러가 값이 실제로 바뀌는 전이점에만 블렌딩을
+        #    걸므로 쪼개도 결승선에서 파이지 않는다(2026-08-11 런타임 검증).
+        spans = ([(s0, s1, "")] if s0 <= s1
+                 else [(s0, line.length, " 랩넘김1/2"), (0.0, s1, " 랩넘김2/2")])
+        for a, b, tag in spans:
+            if b - a < 1e-3:          # 스냅이 두 경계를 같은 점으로 모은 경우
+                continue
+            out.append(Sector(i, a, b, 1.0, note + tag))
+            i += 1
+    return out
+
+
+def resolve_out_dir(yaml_path):
+    """자동 저장 위치 = **패키지 소스 폴더의 `learned/`** (2026-08-13).
+
+    `--symlink-install`로 빌드하면 share의 `config/sectors.yaml`이 소스를 가리키는 심볼릭
+    링크라, realpath로 소스 트리(`.../src/f1tenth_control/`)를 되찾을 수 있다. 복사본
+    빌드거나 사용자가 임의 경로의 YAML을 넘긴 경우엔 홈으로 물러선다.
+
+    🔑 dev repo(`~/F1tenth_control`)가 있으면 **그쪽을 먼저 쓴다.** 거기가 `f1up`이 개인
+    저장소로 올리는 정본이라, 학습 결과가 자동으로 버전 관리·백업된다. 젯슨엔 dev repo가
+    없으므로(워크스페이스만 있다) 자연히 패키지 소스로 떨어진다 — 그건 `f1learn`이 랩탑으로
+    회수한다.
+
+    🔴 하위폴더 `learned/`인 이유: `f1up`·`f1down`·`jetsonup`이 이 패키지를 **`rsync
+    --delete`로 통째 덮어쓴다.** 패키지 루트에 저장하면 다음 배포에서 지워진다 — 그래서 세
+    함수의 exclude 목록에 `learned/`를 같이 넣어 뒀다. 넷은 한 묶음이다.
+    """
+    dev = os.path.expanduser("~/F1tenth_control")
+    if os.path.isfile(os.path.join(dev, "package.xml")):
+        return os.path.join(dev, "learned")
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.realpath(yaml_path)))
+        if os.path.isfile(os.path.join(root, "package.xml")):
+            return os.path.join(root, "learned")
+    except OSError:
+        pass
+    return os.path.expanduser("~")
 
 
 def resolve_yaml(raw_path):
@@ -285,6 +391,14 @@ class SectorLearner(Node):
         self.mode = args.mode
         self.explore = (args.mode == "explore")
         self.static = (args.mode == "static")
+        self.auto_sectors = args.auto_sectors
+        # 🔴 2026-08-13: --out 미지정이면 자동 경로로 저장한다. 예전엔 그냥 안 저장했고,
+        #    인자를 깜빡한 주행의 학습 결과가 통째로 사라졌다. 자동 재생성과 짝이다 —
+        #    라인이 바뀌어도 주행만 하면 그 라인용 유효한 표가 항상 파일로 남는다.
+        self.out_path = os.path.expanduser(args.out) if args.out else (
+            os.path.join(resolve_out_dir(self.yaml_path),
+                         f"learned_sectors_{time.strftime('%m%d_%H%M%S')}.yaml")
+            if args.auto_save else "")
         try:
             self.yaml_mtime = os.path.getmtime(self.yaml_path)
         except OSError:
@@ -336,8 +450,10 @@ class SectorLearner(Node):
             f"🟢 sector_learner 시작 — 모드 {mode_desc} | "
             f"섹터 {len(self.sectors)}개 | 랩길이 {self.track_len:.3f} m | 발행 {args.topic}\n"
             f"   표: {self.yaml_path}" + ("  (--watch: 저장 시 재로드)" if str(args.watch).lower() == "true" else "")
-            + (f"\n   학습 결과 저장: {args.out}" if args.out
-               else ("" if self.static else "\n   ⚠️ --out 미지정 — 학습 결과가 저장되지 않는다")))
+            + (f"\n   저장: {self.out_path}" + ("" if args.out else "  (자동 경로 — --out 으로 지정 가능)")
+               if self.out_path else "\n   ⚠️ 저장 안 함(--no-auto-save)")
+            + (f"\n   라인이 바뀌면 섹터 경계를 κ>{args.corner_kappa}로 자동 재생성한다 (scale 1.0 시작)"
+               if self.auto_sectors else "\n   ⚠️ 자동 재생성 꺼짐(--no-auto-sectors) — 라인이 바뀌면 발행을 멈춘다"))
         if self.explore:
             self.get_logger().warn(
                 "⚠️ 탐색 모드다 — 차가 스스로 코너 속도를 올린다. 연습 주행에서만 쓸 것. "
@@ -349,15 +465,42 @@ class SectorLearner(Node):
             return
         self.line = Raceline(msg.wpnts)
         err = abs(self.line.length - self.track_len)
-        if err > 0.02:
+        if err <= 0.02:
+            self.get_logger().info(f"글로벌 라인 수신: {self.line.length:.3f} m")
+            return
+
+        # ── 라인이 바뀌었다 ────────────────────────────────────────────────
+        # 옛 표는 **어느 경우에도 재사용하지 않는다** — 같은 s가 다른 코너를 가리키고,
+        # scale ≥ 1.0이라 그 오적용은 "빨라지는" 쪽이다.
+        if not self.auto_sectors:
             self.get_logger().error(
                 f"🔴 랩길이 불일치: 테이블 {self.track_len:.3f} vs 실제 경로 {self.line.length:.3f} m "
                 f"(오차 {err:.3f}). 라인이 바뀌었다 — 같은 s가 다른 코너를 가리킨다. "
-                f"섹터 표를 새 bag으로 다시 뽑을 것. 학습기는 발행을 중단한다.")
+                f"섹터 표를 새 bag으로 다시 뽑을 것. 학습기는 발행을 중단한다. "
+                f"(--no-auto-sectors 로 자동 재생성을 껐다)")
             self.line = None
             self.sectors = []
             return
-        self.get_logger().info(f"글로벌 라인 수신: {self.line.length:.3f} m")
+
+        secs = autobuild_sectors(self.line, self.args.corner_kappa, self.args.min_sector_len)
+        if not secs:
+            self.get_logger().error(
+                f"🔴 랩길이 불일치({self.track_len:.3f} vs {self.line.length:.3f} m)인데 "
+                f"κ > {self.args.corner_kappa}인 코너를 하나도 못 찾았다 — 발행 중단. "
+                f"--corner-kappa 를 낮춰 볼 것.")
+            self.line = None
+            self.sectors = []
+            return
+
+        self.track_len = self.line.length
+        self.sectors = secs                # 새 Sector 객체 = 학습 상태도 자동 초기화
+        self.publish_table()
+        self.get_logger().warn(
+            f"🔄 라인이 바뀌었다({err:.3f} m 차이) → 섹터 경계를 κ로 자동 재생성했다. "
+            f"코너 {len(secs)}개 / 랩길이 {self.track_len:.3f} m / **scale 전부 1.0**"
+            f"(= 전역 MLA와 동일, 표가 없는 것과 같다).\n"
+            + "\n".join(f"      s {s.s0:6.2f} ~ {s.s1:6.2f}   {s.note}" for s in secs)
+            + f"\n   ⚠️ 옛 표({self.yaml_path})의 scale은 버렸다 — 다른 라인 기준이라 재사용 불가.")
 
     def cb_mode(self, msg):
         self.engaged = (msg.data == "autonomous")
@@ -597,8 +740,15 @@ class SectorLearner(Node):
         self.pub.publish(m)
 
     def save(self):
-        path = self.args.out
-        if not path:
+        path = self.out_path
+        if not path or not self.sectors:
+            return
+        # ⚠️ 라인을 한 번도 못 받았으면 자동 저장은 건너뛴다. 그 표는 실제 경로와 대조된 적이
+        #    없어서(랩길이 검증 미실행) 다음 세션에 그대로 실으면 조용히 폐기된다 — 파일만
+        #    그럴듯하게 남는 게 더 나쁘다. --out 을 **명시**했으면 사용자 의도로 보고 저장한다.
+        if self.line is None and not self.args.out:
+            self.get_logger().warn(
+                "자동 저장 건너뜀 — /global_waypoints를 못 받아 표가 실제 라인과 대조되지 않았다")
             return
         doc = {
             "track_length": round(self.track_len, 3),
@@ -615,6 +765,7 @@ class SectorLearner(Node):
             f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             "# ⚠️ 결선에 쓰기 전 analyze_sector_clearance.py로 같은 bag을 재검증할 것.\n"
             "# ⚠️ 라인(글로벌 경로)을 재생성했으면 이 파일은 폐기하고 새 bag으로 다시 뽑는다.\n")
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(header)
             yaml.safe_dump(doc, f, allow_unicode=True, sort_keys=False)
@@ -633,7 +784,20 @@ def main():
     ap.add_argument("--watch", nargs="?", const="true", default="false",
                     help="YAML 저장 시 표를 다시 읽는다(라이브 튜닝). "
                          "재로드는 학습 상태를 초기화하고, 실패 시 직전 표를 유지한다")
-    ap.add_argument("--out", default="", help="학습 결과를 저장할 YAML 경로")
+    ap.add_argument("--out", default="",
+                    help="학습 결과를 저장할 YAML 경로 "
+                         "(생략 시 <패키지 소스>/learned/learned_sectors_<시각>.yaml)")
+    ap.add_argument("--no-auto-save", dest="auto_save", action="store_false",
+                    help="--out 미지정 시의 자동 저장을 끈다")
+    ap.set_defaults(auto_save=True)
+    # ── 경계 자동 재생성 (2026-08-13) ──────────────────────────────────────
+    ap.add_argument("--no-auto-sectors", dest="auto_sectors", action="store_false",
+                    help="라인이 바뀌었을 때 섹터 경계를 κ로 자동 재생성하지 않고 발행을 멈춘다(구 거동)")
+    ap.set_defaults(auto_sectors=True)
+    ap.add_argument("--corner-kappa", type=float, default=0.30,
+                    help="자동 재생성의 코너 판정 |κ| [rad/m] (analyze_sector_clearance.py와 동일)")
+    ap.add_argument("--min-sector-len", type=float, default=0.6,
+                    help="자동 재생성의 섹터 최소 길이 [m]")
     ap.add_argument("--dry-run", action="store_true",
                     help="YAML 검증만 하고 ROS를 안 띄운다 (주행 전 사전 점검)")
     ap.add_argument("--topic", default="/sector_scales")

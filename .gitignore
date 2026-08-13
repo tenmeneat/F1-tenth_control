@@ -37,3 +37,9 @@ docs/
 
 # IntelliSense용 생성물 (2026_IFAC 빌드에서 경로 재작성, .vscode 태스크로 갱신)
 compile_commands.json
+
+# ℹ️ learned/ (sector_learner.py 학습 결과)는 **일부러 git에 올린다.**
+#    파일당 수백 바이트뿐이고, 어느 표로 어떤 랩타임이 나왔는지 이력이 남는 게 대회 준비에
+#    유용하다(rosbag과 달리 용량 문제가 없다). f1up ①단계가 개인 저장소로 올려준다.
+#    ⚠️ 단 f1up·f1down·jetsonup의 rsync --delete exclude에는 그대로 있어야 한다 —
+#       거긴 "지우지 마라"는 뜻이지 "올리지 마라"가 아니다. 목적이 다르다.

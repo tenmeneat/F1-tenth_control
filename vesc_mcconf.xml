@@ -73,7 +73,7 @@
     <foc_start_curr_dec>1</foc_start_curr_dec>
     <foc_start_curr_dec_rpm>3400</foc_start_curr_dec_rpm>
     <foc_openloop_rpm>3400</foc_openloop_rpm>
-    <foc_openloop_rpm_low>0.8</foc_openloop_rpm_low>
+    <foc_openloop_rpm_low>0.85</foc_openloop_rpm_low>
     <foc_d_gain_scale_start>0.9</foc_d_gain_scale_start>
     <foc_d_gain_scale_max_mod>0.2</foc_d_gain_scale_max_mod>
     <foc_sl_openloop_hyst>0.1</foc_sl_openloop_hyst>
@@ -113,12 +113,12 @@
     <foc_hfi_obs_ovr_sec>0.001</foc_hfi_obs_ovr_sec>
     <foc_hfi_samples>2</foc_hfi_samples>
     <foc_offsets_cal_on_boot>1</foc_offsets_cal_on_boot>
-    <foc_offsets_current__0>2051.13</foc_offsets_current__0>
-    <foc_offsets_current__1>2051.14</foc_offsets_current__1>
-    <foc_offsets_current__2>2051.14</foc_offsets_current__2>
-    <foc_offsets_voltage__0>-0.0003</foc_offsets_voltage__0>
-    <foc_offsets_voltage__1>0.0006</foc_offsets_voltage__1>
-    <foc_offsets_voltage__2>-0.0003</foc_offsets_voltage__2>
+    <foc_offsets_current__0>2049.64</foc_offsets_current__0>
+    <foc_offsets_current__1>2049.26</foc_offsets_current__1>
+    <foc_offsets_current__2>2049.2</foc_offsets_current__2>
+    <foc_offsets_voltage__0>-0.0004</foc_offsets_voltage__0>
+    <foc_offsets_voltage__1>0.0008</foc_offsets_voltage__1>
+    <foc_offsets_voltage__2>-0.0004</foc_offsets_voltage__2>
     <foc_offsets_voltage_undriven__0>0</foc_offsets_voltage_undriven__0>
     <foc_offsets_voltage_undriven__1>0</foc_offsets_voltage_undriven__1>
     <foc_offsets_voltage_undriven__2>0</foc_offsets_voltage_undriven__2>
