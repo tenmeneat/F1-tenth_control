@@ -546,6 +546,14 @@ function b64ToBytes(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);
 const WHEELBASE=0.33, DEG2RAD=Math.PI/180;
 const MIN_SPEED=1.0, ALPHA=0.3, IMU_SCALE=DEG2RAD;
 let PRIOR_W=3.0;                    // UI에서 바꿀 수 있다(CLI --prior-weight와 같은 뜻)
+// 🔴 2026-08-12: 베이스가 NaN인 칸을 실측으로 신설할 최소 표본 수 (CLI --fill-nan-count).
+//   베이스 LUT(NUC6 Pacejka)는 그립 피크 이후가 통째로 NaN이고(941/3900), 컨트롤러는
+//   그 NaN을 "여기가 그립 한계"로 읽어 조향을 클램프한다(steering_lookup_table.hpp가
+//   열을 만들 때 첫 NaN에서 끊는다). 실측에는 접힘이 없다 — v=4.0에서
+//   δ 0.20~0.25→5.98 / 0.25~0.30→6.44 / 0.30~0.35→6.70 / 0.35~0.41→8.15로 단조 증가한다.
+//   0으로 두면 구 동작(NaN 유지).
+// ⚠️ 20이다(10 아님) — 표본 10~19칸에 과대 이상치가 섞인다. CLI 기본값과 같이 유지할 것.
+let FILL_NAN_N=20;
 const IMU_PREFS=["/imu/data","/sensors/imu/raw"];
 const ODOM_PREFS=["/pf/pose/odom","/odom"];
 // ⚠️ /ackermann_cmd가 1순위 (2026-08-05, CLI와 동일). ackermann_mux가 수동(/teleop)·자율
@@ -671,9 +679,18 @@ function calibrateBag(msgs){
 function blendedLut(){
   const out=[];
   for(let i=0;i<NS;i++){const row=new Array(NV);
-    for(let j=0;j<NV;j++){const b=LUT.grid[i][j],c=STATE.cnt[i][j];
-      row[j]=(c<=0||Number.isNaN(b))?b:((b*PRIOR_W+STATE.sum[i][j])/(PRIOR_W+c));}
+    for(let j=0;j<NV;j++)row[j]=blendedCell(i,j);
     out.push(row);}
+  // ⚠️ 신설 칸에만 running-max를 걸어 열 단조성을 보장한다. 컨트롤러의 역조회는 열이
+  //    오름차순인 전제로 이웃을 찾으므로, 중간에 꺼지는 칸이 있으면 엉뚱한 가지로 반전한다.
+  //    베이스가 유효한 칸은 절대 건드리지 않는다(CLI blend()와 동일).
+  if(FILL_NAN_N>0){
+    for(let j=0;j<NV;j++){let run=-Infinity;
+      for(let i=0;i<NS;i++){const v=out[i][j];
+        if(Number.isNaN(v))continue;
+        if(Number.isNaN(LUT.grid[i][j])&&v<run)out[i][j]=run;
+        run=Math.max(run,out[i][j]);}}
+  }
   return out;
 }
 function lutToCsv(){
@@ -777,7 +794,10 @@ function wireHeatmapHover(){
   cv.addEventListener('mouseleave',()=>{document.getElementById('tip').style.display='none';});
 }
 function blendedCell(i,j){const b=LUT.grid[i][j],c=STATE.cnt[i][j];
-  return (c<=0||Number.isNaN(b))?b:((b*PRIOR_W+STATE.sum[i][j])/(PRIOR_W+c));}
+  if(c<=0)return b;                                   // 표본 없음 → prior 그대로
+  if(Number.isNaN(b))                                 // 베이스 NaN → 실측으로 신설(위 주석)
+    return (FILL_NAN_N>0&&c>=FILL_NAN_N)?(STATE.sum[i][j]/c):b;
+  return (b*PRIOR_W+STATE.sum[i][j])/(PRIOR_W+c);}
 
 // ══ 리포트 ══
 function render(){

@@ -168,7 +168,7 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='섹터 경계 선형 블렌딩 폭 [m]. MCL Frenet s 지터 실측 σ 47mm/max 159mm — '
                         '단 근본 대책은 경계를 κ 최소점에 두는 것(bag_analyzer가 그렇게 뽑아준다)'
         ),
-  
+
         DeclareLaunchArgument(
             'sector_scale_track_len_tol', default_value='0.02',
             description='테이블 선언 랩길이 vs 실제 글로벌 경로 길이 허용 오차 [m]. '
@@ -281,7 +281,7 @@ def declare_common_args(sector_scale_enable_default='false'):
         # ── 종방향 감속: 두 개의 서로 다른 감속도 (튜닝 방향이 정반대라 분리했다) ──
         #   base_max_decel = 명령 속도를 초당 얼마나 빨리 떨어뜨릴 수 있나(램프 rate limit) → 높게
         #   prebrake_decel = 차가 **실제로** 낼 수 있는 감속도(제동거리 v²/2a) → 실측값에 맞춤
-        
+
         DeclareLaunchArgument(
             'base_max_decel', default_value='8.0',
             description='명령 속도 하강 rate limit [m/s^2]. 낮추면 감속 명령이 늦게 도달하므로 높게 유지'
@@ -407,12 +407,15 @@ def declare_common_args(sector_scale_enable_default='false'):
 
 
 def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max_accel,
-                            imu_linear_scale, imu_angular_scale,
-                            max_steering_left, max_steering_right,
-                            lookup_table_file='', remappings=None):
+                           imu_linear_scale, imu_angular_scale,
+                           max_steering_left, max_steering_right,
+                           lookup_table_file='', remappings=None):
     """control_map_node — 환경별로 다른 값만 인자로 받고 나머지는 공용 정의.
+
     remappings: 실차에서만 필요한 토픽 리매핑(예: vesc_driver의 sensors/imu/raw →
-    코드에 하드코딩된 /imu/data). 시뮬은 sim_imu_bridge_node가 /imu/data로 바로 발행하므로 불필요."""
+    코드에 하드코딩된 /imu/data). 시뮬은 sim_imu_bridge_node가 /imu/data로 바로
+    발행하므로 불필요.
+    """
     return Node(
         package='f1tenth_control',
         executable='control_map_node',
@@ -511,8 +514,9 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
 
 
 def build_sector_learner_node():
-    """섹터 scale 발행기 겸 온라인 학습기 (AIMD). /sector_scales의 **유일한** 발행자다
-    (2026-08-12에 sector_pub.py를 흡수해 은퇴시켰다).
+    """섹터 scale 발행기 겸 온라인 학습기 (AIMD).
+
+    /sector_scales의 **유일한** 발행자다 (2026-08-12에 sector_pub.py를 흡수해 은퇴시켰다).
 
     🔑 컨트롤러는 손대지 않는다 — 발행 토픽·레이아웃이 sector_pub과 동일하므로
        컨트롤러의 검증(scale ≥ 1.0 / track_length 대조 / /state 게이팅 / 데드맨)이

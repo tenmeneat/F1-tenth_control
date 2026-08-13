@@ -298,18 +298,62 @@ def process_bag(msgs, topics, lut, sums, counts, args):
     return n_samples, imu_rms, kin_rms
 
 
-def blend(lut, sums, counts, prior_weight):
-    """베이지안 블렌딩: 샘플 적은 셀은 원본(prior)에 가깝게 남는다."""
+def blend(lut, sums, counts, prior_weight, fill_nan_count=20):
+    """베이지안 블렌딩: 샘플 적은 셀은 원본(prior)에 가깝게 남는다.
+
+    🔴 2026-08-12 신설: `fill_nan_count`.
+    베이스 LUT(NUC6 Pacejka)는 **그립 피크 이후 구간이 통째로 NaN**이다(941/3900).
+    모델의 역함수가 정의되지 않는 영역이라 비워 둔 것인데, 컨트롤러는 그 NaN을
+    "여기가 그립 한계"로 읽는다 — `steering_lookup_table.hpp`가 열을 만들 때
+    **첫 NaN에서 끊고 그 마지막 값을 포화 임계로 삼기** 때문이다.
+
+    실측은 그 영역에 접힘이 없다고 말한다(0810~0811 39,333샘플, v=4.0 기준):
+        δ 0.20~0.25 → 5.98 / 0.25~0.30 → 6.44 / 0.30~0.35 → 6.70 / 0.35~0.41 → 8.15
+    그런데 베이스가 NaN이라 이 값들이 **전부 버려지고**, 컨트롤러는 v=4에서
+    δ=0.203(물리 한계 0.410의 절반)에 조향을 클램프한다. 2026-08-11에 MLA 8.6으로
+    주행하다 첫 코너 벽을 스친 것이 정확히 이 경로다 — 그립이 아니라 **조향을
+    안 낸 것**이었다.
+
+    → 표본이 `fill_nan_count` 이상인 NaN 칸은 **순수 실측**으로 채운다(prior 없음).
+    ⚠️ 채운 뒤 열의 단조성을 보장해야 한다. 컨트롤러의 역조회는 열이 오름차순인
+       전제로 이웃을 찾으므로, 중간에 꺼지는 칸이 있으면 엉뚱한 가지로 반전한다.
+       그래서 **채운 칸에만** running-max를 건다(베이스 칸은 건드리지 않는다).
+    ⚠️ 0으로 주면 구 동작(NaN 유지)이다. 롤백용.
+    """
+    n_steer = len(lut.grid)
     out = []
+    filled_cells = 0
     for i, base_row in enumerate(lut.grid):
         row = []
         for j, base_val in enumerate(base_row):
             c = counts[i][j]
-            if c <= 0 or math.isnan(base_val):
-                row.append(base_val)
+            if c <= 0:
+                row.append(base_val)                       # 표본 없음 → prior 그대로
+            elif math.isnan(base_val):
+                if fill_nan_count > 0 and c >= fill_nan_count:
+                    row.append(sums[i][j] / c)             # 순수 실측으로 신설
+                    filled_cells += 1
+                else:
+                    row.append(base_val)                   # 표본 부족 → 비워 둔다
             else:
                 row.append((base_val * prior_weight + sums[i][j]) / (prior_weight + c))
         out.append(row)
+
+    # 채운 칸에만 running-max — 열 단조성 보장(위 주석 참고)
+    if fill_nan_count > 0:
+        n_vel = len(out[0]) if out else 0
+        for j in range(n_vel):
+            run = float("-inf")
+            for i in range(n_steer):
+                v = out[i][j]
+                was_nan = math.isnan(lut.grid[i][j])
+                if not math.isnan(v):
+                    if was_nan and v < run:
+                        out[i][j] = run                    # 신설 칸만 끌어올린다
+                    run = max(run, out[i][j])
+    if filled_cells:
+        print(f"  🔵 베이스 NaN 칸 중 표본 {fill_nan_count}개 이상인 "
+              f"{filled_cells}칸을 실측으로 신설했다 (구 동작: 전부 버림)")
     return out
 
 
@@ -382,6 +426,11 @@ def main():
     ap.add_argument("--out-dir", default=os.path.expanduser("~/f1tenth_lut_calibration"))
     ap.add_argument("--fresh", action="store_true", help="이전 누적 상태를 무시하고 새로 시작")
     ap.add_argument("--min-speed", type=float, default=1.0, help="샘플 기록 최소 속도 [m/s]")
+    ap.add_argument("--fill-nan-count", type=int, default=20,
+                    help="베이스가 NaN인 칸을 실측으로 채울 최소 표본 수 (0=구 동작, NaN 유지). "
+                         "⚠️ 10은 낮다 — 0810~0811 데이터에서 표본 12개짜리 칸에 a_lat 11.16이 "
+                         "들어갔다(δ=0.193/v=5.68, 저조향 과대 = 언더스티어 유발). 20이면 그 "
+                         "이상치가 빠지면서 조향 천장 이득은 유지된다(30은 v=4.5 이득이 사라진다)")
     ap.add_argument("--prior-weight", type=float, default=3.0, help="원본 LUT 가중(클수록 보수적)")
     ap.add_argument("--alpha", type=float, default=0.3, help="요레이트 LPF 계수")
     ap.add_argument("--imu-angular-scale", type=float, default=DEG2RAD,
@@ -460,7 +509,7 @@ def main():
                 args.imu_angular_scale)
 
     save_state(state_path, sums, counts)
-    lut.save_blended(out_path, blend(lut, sums, counts, args.prior_weight))
+    lut.save_blended(out_path, blend(lut, sums, counts, args.prior_weight, args.fill_nan_count))
 
     total_acc = sum(sum(r) for r in counts)
     print(f"\n✅ 이번 실행 {grand_total}개 / 누적 {total_acc}개 샘플")
