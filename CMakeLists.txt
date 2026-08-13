@@ -126,6 +126,14 @@ install(FILES config/sectors.yaml
 )
 
 # 섹터 스케일 발행기/학습기 실행 파일 설치 (런치 노드로 구동)
+# 🔴 **소스 파일에 실행권한(755)이 반드시 있어야 한다** — 2026-08-13 실차에서 물림.
+#    `--symlink-install`로 빌드하면 install 쪽이 **소스를 가리키는 심볼릭 링크**가 되므로
+#    install(PROGRAMS)가 붙여주는 755가 적용되지 않고 ROS는 소스의 권한을 본다. launch의
+#    실행 파일 탐색은 X_OK 검사라, 664면 파일이 눈앞에 있는데도
+#    `executable 'sector_learner.py' not found on the libexec directory`로 뜬다.
+#    재빌드해도 안 고쳐지므로(빌드는 매번 성공한다) 원인을 엉뚱한 데서 찾게 된다.
+#    → 08-12에 sector_pub.py(100755)를 흡수하며 만든 sector_learner.py가 100644로 들어와
+#      생긴 회귀다. git 모드까지 100755로 커밋할 것(`git update-index --chmod=+x`).
 # 🔴 위치가 tools/가 아니라 scripts/인 이유: jetsonup이 `--exclude=/src/f1tenth_control/tools/`로
 #    tools/를 **젯슨에 보내지 않는다**(랩탑 전용 분석 도구 5.8 MB를 빼려는 것). 실차 런치가
 #    이 파일을 노드로 띄우게 된 순간부터 이건 분석 도구가 아니라 **런타임 노드**라,
