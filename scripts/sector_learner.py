@@ -91,6 +91,16 @@ SAT_FRAC_MAX = 0.02    # 조향 포화 허용 비율
 KUS_BASE_LAPS = 3
 KUS_WIN       = 3
 KUS_RISE_TOL  = 0.30
+# 🔴 2026-08-14: K_us 게이트가 0814 explore 두 판(200000/200740)에서 **오탐으로 하향을
+#    9회** 냈다. 원인은 임계가 아니라 **기준선**이다 — 초기 3랩 중앙값이 0.0039 / 0.0060
+#    (= 노이즈 바닥)으로 잡히면 상대 30%는 절대값 0.0012~0.0018밖에 안 된다. 그 뒤의
+#    정상 랩(0.0055 / 0.0126)이 전부 트립하고, 200740은 섹5를 1.15까지 올려놓고 랩9에
+#    이걸로 통째로 되돌렸다. ②-k 지뢰 2번("절대값은 못 믿는다")이 기준선 쪽에서 재발한 것.
+#    → ① 기준선 자체가 바닥이면 그 섹터에서는 K_us 판정을 **아예 안 한다**
+#      ② 허용폭에 절대 하한을 둔다 = base + max(30%, KUS_RISE_ABS)
+#    다른 게이트(벽 여유·횡오차·조향 포화)는 그대로다 — 무해화 대상은 K_us 하나뿐이다.
+KUS_BASE_MIN  = 0.008  # 기준선이 이 미만이면 노이즈 바닥으로 보고 K_us 게이트 비활성
+KUS_RISE_ABS  = 0.004  # 상대 30%와 함께 쓰는 절대 허용폭 [rad/(m/s²)]
 
 # ── AIMD ─────────────────────────────────────────────────────────────────────
 STEP_UP      = 0.05
@@ -98,6 +108,17 @@ STEP_DOWN    = 0.15
 CONFIRM_LAPS = 2
 SCALE_MIN    = 1.0
 SCALE_MAX    = 1.5
+# 🔴 2026-08-14: `locked`가 한 번 걸리면 주행이 끝날 때까지 안 풀려서, explore가 **자기
+#    수명을 스스로 끊고 있었다.** 0814 200000은 랩6에 5개 섹터가 전부 잠겨 남은 5랩이
+#    학습 능력 0인 채로 돌았다(상향 6 vs 하향 34, 최종 scale 전부 1.00).
+#    → explore에서는 ① breach가 **연속 2랩**일 때만 잠그고 ② 잠긴 뒤에도 깨끗한 랩이
+#      LOCK_RELEASE_LAPS만큼 쌓이면 푼다. 한 랩의 우연한 breach(MCL 지터·라인 이탈 한 번)로
+#      그 코너를 통째로 포기하지 않게 하려는 것이다.
+#    ⚠️ **하향은 조금도 완화하지 않았다** — breach가 나면 그 랩에 즉시 STEP_DOWN이 걸린다.
+#      완화한 건 "다시 시도해도 되는가"뿐이라 "모든 실패는 느려지는 방향" 불변식은 그대로다.
+#    ⚠️ explore(연습) 전용이다. guard(결선)는 종전대로 **1회 breach에 영구 잠금**이다.
+BREACH_LOCK_CONSEC = 2   # explore: 연속 이 횟수만큼 breach가 나야 잠근다
+LOCK_RELEASE_LAPS  = 3   # explore: 잠긴 뒤 깨끗한 랩이 이만큼 쌓이면 잠금 해제
 
 # ── 신호 처리 ────────────────────────────────────────────────────────────────
 STEER_LAG    = 0.14    # 조향→요레이트 지연 [s]. 0811 bag 스윕에서 R² 최대(0.887).
@@ -154,14 +175,16 @@ class Raceline:
 
 # ══ 섹터 ════════════════════════════════════════════════════════════════════
 class Sector:
-    __slots__ = ("i", "s0", "s1", "scale", "streak", "locked",
-                 "kus_base", "kus_laps", "acc", "note")
+    __slots__ = ("i", "s0", "s1", "scale", "streak", "locked", "breach_streak",
+                 "clean_laps", "kus_base", "kus_laps", "acc", "note")
 
     def __init__(self, i, s0, s1, scale, note=""):
         self.i, self.s0, self.s1 = i, s0, s1
         self.scale = scale
         self.streak = 0
         self.locked = False
+        self.breach_streak = 0    # 연속 breach 랩 수 (explore 잠금 판정)
+        self.clean_laps = 0       # 잠긴 뒤 쌓인 깨끗한 랩 수 (explore 잠금 해제)
         self.kus_base = None      # 초기 랩들로 한 번 정하고 고정하는 기준선
         self.kus_laps = []        # 랩별 고하중 K_us 중앙값 이력
         self.note = note
@@ -626,9 +649,14 @@ class SectorLearner(Node):
                     sec.kus_base = float(np.median(sec.kus_laps[:KUS_BASE_LAPS]))
             kus_now = (float(np.median(sec.kus_laps[-KUS_WIN:]))
                        if len(sec.kus_laps) >= KUS_WIN else float("nan"))
-            if (np.isfinite(kus_now) and sec.kus_base is not None
-                    and kus_now > sec.kus_base * (1.0 + KUS_RISE_TOL)):
-                breach.append(f"Kus상승 {kus_now:.4f}>{sec.kus_base:.4f}")
+            # 🔴 2026-08-14 무해화(위 KUS_BASE_MIN/KUS_RISE_ABS 주석 참고).
+            #    기준선이 노이즈 바닥이면 이 게이트는 신호가 아니라 잡음을 재는 것이라 끈다.
+            #    켜져 있을 때도 허용폭은 상대·절대 중 **큰 쪽**을 쓴다.
+            kus_thr = float("nan")
+            if sec.kus_base is not None and sec.kus_base >= KUS_BASE_MIN:
+                kus_thr = sec.kus_base + max(sec.kus_base * KUS_RISE_TOL, KUS_RISE_ABS)
+                if np.isfinite(kus_now) and kus_now > kus_thr:
+                    breach.append(f"Kus상승 {kus_now:.4f}>{kus_thr:.4f}")
 
             old = sec.scale
             if self.static:
@@ -637,15 +665,32 @@ class SectorLearner(Node):
                 verdict = "정적" + (f"(경고: {','.join(breach)})" if breach else "")
                 breach = []
             elif breach:
+                # 하향은 종전대로 **즉시**다 — 완화한 건 잠금(재시도 가능 여부)뿐이다.
                 sec.scale = max(SCALE_MIN, sec.scale - STEP_DOWN)
                 sec.streak = 0
-                sec.locked = True
-                verdict = "↓하향"
+                sec.clean_laps = 0
+                sec.breach_streak += 1
+                if not self.explore or sec.breach_streak >= BREACH_LOCK_CONSEC:
+                    sec.locked = True     # guard(결선)는 1회로 영구 잠금
+                verdict = ("↓하향(잠금)" if sec.locked else
+                           f"↓하향(경고 {sec.breach_streak}/{BREACH_LOCK_CONSEC})")
             elif not self.explore:
+                sec.breach_streak = 0
                 verdict = "유지"
             elif sec.locked:
-                verdict = "잠금"
+                # 깨끗한 랩이 쌓이면 다시 시도할 자격을 준다. 한 랩의 우연한 breach로
+                # 그 코너를 주행 내내 포기하지 않기 위한 것(0814 200000이 그 꼴이었다).
+                sec.breach_streak = 0
+                sec.clean_laps += 1
+                if sec.clean_laps >= LOCK_RELEASE_LAPS:
+                    sec.locked = False
+                    sec.clean_laps = 0
+                    sec.streak = 0
+                    verdict = "잠금해제"
+                else:
+                    verdict = f"잠금 {sec.clean_laps}/{LOCK_RELEASE_LAPS}"
             else:
+                sec.breach_streak = 0
                 sec.streak += 1
                 if sec.streak >= CONFIRM_LAPS:
                     sec.scale = min(SCALE_MAX, sec.scale + STEP_UP)
@@ -656,10 +701,15 @@ class SectorLearner(Node):
             if abs(sec.scale - old) > 1e-9:
                 changed = True
 
+            # K_us는 기준선이 바닥이면 게이트를 끄므로(위 참고) 로그도 그걸 드러낸다 —
+            # 임계 대신 base를 찍으면 "왜 안 걸렸나/걸렸나"를 로그만 보고 못 가린다.
+            kus_desc = ("기준--" if sec.kus_base is None else
+                        f"기준{sec.kus_base:.4f} 임계"
+                        + (f"{kus_thr:.4f}" if np.isfinite(kus_thr) else "OFF(바닥)"))
             lines.append(
                 f"  섹{sec.i} s{sec.s0:>5.1f}~{sec.s1:<5.1f} | 횡p95 {err95:.3f} | "
                 f"여유p5 {cp5:.3f}/min {cmn:.3f} | Kus {kus_hi:.4f}"
-                f"(최근{kus_now:.4f}/기준{sec.kus_base if sec.kus_base else float('nan'):.4f}) | "
+                f"(최근{kus_now:.4f}/{kus_desc}) | "
                 f"포화 {100*satf:.1f}% | "
                 f"{verdict} scale {old:.2f}→{sec.scale:.2f}"
                 + ("  ← " + ", ".join(breach) if breach else ""))

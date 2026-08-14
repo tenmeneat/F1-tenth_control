@@ -241,7 +241,7 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='곡률 룩어헤드 스캔 거리 하한 (×0.1m). 80 = 8m'
         ),
         DeclareLaunchArgument(
-            'min_speed', default_value='2.0',
+            'min_speed', default_value='1.2',
             description='최저 순항 속도 [m/s] (곡률 감속 하한). 장애물 정지엔 미적용(0까지 허용)'
         ),
 
@@ -280,7 +280,7 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='관통 실패 시 포기까지 최대 펀치 시간 [s]'
         ),
         DeclareLaunchArgument(
-            'launch_exit_speed', default_value='1.2',
+            'launch_exit_speed', default_value='0.9',
             description='실측이 이 속도[m/s] 넘으면 관통 성공 판정 → 킥 종료(데드존 상단 0.59보다 위)'
         ),
         DeclareLaunchArgument(
