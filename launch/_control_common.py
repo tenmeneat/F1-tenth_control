@@ -59,7 +59,7 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='경로 접선과 차량 헤딩의 허용 오차 [rad]. 0이면 게이트 비활성(구 거동)'
         ),
         DeclareLaunchArgument(
-            'l1_offset', default_value='0.4',
+            'l1_offset', default_value='0.6',
             description='L1 룩어헤드 거리의 **절편** [m] (공식: l1_offset + v*l1_speed_gain). '
                         '구 이름 l1_gain'
         ),
