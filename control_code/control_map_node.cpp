@@ -1009,6 +1009,7 @@ private:
                             launch_time_);
                     } else {
                         publish_speed = std::max(publish_speed, launch_boost_speed_);
+                        last_target_speed_ = publish_speed; // 런치 킥 해제 후 속도 절벽 멈칫거림 방지 (무구간 부드러운 가속 이음)
                         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 200,
                             "런치 킥: 실측 %.2f → 발행 %.2f m/s (t=%.2fs)",
                             current_speed_, publish_speed, launch_time_);
