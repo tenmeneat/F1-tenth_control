@@ -55,7 +55,7 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='이 시간(s) 넘게 /local_waypoints 미수신 시 글로벌 경로로 폴백'
         ),
         DeclareLaunchArgument(
-            'closest_idx_max_heading_err', default_value='1.40',
+            'closest_idx_max_heading_err', default_value='0.70',
             description='경로 접선과 차량 헤딩의 허용 오차 [rad]. 0이면 게이트 비활성(구 거동)'
         ),
         DeclareLaunchArgument(
@@ -171,11 +171,13 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='명령 조향각 중 바퀴가 실제 도달하는 비율. 보상(1/ratio)과 조향권한 캡을 '
                         '동시 지배. 1.0 = 보상 없음(2026-07-31 실측: 링키지 정상)'
         ),
-        # 50Hz에서 20 rad/s = 사이클당 0.4 rad = 풀락까지 2 사이클 = 구 하드코딩과 동일(무제한).
-        # 서보 물리 속도(~7 rad/s 추정)로 낮추면 고주파 채터링을 막지만 실측 전이라 중립 유지.
         DeclareLaunchArgument(
-            'max_steering_rate', default_value='20.0',
-            description='조향 rate limit [rad/s] (dt 비례). 20.0 = 구 거동(사이클당 0.4rad)'
+            'max_steering_rate', default_value='3.0',
+            description='조향 rate limit [rad/s] (dt 비례). 3.0 rad/s = 171 deg/s'
+        ),
+        DeclareLaunchArgument(
+            'pose_lpf_alpha', default_value='0.30',
+            description='MCL 포즈/헤딩 저역통과 필터 알파 (0.01~1.0)'
         ),
         DeclareLaunchArgument(
             'steering_trim_adapt_gain', default_value='0.25',
@@ -350,6 +352,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'max_steering_right': max_steering_right,
             'steering_reach_ratio': LaunchConfiguration('steering_reach_ratio'),
             'max_steering_rate': LaunchConfiguration('max_steering_rate'),
+            'pose_lpf_alpha': LaunchConfiguration('pose_lpf_alpha'),
             'steering_trim_adapt_gain': LaunchConfiguration('steering_trim_adapt_gain'),
             'steering_trim_limit': LaunchConfiguration('steering_trim_limit'),
             'steering_trim_max_steer': LaunchConfiguration('steering_trim_max_steer'),

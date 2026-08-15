@@ -238,6 +238,7 @@ public:
         l1_jump_warn_m_ = declare_parameter<double>("l1_jump_warn_m", 1.0);
 
         max_steering_rate_ = std::max(0.5, declare_parameter<double>("max_steering_rate", 20.0));
+        pose_lpf_alpha_ = std::clamp(declare_parameter<double>("pose_lpf_alpha", 0.30), 0.01, 1.0);
 
         // 좌우 조향 한계. 둘 다 같으면 기존 대칭 거동과 100% 동일.
         max_steering_left_ =
@@ -421,11 +422,20 @@ private:
             return;
         }
 
-        current_x_ = x;
-        current_y_ = y;
-        current_yaw_ = yaw;
-        current_speed_ = v;
-        odom_seen_ = true;
+        if (!odom_seen_) {
+            current_x_ = x;
+            current_y_ = y;
+            current_yaw_ = yaw;
+            current_speed_ = v;
+            odom_seen_ = true;
+        } else {
+            const double a = pose_lpf_alpha_;
+            current_x_ = (1.0 - a) * current_x_ + a * x;
+            current_y_ = (1.0 - a) * current_y_ + a * y;
+            const double dyaw = wrap_pi(yaw - current_yaw_);
+            current_yaw_ = wrap_pi(current_yaw_ + a * dyaw);
+            current_speed_ = (1.0 - a) * current_speed_ + a * v;
+        }
     }
 
     void imu_callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg) {
@@ -1307,6 +1317,7 @@ private:
     // 동시에 지배한다(steer_avail()). 1.0이면 둘 다 구 낙관 거동.
     double steering_reach_ratio_ = 0.74;
     double max_steering_rate_ = 20.0;         // 조향 rate limit [rad/s] (dt 비례)
+    double pose_lpf_alpha_ = 0.30;            // MCL 포즈/헤딩 저역통과 필터 알파 (0.01~1.0)
 
     // 종방향
     double base_max_accel_;
