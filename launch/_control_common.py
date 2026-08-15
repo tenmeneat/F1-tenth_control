@@ -29,15 +29,15 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='감속 중(acc_mean<=-1.0) 조향각에 곱하는 스케일러'
         ),
         DeclareLaunchArgument(
-            'start_scale_speed', default_value='7.0',
+            'start_scale_speed', default_value='3.2',
             description='속도 비례 조향 다운스케일 시작 속도 [m/s]'
         ),
         DeclareLaunchArgument(
-            'end_scale_speed', default_value='8.0',
+            'end_scale_speed', default_value='4.6',
             description='속도 비례 조향 다운스케일 종료 속도 [m/s] (이후 downscale_factor 최대 적용)'
         ),
         DeclareLaunchArgument(
-            'downscale_factor', default_value='0.10',
+            'downscale_factor', default_value='0.15',
             description='고속 구간 조향각 다운스케일 최대 비율'
         ),
         DeclareLaunchArgument(
@@ -167,7 +167,7 @@ def declare_common_args(sector_scale_enable_default='false'):
         ),
 
         DeclareLaunchArgument(
-            'steering_reach_ratio', default_value='0.85',
+            'steering_reach_ratio', default_value='1.0',
             description='명령 조향각 중 바퀴가 실제 도달하는 비율. 보상(1/ratio)과 조향권한 캡을 '
                         '동시 지배. 1.0 = 보상 없음(2026-07-31 실측: 링키지 정상)'
         ),
