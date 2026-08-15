@@ -238,7 +238,6 @@ public:
         l1_jump_warn_m_ = declare_parameter<double>("l1_jump_warn_m", 1.0);
 
         max_steering_rate_ = std::max(0.5, declare_parameter<double>("max_steering_rate", 20.0));
-        pose_lpf_alpha_ = std::clamp(declare_parameter<double>("pose_lpf_alpha", 0.30), 0.01, 1.0);
 
         // 좌우 조향 한계. 둘 다 같으면 기존 대칭 거동과 100% 동일.
         max_steering_left_ =
@@ -422,20 +421,17 @@ private:
             return;
         }
 
-        if (!odom_seen_) {
-            current_x_ = x;
-            current_y_ = y;
-            current_yaw_ = yaw;
-            current_speed_ = v;
-            odom_seen_ = true;
-        } else {
-            const double a = pose_lpf_alpha_;
-            current_x_ = (1.0 - a) * current_x_ + a * x;
-            current_y_ = (1.0 - a) * current_y_ + a * y;
-            const double dyaw = wrap_pi(yaw - current_yaw_);
-            current_yaw_ = wrap_pi(current_yaw_ + a * dyaw);
-            current_speed_ = (1.0 - a) * current_speed_ + a * v;
-        }
+        // ⚠️ 여기에 포즈 저역통과 필터(EMA)를 걸지 말 것. 2026-08-15에 `pose_lpf_alpha`(0.30)로
+        //    한 번 들어왔다가 제거됐다. MCL 포즈는 이미 EKF+EMA로 평활돼 있어서 여기서 한 번 더
+        //    거는 건 잡음 제거가 아니라 **순수 지연**이다(40 Hz·α=0.3 → τ≈58 ms). L1은 적분기가
+        //    없는 기하 추종기라 피드백 지연이 곧 감쇠 손실이고, ω_n·τ가 건전 대역(0.29~0.44,
+        //    ②-f)을 넘어가면 0.9 Hz 리밋사이클로 나타난다 — 0815 실측에서 요레이트 진동 대역
+        //    에너지가 0.33 → 0.65로 배가됐다. 포즈가 튀면 여기가 아니라 MCL에서 고칠 것.
+        current_x_ = x;
+        current_y_ = y;
+        current_yaw_ = yaw;
+        current_speed_ = v;
+        odom_seen_ = true;
     }
 
     void imu_callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg) {
@@ -1318,7 +1314,6 @@ private:
     // 동시에 지배한다(steer_avail()). 1.0이면 둘 다 구 낙관 거동.
     double steering_reach_ratio_ = 0.74;
     double max_steering_rate_ = 20.0;         // 조향 rate limit [rad/s] (dt 비례)
-    double pose_lpf_alpha_ = 0.30;            // MCL 포즈/헤딩 저역통과 필터 알파 (0.01~1.0)
 
     // 종방향
     double base_max_accel_;
