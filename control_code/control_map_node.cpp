@@ -238,6 +238,8 @@ public:
         l1_jump_warn_m_ = declare_parameter<double>("l1_jump_warn_m", 1.0);
 
         max_steering_rate_ = std::max(0.5, declare_parameter<double>("max_steering_rate", 20.0));
+        avoidance_l1_damping_enable_ = declare_parameter<bool>("avoidance_l1_damping_enable", true);
+        avoidance_l1_scale_max_ = declare_parameter<double>("avoidance_l1_scale_max", 1.35);
 
         // 좌우 조향 한계. 둘 다 같으면 기존 대칭 거동과 100% 동일.
         max_steering_left_ =
@@ -822,6 +824,9 @@ private:
         // 2. L1 룩어헤드 거리 + 목표점. 고곡률 진입에서는 L1을 최대 25% 줄여 반응성을 올린다.
         double curv_closest = std::abs(wps[closest_idx].smoothed_curvature);
         double L1_distance = l1_offset_ + current_speed_ * l1_speed_gain_;
+        if (avoidance_l1_damping_enable_ && local_fresh) {
+            L1_distance *= avoidance_l1_scale_max_;
+        }
         if (curv_closest > 0.3) {
             L1_distance *= (1.0 - 0.25 * std::min(1.0, (curv_closest - 0.3) / 1.0));
         }
@@ -1295,6 +1300,8 @@ private:
     double l1_min_denom_ = 0.6;              // L1 횡가속 분모 하한 [m] (t_clip_min과 분리)
     double heading_damping_gain_;
     bool l1_use_actual_distance_ = true;
+    bool avoidance_l1_damping_enable_ = true;
+    double avoidance_l1_scale_max_ = 1.35;
     bool steering_speed_cap_measured_ = true;  // 조향용 속도를 실측 속도로 상한(정지 시 LUT 포화 차단)
     int status_log_period_ms_ = 2000;          // 상태 한 줄 로그 주기 [ms], 0 = 끔
     size_t last_global_sig_ = 0;               // 글로벌 경로 재발행 중복 로그 억제용 서명
