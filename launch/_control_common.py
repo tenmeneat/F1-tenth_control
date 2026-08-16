@@ -167,7 +167,7 @@ def declare_common_args(sector_scale_enable_default='false'):
         ),
 
         DeclareLaunchArgument(
-            'steering_reach_ratio', default_value='1.0',
+            'steering_reach_ratio', default_value='0.9',
             description='명령 조향각 중 바퀴가 실제 도달하는 비율. 보상(1/ratio)과 조향권한 캡을 '
                         '동시 지배. 1.0 = 보상 없음(2026-07-31 실측: 링키지 정상)'
         ),
