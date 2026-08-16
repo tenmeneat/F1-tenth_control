@@ -25,7 +25,7 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='가속 중(acc_mean>=1.0) 조향각에 곱하는 스케일러'
         ),
         DeclareLaunchArgument(
-            'deceleration_scaler_for_steering', default_value='0.95',
+            'deceleration_scaler_for_steering', default_value='0.85',
             description='감속 중(acc_mean<=-1.0) 조향각에 곱하는 스케일러'
         ),
         DeclareLaunchArgument(
@@ -70,7 +70,7 @@ def declare_common_args(sector_scale_enable_default='false'):
                         '구 이름 l1_gain'
         ),
         DeclareLaunchArgument(
-            'l1_speed_gain', default_value='0.3',
+            'l1_speed_gain', default_value='0.4',
             description='L1 룩어헤드 거리의 **속도 계수** [s] (공식: l1_offset + v*l1_speed_gain). '
                         '구 이름 l1_distance'
         ),
