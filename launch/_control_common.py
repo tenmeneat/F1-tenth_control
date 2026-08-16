@@ -198,6 +198,12 @@ def declare_common_args(sector_scale_enable_default='false'):
                         '(코너 전용) — 직선에서 배우는 조향 트림 추정기와 영역을 갈라 둔 것'
         ),
         DeclareLaunchArgument(
+            'steering_speed_floor', default_value='0.5',
+            description='조향 계산에 쓰는 속도의 하한 [m/s]. local_planning이 safe stop으로 '
+                        'vx_mps=0을 발행하면 조향까지 0이 되어 굴러가는 중에 바퀴가 곧게 '
+                        '펴진다(코너 비상정지 = 바깥 벽 직진). 0 = 구 거동'
+        ),
+        DeclareLaunchArgument(
             'understeer_curve_enable', default_value='false',
             description='K_us를 하중별 곡선 K_us(a_lat)로 쓴다 (②-q). **false = 관측 전용**'
                         '(빈별 학습·로그만, 조향엔 스칼라 사용 — 기본). LUT가 담으려던 타이어 '
@@ -407,6 +413,8 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
                 LaunchConfiguration('understeer_gradient_adapt_gain'),
             'understeer_adapt_min_lat_acc':
                 LaunchConfiguration('understeer_adapt_min_lat_acc'),
+            'steering_speed_floor':
+                LaunchConfiguration('steering_speed_floor'),
             'understeer_curve_enable': ParameterValue(
                 LaunchConfiguration('understeer_curve_enable'), value_type=bool),
             'understeer_curve_min_samples': ParameterValue(

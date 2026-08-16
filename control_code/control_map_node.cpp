@@ -107,8 +107,9 @@ void smooth_curvature(std::vector<Waypoint>& wps, bool closed, double window_hal
 
     const int half_n = std::max(1, static_cast<int>(std::round(window_half_m / avg_spacing)));
     std::vector<double> smoothed(static_cast<size_t>(n));
+    std::vector<double> smoothed_signed(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
-        double sum = 0.0;
+        double sum = 0.0, sum_signed = 0.0;
         int cnt = 0;
         for (int off = -half_n; off <= half_n; ++off) {
             int idx = i + off;
@@ -118,13 +119,20 @@ void smooth_curvature(std::vector<Waypoint>& wps, bool closed, double window_hal
                 if (idx < 0 || idx >= n) continue;  // 열린 경로: 창을 배열 안으로 자른다
             }
             sum += std::abs(wps[static_cast<size_t>(idx)].curvature);
+            sum_signed += wps[static_cast<size_t>(idx)].curvature;
             ++cnt;
         }
         smoothed[static_cast<size_t>(i)] =
             (cnt > 0) ? (sum / cnt) : std::abs(wps[static_cast<size_t>(i)].curvature);
+        // 🔑 부호 있는 평균은 **따로** 낸다. |κ|를 평균한 뒤 부호를 붙이면 S자 구간에서
+        //    좌우가 상쇄되지 않아 크기가 부풀고, 부호를 어디서 가져올지도 애매해진다.
+        smoothed_signed[static_cast<size_t>(i)] =
+            (cnt > 0) ? (sum_signed / cnt) : wps[static_cast<size_t>(i)].curvature;
     }
     for (int i = 0; i < n; ++i) {
         wps[static_cast<size_t>(i)].smoothed_curvature = smoothed[static_cast<size_t>(i)];
+        wps[static_cast<size_t>(i)].smoothed_curvature_signed =
+            smoothed_signed[static_cast<size_t>(i)];
     }
 }
 
@@ -206,6 +214,10 @@ public:
         // 타이어가 포화하면 같은 조향으로 못 도는데, 그게 K_us가 하중과 함께 커지는
         // 것으로 나타난다. 상수 K_us는 이걸 못 담고 2-D LUT는 담으려다 실패했다.
         // 자이로가 이 곡선을 직접 준다 — 1-D라 몇 랩이면 동정된다.
+        // 조향용 속도 하한 [m/s]. 0이면 구 거동(= vx_mps 0 구간에서 조향도 0).
+        steering_speed_floor_ = std::max(0.0,
+            declare_parameter<double>("steering_speed_floor", 0.5));
+
         understeer_curve_enable_ =
             declare_parameter<bool>("understeer_curve_enable", false);
         understeer_curve_min_samples_ = static_cast<int>(std::max<int64_t>(50,
@@ -638,12 +650,15 @@ private:
     }
 
     // FF가 참조할 경로 곡률. 노이즈가 그대로 조향에 실리지 않도록 **평활 곡률**을 쓴다.
+    // 🔴 반드시 **부호 있는** 쪽을 쓸 것. smoothed_curvature는 |κ|(사전감속 전용)이라
+    //    그걸 쓰면 FF가 항상 한쪽으로만 나가고, steering_fb_gain을 1.0 미만으로 내리는
+    //    순간(= FF/FB 분리의 목적) 우코너에서 조향이 상쇄돼 사라진다.
     double curvature_for_ff(const std::vector<Waypoint>& wps, size_t closest_idx,
                             bool path_closed) const {
-        if (curvature_ff_preview_ <= 1e-6) return wps[closest_idx].smoothed_curvature;
+        if (curvature_ff_preview_ <= 1e-6) return wps[closest_idx].smoothed_curvature_signed;
         const size_t idx = walk_forward(wps, closest_idx, curvature_ff_preview_, path_closed,
                                         [](size_t, double) { return true; });
-        return wps[idx].smoothed_curvature;
+        return wps[idx].smoothed_curvature_signed;
     }
 
     // steer_hist_에서 lag만큼 과거의 발행 조향을 선형보간으로 꺼낸다.
@@ -1162,6 +1177,16 @@ private:
         if (steering_speed_cap_measured_) {
             speed_for_lu = std::min(speed_for_lu, current_speed_);
         }
+        // 🔴 **조향용 속도에는 바닥이 필요하다.** local_planning은 safe stop과 제동경로
+        //    말단에서 vx_mps=0 웨이포인트를 발행한다. 그대로 두면 a_lat=0 → a_cmd=0 →
+        //    조향 0이 되어, **차가 아직 4 m/s로 굴러가는 중에 바퀴가 곧게 펴진다**
+        //    (코너 한복판 비상정지 = 바깥 벽으로 직진). 종방향은 그 0을 그대로 따라야
+        //    맞지만(정지는 planning의 권한), 조향까지 버릴 이유는 없다.
+        // 🔑 자전거 역모델에서 v²이 소거되므로(δ = 2L·sinη/L1) 이 바닥값이 얼마든
+        //    pure pursuit 기하는 그대로 나온다 — K_us·v² 항만 미미하게 줄 뿐이다.
+        //    ②-f의 "정지 상태 풀락"과 반대 방향으로 안전하다: 거기선 v²이 안 나뉘어
+        //    게인이 폭발했고, 여기선 소거되어 기하로 수렴한다.
+        speed_for_lu = std::max(speed_for_lu, steering_speed_floor_);
         double l1_denom = l1_use_actual_distance_ ? std::max(L1_norm, l1_min_denom_)
                                                   : std::max(L1_distance, l1_min_denom_);
         lat_acc = 2.0 * speed_for_lu * speed_for_lu / l1_denom * sin_eta;
@@ -1697,6 +1722,9 @@ private:
     long   understeer_adapt_samples_ = 0;
     // 관측 모드에서 쓰는 LPF 게인(τ≈4 s). 적용은 안 하고 로그로만 수렴을 보여준다.
     static constexpr double kUsObserveGain = 0.25;
+
+    // 조향용 속도 하한 [m/s]. planning의 vx_mps=0(safe stop)에서 조향까지 0이 되는 것 방지.
+    double steering_speed_floor_ = 0.5;
 
     // K_us(a_lat) 곡선 (②-q). 기본 비활성 = 스칼라 그대로.
     bool understeer_curve_enable_ = false;
