@@ -238,6 +238,12 @@ public:
         l1_jump_warn_m_ = declare_parameter<double>("l1_jump_warn_m", 1.0);
 
         max_steering_rate_ = std::max(0.5, declare_parameter<double>("max_steering_rate", 20.0));
+        // ⚠️ 2026-08-16 게이트 수정: 원래 `local_fresh`(= `/local_waypoints`를 최근에 받았나)로
+        //    켰는데, state_machine이 GLOBAL/CRUISE에서도 매 frenet odom마다 글로벌 라인을
+        //    `/local_waypoints`로 발행하므로 local_fresh는 평상시 주행에서도 상시 true다.
+        //    즉 "회피 중에만"이 아니라 "플래닝 스택이 살아있으면 항상" L1이 35% 커지고 있었다
+        //    (실효 L1 offset 0.6→0.81, ②-m이 확정한 0.6 결론을 조용히 무효화). 진짜 회피 신호인
+        //    `/state`(STATE_GLOBAL 아님)로 바꾼다 — 회피 판정은 아래 avoiding_now() 참고.
         avoidance_l1_damping_enable_ = declare_parameter<bool>("avoidance_l1_damping_enable", true);
         avoidance_l1_scale_max_ = declare_parameter<double>("avoidance_l1_scale_max", 1.35);
 
@@ -319,22 +325,29 @@ public:
                 sector_scale_topic_,
                 rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local(),
                 std::bind(&ControlMapNode::sector_scale_callback, this, std::placeholders::_1));
-            if (sector_scale_global_only_) {
-                sector_state_sub_ = this->create_subscription<f110_msgs::msg::StateMachine>(
-                    sector_scale_state_topic_, 10,
-                    [this](const f110_msgs::msg::StateMachine::SharedPtr msg) {
-                        const bool was = sector_on_global_ && sector_state_seen_;
-                        sector_on_global_ = (msg->state == f110_msgs::msg::StateMachine::STATE_GLOBAL);
-                        sector_state_last_recv_time_ = this->now();
-                        sector_state_seen_ = true;
-                        if (was != sector_on_global_) {
-                            // 상태가 바뀌면 이미 받아둔 경로의 mla를 즉시 다시 해소해야 한다 —
-                            // 안 그러면 회피에 들어갔는데 다음 경로 메시지까지 옛 스케일이 남는다.
-                            apply_sector_scales(waypoints_);
-                            apply_sector_scales(local_waypoints_);
-                        }
-                    });
-            }
+        }
+        // /state 구독 콜백은 sector_on_global_/sector_state_seen_을 채운다 — 섹터 스케일의
+        // 회피 게이팅뿐 아니라 avoidance_l1_damping의 회피 판정도 이 값을 쓴다. 그래서 둘 중
+        // 하나라도 필요하면 구독한다(섹터 스케일을 꺼도 L1 회피 감쇠는 살아 있어야 한다).
+        const bool need_state_sub =
+            (sector_scale_enable_ && sector_scale_global_only_) || avoidance_l1_damping_enable_;
+        if (need_state_sub) {
+            sector_state_sub_ = this->create_subscription<f110_msgs::msg::StateMachine>(
+                sector_scale_state_topic_, 10,
+                [this](const f110_msgs::msg::StateMachine::SharedPtr msg) {
+                    const bool was = sector_on_global_ && sector_state_seen_;
+                    sector_on_global_ = (msg->state == f110_msgs::msg::StateMachine::STATE_GLOBAL);
+                    sector_state_last_recv_time_ = this->now();
+                    sector_state_seen_ = true;
+                    if (was != sector_on_global_ && sector_scale_enable_) {
+                        // 상태가 바뀌면 이미 받아둔 경로의 mla를 즉시 다시 해소해야 한다 —
+                        // 안 그러면 회피에 들어갔는데 다음 경로 메시지까지 옛 스케일이 남는다.
+                        apply_sector_scales(waypoints_);
+                        apply_sector_scales(local_waypoints_);
+                    }
+                });
+        }
+        if (sector_scale_enable_) {
             // 테이블 데드맨 감시. 스케일은 **수신 콜백에서 웨이포인트에 구워 두는** 구조라
             // (50 Hz 루프를 가볍게 유지하려는 설계), 신선도가 끊긴 순간 누가 다시 굽지 않으면
             // 옛 스케일이 배열에 그대로 남는다. 그래서 전이를 감시해 한 번만 되굽는다.
@@ -367,6 +380,13 @@ public:
                         sector_scale_timeout_ > 0.0
                             ? (std::to_string(sector_scale_timeout_).substr(0, 4) + "s").c_str()
                             : "꺼짐(테이블 영구 유지)");
+        }
+        if (avoidance_l1_damping_enable_) {
+            RCLCPP_INFO(this->get_logger(),
+                        "회피 L1 감쇠 활성 — %s(STATE_GLOBAL 아님)에서 L1 ×%.2f "
+                        "(%s미수신/끊김 시 자동 비활성)",
+                        sector_scale_state_topic_.c_str(), avoidance_l1_scale_max_,
+                        sector_scale_state_topic_.c_str());
         }
 
         // 조향 트림 자동 보상 설정을 기동 시 1회 남긴다 — 나중에 로그만 보고 "그때 켜져
@@ -653,6 +673,18 @@ private:
             out += std::max(speed_error, -max_decel * dt);
             if (out < target) out = target;
         }
+        // 정지 래치 방지: speed_error가 실측 기준으로 계산되기 때문에, 실측이 target과
+        // 이미 같은 값에 멈춰 있으면(예: 세이프스톱 target=0인데 탈조로 v=0.00) 위 두 분기가
+        // 전부 무동작이 되어 out(=last_cmd)이 그 값에 영구 고착된다(예: 킥으로 2.4까지 올라간
+        // 채 정지 상태가 계속되면 target이 0이어도 명령이 계속 2.4로 나간다). speed_error가
+        // 사실상 0(=실측이 target에 이미 도달)인데 out이 아직 target과 다르면, out 자신의
+        // 잔차를 기준으로 rate limit을 한 번 더 적용해 반드시 수렴시킨다. 정상 가감속
+        // 경로에서는 위 분기가 이미 out을 target 쪽으로 clamp해 두므로 이 블록은 no-op이다.
+        constexpr double kSpeedErrorEps = 1e-6;
+        if (std::abs(speed_error) < kSpeedErrorEps) {
+            if (out > target) out = std::max(target, out - max_decel * dt);
+            else if (out < target) out = std::min(target, out + max_accel * dt);
+        }
         return out;
     }
 
@@ -824,7 +856,11 @@ private:
         // 2. L1 룩어헤드 거리 + 목표점. 고곡률 진입에서는 L1을 최대 25% 줄여 반응성을 올린다.
         double curv_closest = std::abs(wps[closest_idx].smoothed_curvature);
         double L1_distance = l1_offset_ + current_speed_ * l1_speed_gain_;
-        if (avoidance_l1_damping_enable_ && local_fresh) {
+        // ⚠️ 게이트는 local_fresh가 아니라 avoiding_now()(= /state != STATE_GLOBAL)다.
+        //    local_fresh는 "/local_waypoints를 최근에 받았나"일 뿐이고, state_machine은
+        //    GLOBAL/CRUISE에서도 매 frenet odom마다 글로벌 라인을 그 토픽으로 발행하므로
+        //    local_fresh는 평상시 주행에서도 상시 true다(과거 이 조건은 사실상 no-op 게이트였다).
+        if (avoidance_l1_damping_enable_ && avoiding_now()) {
             L1_distance *= avoidance_l1_scale_max_;
         }
         if (curv_closest > 0.3) {
@@ -1003,6 +1039,16 @@ private:
                     launch_time_ += dt;
                     if (moving) {
                         launch_active_ = false;                        // 관통 성공
+                        // 킥이 끝나는 이 사이클에만, 램프가 방금 발행하던 킥 값 근처에서
+                        // 이어지도록 1회 맞춘다(해제 직후 속도 절벽 방지). ⚠️ ramp_lead_max로
+                        // 상한을 걸어서 이번 사이클 안티와인드업 클램프(위 8절)를 벗어나지
+                        // 않게 한다 — 벗어나면 세이프스톱 등으로 target이 낮게 바뀌어도
+                        // last_target_speed_가 킥 값에 고착돼 요구보다 과속 발행할 수 있다
+                        // (B-4: ramp_speed 정지 래치와 결합하면 더 나쁘다).
+                        const double catchup_cap = ramp_lead_max_ > 0.0
+                            ? current_speed_ + ramp_lead_max_ : launch_boost_speed_;
+                        last_target_speed_ = std::max(last_target_speed_,
+                            std::min({publish_speed, launch_boost_speed_, catchup_cap}));
                     } else if (launch_time_ > launch_boost_time_) {
                         launch_active_ = false; launch_latched_off_ = true;
                         RCLCPP_WARN(this->get_logger(),
@@ -1010,7 +1056,10 @@ private:
                             launch_time_);
                     } else {
                         publish_speed = std::max(publish_speed, launch_boost_speed_);
-                        last_target_speed_ = publish_speed; // 런치 킥 해제 후 속도 절벽 멈칫거림 방지 (무구간 부드러운 가속 이음)
+                        // ⚠️ 여기서 last_target_speed_를 건드리지 않는다 — 킥은 "발행값만
+                        //    덮는다"는 불변식(②-i)을 지킨다. 매 사이클 밀면 플래너가 낮은
+                        //    target(예: 회피 서행 0.5)을 요구하는 중에도 램프가 킥 값에
+                        //    고착돼 요구 속도를 초과 발행하게 된다.
                         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 200,
                             "런치 킥: 실측 %.2f → 발행 %.2f m/s (t=%.2fs)",
                             current_speed_, publish_speed, launch_time_);
@@ -1205,6 +1254,17 @@ private:
         if (sector_scale_timeout_ <= 0.0) return true;
         if (!sector_table_seen_) return false;
         return (this->now() - sector_table_last_recv_time_).seconds() <= sector_scale_timeout_;
+    }
+
+    // 회피/추월 중인가(= /state가 STATE_GLOBAL이 아님). 섹터 스케일과 같은 /state 구독을
+    // 공유하고, 같은 "모르면 끈다" 규약을 쓴다 — 미수신/끊김이면 회피 여부를 모르므로 false
+    // (avoidance_l1_damping은 그 경우 평상 L1을 유지한다. sector_active()와 달리 이 함수는
+    // sector_scale_enable_과 무관하게 동작해야 한다 — 섹터 스케일을 꺼도 L1 감쇠는 살아있다).
+    bool avoiding_now() const {
+        if (!sector_state_seen_) return false;
+        if ((this->now() - sector_state_last_recv_time_).seconds() > sector_scale_state_timeout_)
+            return false;
+        return !sector_on_global_;
     }
 
     bool sector_active() const {

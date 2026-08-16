@@ -29,15 +29,21 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='감속 중(acc_mean<=-1.0) 조향각에 곱하는 스케일러'
         ),
         DeclareLaunchArgument(
-            'start_scale_speed', default_value='3.2',
+            # ⚠️ 2026-08-16 08-15 실측 트랙 기준(최고 5.7~6.96 m/s)으로 3.2/4.6로 낮췄던 값을
+            # 0814 확정값(7.0/8.0)으로 되돌린다. 3.2~4.6은 그립 캡이 아직 안 걸린 코너
+            # 진입(턴인) 구간과 겹쳐 상시 -15% 다운스케일이 걸렸고, 같은 창에서 들어온 L1
+            # 확장(avoidance_l1_damping)과 겹쳐 코너 탈출에서 바깥쪽(언더스티어 방향) 정상상태
+            # 오차를 키웠다(추정 +0.11~0.21 m, 벽 여유 p5 0.145 m 섹터 마진의 대부분 소진).
+            # 재도입하려면 턴인 구간(그립 캡이 걸리기 전 속도대)을 피해서 재측정할 것.
+            'start_scale_speed', default_value='7.0',
             description='속도 비례 조향 다운스케일 시작 속도 [m/s]'
         ),
         DeclareLaunchArgument(
-            'end_scale_speed', default_value='4.6',
+            'end_scale_speed', default_value='8.0',
             description='속도 비례 조향 다운스케일 종료 속도 [m/s] (이후 downscale_factor 최대 적용)'
         ),
         DeclareLaunchArgument(
-            'downscale_factor', default_value='0.15',
+            'downscale_factor', default_value='0.10',
             description='고속 구간 조향각 다운스케일 최대 비율'
         ),
         DeclareLaunchArgument(
@@ -167,9 +173,13 @@ def declare_common_args(sector_scale_enable_default='false'):
         ),
 
         DeclareLaunchArgument(
-            'steering_reach_ratio', default_value='0.9',
+            # ⚠️ 2026-08-16: 0.9(그리고 그 직전 1.0)는 근거 문서·주석 없이 08-15~16에
+            # 들어왔다가 08-16에 0.9로 되돌아온 값이다. 08-07에 "실측치(≈1.0)로 올리자"는
+            # 제안이 검토 후 기각되고 0.85로 확정된 결정을 근거 없이 뒤집은 것 — 0.85로 복귀.
+            'steering_reach_ratio', default_value='0.85',
             description='명령 조향각 중 바퀴가 실제 도달하는 비율. 보상(1/ratio)과 조향권한 캡을 '
-                        '동시 지배. 1.0 = 보상 없음(2026-07-31 실측: 링키지 정상)'
+                        '동시 지배. 1.0 = 보상 없음(2026-07-31 실측: 링키지 정상, 단 08-07에 '
+                        '"하중 걸린 주행 마진 아님"으로 상향 기각됨 — 실측만으로 다시 올리지 말 것)'
         ),
         # 50Hz에서 20 rad/s = 사이클당 0.4 rad = 풀락까지 2 사이클 = 구 하드코딩과 동일(무제한).
         # 서보 물리 속도(~7 rad/s 추정)로 낮추면 고주파 채터링을 막지만 실측 전이라 중립 유지.
