@@ -28,7 +28,7 @@ def generate_launch_description():
 
     max_lateral_accel_arg = DeclareLaunchArgument(
         'max_lateral_accel', default_value='7.0',
-        description='코너 그립 클램프 a_lat [m/s^2] (LUT 그립 피크 ~6.7 이내)'
+        description='코너 그립 클램프 a_lat [m/s^2]. 조향 생성의 a_cmd 상한도 겸한다(②-p)'
     )
 
     max_steering_left_arg = DeclareLaunchArgument(
@@ -40,11 +40,6 @@ def generate_launch_description():
         'max_steering_right', default_value='0.410',
         description='우조향(δ<0) 명령 한계 [rad] = 실제 바퀴 각. 젯슨 vesc.yaml 의 '
                     'steering_angle_to_servo_gain_right(-0.4702) + offset(0.4672) 과 한 쌍'
-    )
-
-    lookup_table_file_arg = DeclareLaunchArgument(
-        'lookup_table_file', default_value='',
-        description='Steering LUT CSV 경로 (비워두면 기본 폴백 사용, 캘리브레이션 결과 적용 시 지정)'
     )
 
     base_max_accel_arg = DeclareLaunchArgument(
@@ -61,7 +56,6 @@ def generate_launch_description():
         base_max_accel=LaunchConfiguration('base_max_accel'),
         max_steering_left=LaunchConfiguration('max_steering_left'),
         max_steering_right=LaunchConfiguration('max_steering_right'),
-        lookup_table_file=LaunchConfiguration('lookup_table_file'),
         imu_linear_scale=common.IMU_LINEAR_SCALE_REAL,
         imu_angular_scale=common.IMU_ANGULAR_SCALE_REAL,
         # vesc_driver_node는 IMU를 sensors/imu/raw로 발행하지만 control_map_node.cpp는
@@ -86,7 +80,6 @@ def generate_launch_description():
         max_lateral_accel_arg,
         max_steering_left_arg,
         max_steering_right_arg,
-        lookup_table_file_arg,
         base_max_accel_arg,
         steering_control,
         drive_source_selector,

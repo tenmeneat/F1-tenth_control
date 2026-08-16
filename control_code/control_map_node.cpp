@@ -19,13 +19,12 @@
 #include "std_msgs/msg/float32_multi_array.hpp"
 
 #include "f1tenth_control/types.hpp"
-#include "f1tenth_control/steering_lookup_table.hpp"
 #include "f110_msgs/msg/wpnt_array.hpp"
 #include "f110_msgs/msg/state_machine.hpp"
 
-#include "ament_index_cpp/get_package_share_directory.hpp"
-
-using namespace f1tenth_control;
+// ⚠️ `ament_index_cpp`와 `using namespace f1tenth_control;`은 2026-08-17에 함께 제거됐다.
+//    둘 다 LUT 로드 경로(share/cfg CSV 폴백 + steering_lookup_table.hpp의 네임스페이스)
+//    전용이었고, LUT 삭제로 소비처가 사라졌다. `types.hpp`의 Waypoint는 전역 스코프다.
 
 namespace {
 
@@ -162,10 +161,59 @@ public:
         steering_reach_ratio_ =
             std::clamp(declare_parameter<double>("steering_reach_ratio", 0.74), 0.3, 1.0);
 
+        // ── 조향 생성: 정상상태 자전거 역모델 + FF/FB 분리 (②-p) ───────────────
+        // δ = a_lat·(L/v² + K_us). 곡률 사전감속(control_loop 1.5)의 조향 권한 캡이
+        // 쓰는 것과 **같은 모델**이다 — 이 일원화가 ②-p의 핵심이다.
+        // ⚠️ 2026-08-17 이전엔 여기가 LUT 역조회였고, 그래서 컨트롤러가 서로 다른 차량
+        //    모델 둘을 갖고 있었다: 종방향은 "이 속도면 δ_avail 안에서 꺾인다"고 판단하는데
+        //    LUT는 NaN 절단 때문에 훨씬 아래에서 막혔다(v=5.0에서 필요 조향의 절반,
+        //    v=6.0에서 3분의 1). 종방향이 허용한 속도를 횡방향이 못 따라가는 구조였고,
+        //    실제로 7.7 m/s 최고기록 주행이 조향 사이클의 37%를 그 천장에 붙어 달렸다.
+        //    LUT 메커니즘은 삭제됐다 — 롤백이 필요하면 git 0d16173 참고.
+        // FF/FB 분리 게인. L1이 만든 횡가속 명령 중 **경로 곡률로 설명되지 않는 몫**에만
+        // 곱한다. 🔑 모델이 선형이라 1.0이면 분리 전(= a_ff + a_fb = lat_acc)과 수학적으로
+        // 정확히 동일하다 → 1.0에서 시작해 내려가며 A/B 할 수 있는 연속 노브다.
+        // 낮추면 "경로는 FF가 따라가고 L1은 오차만 고친다"에 가까워져, L1을 크게 유지한 채
+        // (감쇠 여유 확보 = 횡진동 없음) 곡선 추종 정확도를 올릴 수 있다. ②-m에서
+        // l1_offset 0.70→0.4가 횡진동으로 기각된 트레이드오프가 여기서 분리된다.
+        steering_fb_gain_ = std::clamp(
+            declare_parameter<double>("steering_fb_gain", 1.0), 0.0, 2.0);
+        // FF가 참조할 곡률을 이만큼 앞에서 읽는다 [m]. 0이면 최근접점(정상상태 정의에 충실).
+        // 조향→요레이트 지연이 실측 140 ms라, 지연 보상이 필요하면 v·0.14 정도가 출발점이다.
+        curvature_ff_preview_ = std::max(0.0,
+            declare_parameter<double>("curvature_ff_preview", 0.0));
+
+        // ── K_us 온라인 적응 (②-p 3단계) ───────────────────────────────────────
+        // 🔴 기본 0.0 = **관측 전용**(추정만 하고 로그만 찍는다, 적용 안 함).
+        //    실측 K_us는 하중에 따라 0.0168(a_lat 3~4) → 0.0091(8~10)로 변하는데 정적
+        //    상수는 그걸 못 따라간다. 다만 이 추정기는 조향 권한 캡까지 함께 지배하므로
+        //    (모델 일원화의 대가) 관측 로그로 수렴을 먼저 확인한 뒤 켤 것.
+        understeer_adapt_gain_ = std::max(0.0,
+            declare_parameter<double>("understeer_gradient_adapt_gain", 0.0));
+        understeer_min_ = std::max(1e-4, declare_parameter<double>("understeer_gradient_min", 0.008));
+        understeer_max_ = std::max(understeer_min_,
+                                   declare_parameter<double>("understeer_gradient_max", 0.025));
+        // 관측성 게이트: K_us·a_lat 항이 지배해야 역산이 의미 있다. 코너에서만 배운다
+        // — 직선에서 배우는 조향 트림 추정기(steering_trim_*, |a_lat| ≤ 2.0)와 작동
+        // 영역이 겹치지 않게 갈라 두 추정기가 같은 신호를 두고 싸우지 않게 한다.
+        understeer_adapt_min_lat_acc_ = std::max(0.5,
+            declare_parameter<double>("understeer_adapt_min_lat_acc", 3.0));
+        understeer_adapt_min_speed_ = std::max(0.5,
+            declare_parameter<double>("understeer_adapt_min_speed", 2.0));
+
+        // ── K_us(a_lat) 곡선 = LUT가 담으려던 비선형성의 1차원 대체 (②-q) ─────────
+        // 🔴 기본 false = **관측 전용**. 켜도 곡선이 안 배워진 빈은 스칼라로 폴백한다.
+        // 타이어가 포화하면 같은 조향으로 못 도는데, 그게 K_us가 하중과 함께 커지는
+        // 것으로 나타난다. 상수 K_us는 이걸 못 담고 2-D LUT는 담으려다 실패했다.
+        // 자이로가 이 곡선을 직접 준다 — 1-D라 몇 랩이면 동정된다.
+        understeer_curve_enable_ =
+            declare_parameter<bool>("understeer_curve_enable", false);
+        understeer_curve_min_samples_ = static_cast<int>(std::max<int64_t>(50,
+            declare_parameter<int>("understeer_curve_min_samples", 300)));
+
         speed_lookahead_ = declare_parameter<double>("speed_lookahead", 0.15);
         speed_lookahead_for_steering_ =
             declare_parameter<double>("speed_lookahead_for_steering", 0.0);
-        std::string lut_file = declare_parameter<std::string>("lookup_table_file", "");
 
         base_max_accel_ = declare_parameter<double>("base_max_accel", 4.0);
         base_max_decel_ = declare_parameter<double>("base_max_decel", 8.0);
@@ -205,9 +253,14 @@ public:
             static_cast<size_t>(declare_parameter<int>("curvature_lookahead_count", 60));
         max_lateral_accel_ = declare_parameter<double>("max_lateral_accel", 6.0);
         understeer_gradient_ = declare_parameter<double>("understeer_gradient", 0.019);
+        // 적응 추정의 출발점은 런치가 준 정적값이다 — 학습 전/게이트가 안 열린 구간에서는
+        // 정확히 구 거동으로 떨어진다. (범위 클램프는 파라미터 선언부에서 이미 읽었다.)
+        understeer_gradient_adapted_ =
+            std::clamp(understeer_gradient_, understeer_min_, understeer_max_);
+        // 곡선 빈도 같은 출발점에서 시작 — 학습 전엔 어느 하중에서도 구 거동이다.
+        for (int i = 0; i < kUsBins; ++i) kus_bin_[i] = understeer_gradient_adapted_;
         // δ_max 중 곡률 추종에 배정할 비율. 나머지는 횡오차 보정·요레이트 피드백 여유.
         steer_authority_ratio_ = declare_parameter<double>("steer_authority_ratio", 0.85);
-        curvature_ff_blend_ = declare_parameter<double>("curvature_ff_blend", 0.0);
         odom_topic_ = declare_parameter<std::string>("odom_topic", "/ego_racecar/odom");
 
         sector_scale_enable_ = declare_parameter<bool>("sector_scale_enable", false);
@@ -273,22 +326,6 @@ public:
             declare_parameter<double>("closest_idx_max_heading_err", 1.40);
 
         acc_now_ = std::vector<double>(10, 0.0);
-
-        bool loaded = !lut_file.empty() && lookup_table_.load(lut_file);
-        for (const char* pkg : {"f1tenth_control", "steering_lookup"}) {
-            if (loaded) break;
-            try {
-                lut_file = ament_index_cpp::get_package_share_directory(pkg)
-                           + "/cfg/LUT_calibrated.csv";
-                loaded = lookup_table_.load(lut_file);
-            } catch (...) {}
-        }
-        if (!loaded) {
-            RCLCPP_ERROR(this->get_logger(),
-                "❌ 모든 경로에서 룩업 테이블(LUT) 로드 실패! 조향각이 0.0으로 고정됩니다.");
-        } else {
-            RCLCPP_INFO(this->get_logger(), "🟢 룩업 테이블(LUT) 로드 성공: %s", lut_file.c_str());
-        }
 
         // ── 3. 통신 채널 ──
         // 글로벌은 latched(transient_local), 로컬은 퍼블리셔에 맞춰 volatile.
@@ -389,6 +426,40 @@ public:
                         sector_scale_state_topic_.c_str());
         }
 
+        // 조향 파라미터를 기동 시 1회 남긴다 — bag만 보고 "그 주행이 어떤 설정이었나"를
+        // 되짚을 수 있어야 한다(0816 사후분석에서 파라미터 이력을 git으로 캐야 했던 교훈).
+        RCLCPP_INFO(this->get_logger(),
+                    "🟢 조향: 자전거 역모델 δ=a_lat·(L/v²+K_us) | K_us %.5f | "
+                    "FF/FB 분리 게인 %.2f%s | FF 곡률 프리뷰 %.2f m",
+                    understeer_gradient_eff(), steering_fb_gain_,
+                    (std::abs(steering_fb_gain_ - 1.0) < 1e-9) ? "(=순수 L1과 동일)" : "",
+                    curvature_ff_preview_);
+        if (understeer_adapt_gain_ > 0.0) {
+            RCLCPP_WARN(this->get_logger(),
+                        "K_us 온라인 적응 **활성** — gain %.2f (τ=%.1fs), 범위 [%.4f, %.4f], "
+                        "게이트: |a_lat|≥%.1f, v≥%.1f. ⚠️ 이 값은 조향 권한 캡(코너 진입속도)도 "
+                        "함께 지배한다.",
+                        understeer_adapt_gain_, 1.0 / understeer_adapt_gain_,
+                        understeer_min_, understeer_max_,
+                        understeer_adapt_min_lat_acc_, understeer_adapt_min_speed_);
+        } else {
+            RCLCPP_INFO(this->get_logger(),
+                        "K_us 적응: 관측 전용(추정·로그만, 적용 안 함). 켜려면 "
+                        "understeer_gradient_adapt_gain:=0.25");
+        }
+        if (understeer_curve_enable_) {
+            RCLCPP_WARN(this->get_logger(),
+                        "K_us(a_lat) 곡선 **활성** — 빈 중심 %.1f/%.1f/%.1f/%.1f m/s², "
+                        "빈당 최소 %d샘플, 단조 비감소 강제. ⚠️ 조향이 고하중에서 커진다 — "
+                        "저속 셰이크다운부터 할 것.",
+                        kUsBinCenter[0], kUsBinCenter[1], kUsBinCenter[2], kUsBinCenter[3],
+                        understeer_curve_min_samples_);
+        } else {
+            RCLCPP_INFO(this->get_logger(),
+                        "K_us(a_lat) 곡선: 관측 전용(빈별 학습·로그만, 조향엔 스칼라 사용). "
+                        "켜려면 understeer_curve_enable:=true");
+        }
+
         // 조향 트림 자동 보상 설정을 기동 시 1회 남긴다 — 나중에 로그만 보고 "그때 켜져
         // 있었나 / 단위 계수가 맞았나"를 확인할 수 있어야 한다. imu_angular_scale이
         // 1.0으로 남아 있으면(real인데 pi/180이 아니면) 요레이트가 57.3배가 되므로 경고한다.
@@ -419,7 +490,8 @@ public:
             std::chrono::milliseconds(20), std::bind(&ControlMapNode::control_loop, this));
 
         last_time_ = this->now();
-        RCLCPP_INFO(this->get_logger(), "RoboRacer L1 Guidance & Steer LUT 제어 노드가 시작되었습니다.");
+        RCLCPP_INFO(this->get_logger(),
+                    "RoboRacer L1 Guidance + 자전거 역모델 조향 제어 노드가 시작되었습니다.");
     }
 
 private:
@@ -464,6 +536,9 @@ private:
         std::rotate(acc_now_.rbegin(), acc_now_.rbegin() + 1, acc_now_.rend());
         acc_now_[0] = -msg->linear_acceleration.x * imu_linear_scale_;
 
+        // 좌측 = −a_y (CLAUDE.md "VESC 가속도계 축 확정"). 슬립 잔차 진단 전용이다.
+        lat_acc_now_ = -msg->linear_acceleration.y * imu_linear_scale_;
+
         yaw_rate_now_ = msg->angular_velocity.z * imu_angular_scale_;
         yaw_rate_last_recv_ = this->now();
         yaw_rate_seen_ = true;
@@ -488,6 +563,177 @@ private:
         return steer_authority_ratio_ * steer_limit_min_ * steering_reach_ratio_;
     }
 
+    // 지금 유효한 K_us(하중 무관 스칼라). 적응이 꺼져 있으면(기본) 런치 파라미터 그대로다.
+    // ⚠️ 조향 권한 캡·트림 추정이 **이 하나를 쓴다**(모델 일원화).
+    double understeer_gradient_eff() const {
+        return (understeer_adapt_gain_ > 0.0) ? understeer_gradient_adapted_ : understeer_gradient_;
+    }
+
+    // ── K_us(a_lat) 곡선 (②-q) ────────────────────────────────────────────────
+    // 빈 중심 [m/s²]. 자이로 실측(0813/0814 bag)에서 K_us는 a_lat 5부터 확실히 올라간다:
+    //   a_lat  4~5   5~6   6~7   7~8   (r=1.0 가정, 절대값은 r에 비례하지만 **모양은 불변**)
+    //   K_us  .0127 .0128 .0168 .0197
+    // 저하중(2~4)의 큰 값은 a_lat으로 나누는 데서 오는 노이즈·트림 잔차라 학습 대상이 아니다
+    // — 그 영역은 조향 트림 추정기(②-n)가 이미 담당한다.
+    static constexpr int kUsBins = 4;
+    static constexpr double kUsBinCenter[kUsBins] = {3.5, 5.0, 6.5, 8.5};
+
+    // |a_lat|에서 곡선을 읽는다. 빈 사이는 선형보간, 양 끝은 그 값으로 평평하게 유지
+    // (외삽 금지 — 관측 못 한 하중대에서 조향이 튀는 것이 LUT의 실패 방식이었다).
+    double understeer_from_curve(double a_lat_abs) const {
+        const double base = understeer_gradient_eff();
+        if (!understeer_curve_enable_) return base;
+
+        // 학습된 빈만 쓴다. 부족하면 그 빈은 스칼라값으로 대체 = 구 거동으로 폴백.
+        double k[kUsBins];
+        bool any = false;
+        for (int i = 0; i < kUsBins; ++i) {
+            const bool ready = kus_bin_n_[i] >= understeer_curve_min_samples_;
+            k[i] = ready ? kus_bin_[i] : base;
+            any = any || ready;
+        }
+        if (!any) return base;
+
+        // 🔑 단조 비감소 강제. 타이어 포화는 한 방향으로만 간다 — 이 제약이 노이즈로
+        //    곡선이 출렁여 조향이 하중에 대해 비단조가 되는 것을 구조적으로 막는다.
+        //    (LUT는 이 제약이 없어서 그립피크 이후 접혀 NaN이 됐다.)
+        for (int i = 1; i < kUsBins; ++i) k[i] = std::max(k[i], k[i - 1]);
+
+        const double a = std::abs(a_lat_abs);
+        if (a <= kUsBinCenter[0]) return k[0];
+        if (a >= kUsBinCenter[kUsBins - 1]) return k[kUsBins - 1];
+        for (int i = 1; i < kUsBins; ++i) {
+            if (a < kUsBinCenter[i]) {
+                const double w = (a - kUsBinCenter[i - 1]) /
+                                 (kUsBinCenter[i] - kUsBinCenter[i - 1]);
+                return k[i - 1] + w * (k[i] - k[i - 1]);
+            }
+        }
+        return k[kUsBins - 1];
+    }
+
+    int understeer_bin_of(double a_lat_abs) const {
+        int best = 0;
+        double bd = 1e9;
+        for (int i = 0; i < kUsBins; ++i) {
+            const double d = std::abs(a_lat_abs - kUsBinCenter[i]);
+            if (d < bd) { bd = d; best = i; }
+        }
+        return best;
+    }
+
+    // 정상상태 자전거 역모델: 요구 횡가속도 → 조향각.
+    //   δ = L·κ + K_us·a_lat,  a_lat = κv²   ⟹   δ = a_lat·(L/v² + K_us)
+    // 🔑 L1 유도법칙 a_lat = 2v²·sinη/L1 을 대입하면 v²이 첫 항에서 소거되어
+    //      δ = 2L·sinη/L1 + 2K_us·v²·sinη/L1
+    //    = (순수 pure pursuit) + (속도제곱 비례 언더스티어 보정)
+    //    즉 v→0에서 게인이 폭발하지 않고 pure pursuit 기하로 수렴한다 — ②-f의
+    //    "정지 상태에서 조향이 풀락에 붙던" 구조가 원천적으로 생기지 않는다.
+    // 🔑 K_us는 **요구 횡가속도**에서 읽는다(달성값이 아니라) — 그래서 역해에 반복이
+    //    필요 없다. 곡선이 꺼져 있으면 정확히 상수 K_us로 떨어진다.
+    double bicycle_steer_from_lat_acc(double a_lat, double v) const {
+        // v=0에서 a_lat도 0이므로(∝v²) 이 하한은 0/0 방어일 뿐 거동을 바꾸지 않는다.
+        const double v2 = std::max(v * v, 1e-4);
+        return a_lat * (wheelbase_ / v2 + understeer_from_curve(std::abs(a_lat)));
+    }
+
+    // FF가 참조할 경로 곡률. 노이즈가 그대로 조향에 실리지 않도록 **평활 곡률**을 쓴다.
+    double curvature_for_ff(const std::vector<Waypoint>& wps, size_t closest_idx,
+                            bool path_closed) const {
+        if (curvature_ff_preview_ <= 1e-6) return wps[closest_idx].smoothed_curvature;
+        const size_t idx = walk_forward(wps, closest_idx, curvature_ff_preview_, path_closed,
+                                        [](size_t, double) { return true; });
+        return wps[idx].smoothed_curvature;
+    }
+
+    // steer_hist_에서 lag만큼 과거의 발행 조향을 선형보간으로 꺼낸다.
+    // 트림 추정기와 K_us 추정기가 **같은 이력·같은 지연 정의**를 쓰도록 공유한다
+    // (②-k 지뢰 1번: 지연을 안 넣으면 자전거모델 회귀가 L=0.16으로 거짓말한다).
+    bool steer_at_lag(double tnow, double* out) const {
+        const double t_target = tnow - steering_trim_lag_;
+        if (steer_hist_.size() < 2 || steer_hist_.front().first > t_target) return false;
+        double past = steer_hist_.back().second;
+        for (size_t i = 1; i < steer_hist_.size(); ++i) {
+            if (steer_hist_[i].first >= t_target) {
+                const auto &a = steer_hist_[i - 1], &b = steer_hist_[i];
+                const double w = (b.first > a.first) ? (t_target - a.first) / (b.first - a.first) : 0.0;
+                past = a.second + w * (b.second - a.second);
+                break;
+            }
+        }
+        *out = past;
+        return true;
+    }
+
+    // K_us 온라인 추정. 정상상태 자전거모델을 K_us에 대해 풀면
+    //   K_us = (δ_wheel − L·κ) / a_lat,   κ = ψ̇/v,  a_lat = v·ψ̇
+    // 🔑 자이로만 쓴다 — MCL(우리가 줄이려는 오차원)에 의존하지 않는다.
+    // 🔴 적응이 꺼져 있어도 **추정과 로그는 항상 돈다**(관측 모드). 값을 실제로 쓰는 건
+    //    understeer_gradient_eff()이고 그건 gain>0일 때만 적응값을 돌려준다.
+    void update_understeer_gradient(double dt, double published) {
+        if (!use_imu_ || !yaw_rate_seen_) return;
+        if (!is_engaged_ && engage_gate_active()) return;
+        if (launch_active_) return;
+        if ((this->now() - yaw_rate_last_recv_).seconds() > 0.2) return;
+
+        const double v = std::abs(current_speed_);
+        if (v < understeer_adapt_min_speed_) return;
+        const double a_lat = v * yaw_rate_now_;
+        // 관측성: K_us·a_lat 항이 충분히 커야 역산이 노이즈에 안 묻힌다(코너 전용 게이트).
+        if (std::abs(a_lat) < understeer_adapt_min_lat_acc_) return;
+        // 포화 구간은 정상상태 모델이 성립하지 않는다(명령과 실제 바퀴각이 갈라진다).
+        if (std::abs(published) > 0.9 * steer_limit_min_) return;
+
+        double past = 0.0;
+        if (!steer_at_lag(this->now().seconds(), &past)) return;
+
+        // 명령 공간 → 실제 바퀴각. 트림이 수렴한 뒤엔 발행값이 곧 의도한 바퀴각이므로
+        // 도달각 비율만 곱하면 된다.
+        const double delta_wheel = past * steering_reach_ratio_;
+        const double kappa = yaw_rate_now_ / v;
+        const double kus_meas = (delta_wheel - wheelbase_ * kappa) / a_lat;
+        if (!std::isfinite(kus_meas)) return;
+
+        // 1차 LPF. 되먹임이 아니라 순수 측정 평활이라 구조적으로 발산하지 않는다.
+        const double g = (understeer_adapt_gain_ > 0.0) ? understeer_adapt_gain_ : kUsObserveGain;
+        understeer_gradient_adapted_ +=
+            g * (std::clamp(kus_meas, understeer_min_, understeer_max_)
+                 - understeer_gradient_adapted_) * dt;
+        understeer_gradient_adapted_ =
+            std::clamp(understeer_gradient_adapted_, understeer_min_, understeer_max_);
+        understeer_adapt_samples_++;
+
+        // ── K_us(a_lat) 곡선 학습 (②-q) ───────────────────────────────────────
+        // 스칼라와 **같은 측정치**를 하중 빈에만 나눠 담는다. 게이트가 하나라 두 추정이
+        // 갈라지지 않고, 곡선을 꺼도 스칼라는 그대로 배운다(관측 로그가 계속 유효).
+        // ⚠️ 준정상상태에서만 배운다: a_lat = v·ψ̇ 는 β̇=0일 때만 참이고, 요레이트가
+        //    빠르게 쌓이는 과도구간에선 실제 횡가속을 과대평가한다(오프라인 분석에서
+        //    이 게이트를 넣자 자이로↔가속도계 상관이 0.86 → 0.97~0.99로 올랐다).
+        const double yaw_acc = (dt > 1e-4) ? (yaw_rate_now_ - yaw_rate_prev_) / dt : 0.0;
+        yaw_rate_prev_ = yaw_rate_now_;
+        if (std::abs(yaw_acc) > kUsCurveMaxYawAcc) return;
+
+        const int b = understeer_bin_of(std::abs(a_lat));
+        const double kc = std::clamp(kus_meas, understeer_min_, understeer_max_);
+        kus_bin_n_[b]++;
+        // 빈마다 러닝 평균(샘플 수 기반) — 초기 수렴이 빠르고 늦게는 안정된다.
+        kus_bin_[b] += (kc - kus_bin_[b]) / std::min<long>(kus_bin_n_[b], 400);
+    }
+
+    // 자이로↔가속도계 잔차 v̇_y = a_y − v·ψ̇. 슬립이 없으면 0 주변이다.
+    // 🔴 **진단 전용 — 주행에 개입하지 않는다.** 오프라인 실측 σ: 준정상 0.4~1.5 /
+    //    스핀 1.1~4.3 (배율 1.2~3.7배)이라 그립 이탈의 조기 신호로 쓸 수 있다.
+    void update_slip_residual(double dt) {
+        if (!use_imu_ || !yaw_rate_seen_) return;
+        const double v = std::abs(current_speed_);
+        if (v < 1.5) { slip_residual_ = 0.0; return; }
+        const double res = lat_acc_now_ - v * yaw_rate_now_;
+        if (!std::isfinite(res)) return;
+        const double a = std::clamp(dt / 0.25, 0.0, 1.0);   // τ=0.25s LPF
+        slip_residual_ += a * (std::abs(res) - slip_residual_);
+        if (slip_residual_ > slip_residual_peak_) slip_residual_peak_ = slip_residual_;
+    }
+
     void update_steering_trim(double dt, double published) {
         // 발행 이력은 게이트와 무관하게 항상 쌓는다(게이트가 열린 순간 lag만큼 과거가 필요).
         const double tnow = this->now().seconds();
@@ -505,20 +751,12 @@ private:
         if (std::abs(v * yaw_rate_now_) > steering_trim_max_lat_acc_) return;
 
         // lag만큼 과거의 발행값 (선형보간). 이력이 아직 짧으면 학습을 미룬다.
-        const double t_target = tnow - steering_trim_lag_;
-        if (steer_hist_.front().first > t_target) return;
-        double past = steer_hist_.back().second;
-        for (size_t i = 1; i < steer_hist_.size(); ++i) {
-            if (steer_hist_[i].first >= t_target) {
-                const auto &a = steer_hist_[i - 1], &b = steer_hist_[i];
-                const double w = (b.first > a.first) ? (t_target - a.first) / (b.first - a.first) : 0.0;
-                past = a.second + w * (b.second - a.second);
-                break;
-            }
-        }
+        double past = 0.0;
+        if (!steer_at_lag(tnow, &past)) return;
 
         // 실측 요레이트가 함의하는 바퀴각 → 명령 공간으로 환산.
-        const double delta_wheel = yaw_rate_now_ * (wheelbase_ / v + understeer_gradient_ * v);
+        const double delta_wheel =
+            yaw_rate_now_ * (wheelbase_ / v + understeer_gradient_eff() * v);
         const double e = past - delta_wheel / std::max(0.3, steering_reach_ratio_);
         steering_trim_ += steering_trim_gain_ * (e - steering_trim_) * dt;
         steering_trim_ = std::clamp(steering_trim_, -steering_trim_limit_, steering_trim_limit_);
@@ -826,13 +1064,17 @@ private:
             if (k_i > 0.01) {
                 const double mla_i = (wps[i].mla > 0.0) ? wps[i].mla : max_lateral_accel_;
                 v_cap_i = std::min(v_cap_i, std::sqrt(mla_i / k_i));                // (a) 그립
-                if (understeer_gradient_ > 1e-6) {                                  // (b) 조향 권한
+                // ⚠️ 조향 생성과 **같은** K_us를 쓴다(understeer_gradient_eff). 이 일원화가
+                //    ②-p의 핵심이다 — 종방향이 "이 속도면 꺾인다"고 판단하는 근거와 실제
+                //    조향을 만드는 근거가 다르면, 그 차이만큼 코너에서 조향이 모자란다.
+                const double kus = understeer_gradient_eff();
+                if (kus > 1e-6) {                                                   // (b) 조향 권한
                     // ⚠️ 좌우 중 **작은** 한계를 쓰고, 거기에 도달각 비율까지 곱한다 —
                     //    캡은 "바퀴가 실제로 꺾이는 각"으로 계산해야 의미가 있다(0.379를 다
                     //    낸다고 보면 코너 진입 속도를 그만큼 과대 허용한다).
                     double steer_budget = steer_avail() - wheelbase_ * k_i;
                     double v_steer = (steer_budget > 0.0)
-                        ? std::sqrt(steer_budget / (understeer_gradient_ * k_i))
+                        ? std::sqrt(steer_budget / (kus * k_i))
                         : 0.0;
                     if (v_steer < v_cap_i) {
                         v_cap_i = v_steer;
@@ -909,12 +1151,14 @@ private:
         double speed_for_lu =
             wps[find_lookahead_wp_idx(wps, path_closed, closest_idx, speed_lookahead_for_steering_)].speed;
 
-        // 5. 목표 횡가속도 → LUT 조향각
+        // 5. 목표 횡가속도 → 조향각 (자전거 역모델)
         double lat_acc = 0.0;
         speed_for_lu = std::min(speed_for_lu, curvature_speed_limit);
         // 🔴 실측 속도 상한 (선언부 주석 참고). L1_distance가 실측 속도로 계산되므로 게인도
         //    같은 속도를 써야 한다 — 안 그러면 정지/저속에서 게인이 (v_prof/v_meas)²배로 뛴다.
-        //    ⚠️ 반드시 lat_acc 계산과 LUT 조회 **앞**에 둘 것(둘 다 speed_for_lu를 쓴다).
+        //    ⚠️ 반드시 lat_acc 계산과 역모델 변환 **앞**에 둘 것(둘 다 speed_for_lu를 쓴다).
+        //    (자전거 역모델에선 v²이 소거돼 이 캡 없이도 발산하지 않지만, 언더스티어
+        //     항 K_us·v²의 크기는 여전히 여기서 정해지므로 실측 속도를 쓰는 게 맞다.)
         if (steering_speed_cap_measured_) {
             speed_for_lu = std::min(speed_for_lu, current_speed_);
         }
@@ -922,27 +1166,29 @@ private:
                                                   : std::max(L1_distance, l1_min_denom_);
         lat_acc = 2.0 * speed_for_lu * speed_for_lu / l1_denom * sin_eta;
 
-        bool lut_saturated = false;
-        double steering_angle = lookup_table_.lookup_steer_angle(lat_acc, speed_for_lu, &lut_saturated);
+        // ── FF/FB 분리 + 정상상태 자전거 역모델 (②-p) ─────────────────────────
+        // FF: 경로 곡률이 요구하는 정상상태 몫. **오차가 생기기 전에** 이미 작동하므로
+        //     일정 곡률 구간에서 L1이 오차를 만들어 가며 따라갈 필요가 없다.
+        // FB: L1 명령 중 그 몫으로 설명되지 않는 나머지 = 순수 보정분.
+        // 🔑 steering_fb_gain=1.0이면 a_ff + 1.0·(lat_acc − a_ff) = lat_acc 로
+        //    분리 전(= 순수 L1)과 **수학적으로 동일**하다(모델이 선형이라 성립).
+        const double ff_kappa = curvature_for_ff(wps, closest_idx, path_closed);
+        const double a_ff = ff_kappa * speed_for_lu * speed_for_lu;
+        double a_cmd = a_ff + steering_fb_gain_ * (lat_acc - a_ff);
+        // 그립 한계를 **명시적으로** 건다. 구 LUT는 이걸 "표가 NaN으로 끊긴 지점"이라는
+        // 암묵적·속도의존적 경계로 갖고 있었고(속도별 0.12~0.36 rad로 제각각), 그게
+        // 사전감속이 가정한 δ_avail과 어긋나 코너에서 조향이 모자랐다. 여기서는
+        // 사전감속이 쓰는 것과 **같은 기준**(섹터 스케일이 적용된 mla)을 쓴다.
+        const double a_max = (wps[closest_idx].mla > 0.0) ? wps[closest_idx].mla
+                                                          : max_lateral_accel_;
+        a_cmd = std::clamp(a_cmd, -a_max, a_max);
+        double steering_angle = bicycle_steer_from_lat_acc(a_cmd, speed_for_lu);
 
-        const double lut_v_max = lookup_table_.max_velocity();
-        if (lut_v_max > 1e-3 && speed_for_lu > lut_v_max) {
-            const double a_abs = std::abs(lat_acc);
-            const double dk = a_abs / (lut_v_max * lut_v_max) - a_abs / (speed_for_lu * speed_for_lu);
-            const double corr = wheelbase_ * dk;   // ≥ 0
-            const double sgn = (steering_angle >= 0.0) ? 1.0 : -1.0;
-            // 부호를 넘어가진 않게(과보정 방지) 크기에서만 뺀다.
-            steering_angle = sgn * std::max(0.0, std::abs(steering_angle) - corr);
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                "속도 %.2f m/s가 LUT 속도축 상한 %.2f를 초과 — 기구학 보정 %.4f rad 적용. "
-                "LUT를 max_speed 이상까지 재생성할 것", speed_for_lu, lut_v_max, corr);
-        }
-
-        if (lut_saturated && std::abs(sin_eta) > 0.05 && speed_for_lu > 2.5) {
+        if (std::abs(lat_acc) > a_max && std::abs(sin_eta) > 0.05 && speed_for_lu > 2.5) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                "LUT 그립 포화: 요구 a_lat %.2f m/s² @ %.2f m/s (조향 %.3f rad에서 saturate) — "
-                "조향 피드백 개루프 상태. 코너 진입 속도/prebrake_decel 확인",
-                std::abs(lat_acc), speed_for_lu, std::abs(steering_angle));
+                "그립 권한 포화: 요구 a_lat %.2f > 권한 %.2f m/s² @ %.2f m/s — "
+                "코너 진입 속도/prebrake_decel 확인",
+                std::abs(lat_acc), a_max, speed_for_lu);
         }
 
         double acc_mean = 0.0;
@@ -959,9 +1205,11 @@ private:
         double clip_factor = std::clamp((speed_for_lu - start_scale_speed_) / speed_diff, 0.0, 1.0);
         steering_angle *= (1.0 - clip_factor * downscale_factor_);
 
-        // 6-3) 곡률 피드포워드 블렌딩 (curvature_ff_blend=0이면 순수 L1 격리)
-        double steer_ff = std::atan(wheelbase_ * wps[closest_idx].curvature);
-        steering_angle = (1.0 - curvature_ff_blend_) * steering_angle + curvature_ff_blend_ * steer_ff;
+        // ⚠️ 여기 있던 `curvature_ff_blend`(곡률 FF 가중평균)는 2026-08-17에 제거됐다.
+        //    그 항은 `atan(L·κ)` = Ackermann 몫뿐이라 언더스티어 항(K_us·κ·v²)이 통째로
+        //    빠져 있었고(정상상태 필요 조향의 85%@2 m/s ~ 44%@5.5 m/s), 게다가 가중평균이라
+        //    켤수록 조향이 **줄어들었다** — 런치 기본값이 0.0에 방치돼 온 이유로 보인다.
+        //    지금은 위 6-1)에서 완전한 정상상태 FF(a_ff)가 들어가므로 역할이 대체됐다.
 
         // 6-4) Stanley형 heading 정렬 댐핑. 순수 L1은 횡오차 복구 시 경로 접선을 지나쳐 heading이
         //      오버슈트(라인을 비스듬히 가로질러 외벽 충돌)하는 약점이 있다. 부호 규약: 좌측 정렬이
@@ -983,6 +1231,13 @@ private:
         // 6-8) 트림 추정기 갱신 — **최종 발행값**으로 학습해야 한다. rate limit/클램프에
         //      걸린 값을 안 쓰고 원래 명령을 쓰면 포화 구간에서 있지도 않은 오차를 학습한다.
         update_steering_trim(dt, steering_angle);
+        // 6-9) K_us 추정기. 트림과 **같은 이력·같은 지연**을 쓰되 게이트가 서로 배타적이다
+        //      (트림 = 직선 |a_lat| ≤ 2.0 / K_us = 코너 |a_lat| ≥ 3.0) — 두 추정기가 같은
+        //      신호를 두고 싸우지 않게 작동 영역을 갈라 둔 것이다.
+        update_understeer_gradient(dt, steering_angle);
+        // 6-10) 슬립 잔차 — 진단 전용. 자이로와 가속도계라는 **서로 독립인** 두 경로가
+        //       갈라지는 정도가 곧 타이어가 미끄러진 정도다(둘 다 MCL과 무관하다).
+        update_slip_residual(dt);
 
         // 7. 목표 속도 ───────────────────────────────────────────────────────────────
         double global_speed =
@@ -1074,10 +1329,22 @@ private:
             // ⚠️ Idx 앞의 L/G는 **어느 배열의 인덱스인지**다. 로컬(L)과 글로벌(G)은 배열이
             //    달라 소스가 바뀌면 번호가 크게 튀는데(실측 L53→G134) 실제 목표점 좌표는
             //    연속이다. 이 표기가 없으면 "룩어헤드가 트랙 반대쪽으로 튀었다"로 오독된다.
+            // FF/FB 내역과 K_us 추정 — 이 셋(a_ff / a_cmd / K_us)이 있어야 로그만으로
+            // "FF가 얼마나 일했나 / 적응이 수렴했나"를 가를 수 있다.
+            char model_buf[256] = "";
+            std::snprintf(model_buf, sizeof(model_buf),
+                " | FF κ %+.3f a_ff %+.2f / a_cmd %+.2f | K_us %.5f%s(n=%ld)"
+                " | 곡선%s[%.4f/%.4f/%.4f/%.4f n=%ld/%ld/%ld/%ld] | 슬립 %.2f(peak %.2f)",
+                ff_kappa, a_ff, a_cmd, understeer_gradient_eff(),
+                (understeer_adapt_gain_ > 0.0) ? "" : "(관측)", understeer_adapt_samples_,
+                understeer_curve_enable_ ? "" : "(관측)",
+                kus_bin_[0], kus_bin_[1], kus_bin_[2], kus_bin_[3],
+                kus_bin_n_[0], kus_bin_n_[1], kus_bin_n_[2], kus_bin_n_[3],
+                slip_residual_, slip_residual_peak_);
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), status_log_period_ms_,
                 "Pose: (%.2f, %.2f, %.2f) | Target WP: (%.2f, %.2f), Idx: %c%zu -> %c%zu | Steer: %.4f | "
                 "Speed: %.2f / %.2f | L1_dist: %.2f | acc_mean: %.2f | 점프 %lu/뒤쪽 %lu/경로반전 %u"
-                " | trim: %+.2f° (n=%ld)%s",
+                " | trim: %+.2f° (n=%ld)%s%s",
                 current_x_, current_y_, current_yaw_, L1_x, L1_y,
                 following_local ? 'L' : 'G', closest_idx, following_local ? 'L' : 'G', idx_a,
                 steering_angle, final_speed, current_speed_, L1_distance, acc_mean,
@@ -1085,7 +1352,7 @@ private:
                 steering_trim_ * 180.0 / M_PI, steering_trim_samples_,
                 // 섹터가 켜져 있으면 **지금 이 지점에 실제로 적용된 MLA**를 같이 찍는다.
                 // 파라미터가 아니라 적용값을 찍어야 "켜졌는데 왜 안 빨라지나"를 로그만으로 가른다.
-                sector_status_suffix(wps[closest_idx].mla).c_str());
+                sector_status_suffix(wps[closest_idx].mla).c_str(), model_buf);
         }
 
         const double cmd_accel = (publish_speed - last_published_speed_) / dt;
@@ -1362,7 +1629,7 @@ private:
     bool l1_use_actual_distance_ = true;
     bool avoidance_l1_damping_enable_ = true;
     double avoidance_l1_scale_max_ = 1.35;
-    bool steering_speed_cap_measured_ = true;  // 조향용 속도를 실측 속도로 상한(정지 시 LUT 포화 차단)
+    bool steering_speed_cap_measured_ = true;  // 조향용 속도를 실측 속도로 상한
     int status_log_period_ms_ = 2000;          // 상태 한 줄 로그 주기 [ms], 0 = 끔
     size_t last_global_sig_ = 0;               // 글로벌 경로 재발행 중복 로그 억제용 서명
 
@@ -1401,7 +1668,9 @@ private:
     double imu_linear_scale_ = 1.0;
     double imu_angular_scale_ = 1.0;         // deg/s → rad/s (real=pi/180, sim=1.0)
     std::vector<double> acc_now_;            // 종가속 rolling buffer
-    double yaw_rate_now_ = 0.0;              // 실측 요레이트 [rad/s] (트림 추정 전용)
+    double yaw_rate_now_ = 0.0;              // 실측 요레이트 [rad/s] (트림·K_us 추정)
+    double yaw_rate_prev_ = 0.0;             // 준정상상태 게이트용(요각가속 산출)
+    double lat_acc_now_ = 0.0;               // 실측 횡가속 [m/s²] (슬립 잔차 진단 전용)
     rclcpp::Time yaw_rate_last_recv_{0, 0, RCL_ROS_TIME};
     bool yaw_rate_seen_ = false;
 
@@ -1415,19 +1684,43 @@ private:
     long   steering_trim_samples_ = 0;       // 학습 샘플 수 (로그용)
     std::deque<std::pair<double, double>> steer_hist_;   // (t, 발행 조향) — lag 조회용
 
+    // 조향 생성 모델 (②-p)
+    double steering_fb_gain_ = 1.0;          // FF/FB 분리 게인. 1.0 = 분리 전과 수학적 동일
+    double curvature_ff_preview_ = 0.0;      // FF가 곡률을 읽을 전방 거리 [m], 0 = 최근접점
+
+    // K_us 온라인 적응 (관측 전용이 기본 — understeer_adapt_gain_ = 0)
+    double understeer_adapt_gain_ = 0.0;     // 1/τ [1/s], 0 = 추정만 하고 적용 안 함
+    double understeer_gradient_adapted_ = 0.019;
+    double understeer_min_ = 0.008, understeer_max_ = 0.025;
+    double understeer_adapt_min_lat_acc_ = 3.0;  // 관측성 게이트(코너 전용)
+    double understeer_adapt_min_speed_ = 2.0;
+    long   understeer_adapt_samples_ = 0;
+    // 관측 모드에서 쓰는 LPF 게인(τ≈4 s). 적용은 안 하고 로그로만 수렴을 보여준다.
+    static constexpr double kUsObserveGain = 0.25;
+
+    // K_us(a_lat) 곡선 (②-q). 기본 비활성 = 스칼라 그대로.
+    bool understeer_curve_enable_ = false;
+    int  understeer_curve_min_samples_ = 300;   // 빈당 이만큼 쌓여야 그 빈을 쓴다
+    double kus_bin_[kUsBins] = {0.019, 0.019, 0.019, 0.019};
+    long   kus_bin_n_[kUsBins] = {0, 0, 0, 0};
+    // 준정상상태 게이트 [rad/s²]. a_lat = v·ψ̇ 는 β̇=0에서만 참이다.
+    static constexpr double kUsCurveMaxYawAcc = 3.0;
+
+    // 슬립 잔차 |a_y − v·ψ̇| (진단 전용, 주행 개입 없음)
+    double slip_residual_ = 0.0;
+    double slip_residual_peak_ = 0.0;
+
     // 곡률 사전감속
     size_t curvature_lookahead_count_;
     double max_lateral_accel_;
     double understeer_gradient_ = 0.019;     // K_us [rad/(m/s²)] — 조향 권한 캡, 0이면 비활성
     double steer_authority_ratio_ = 0.85;
-    double curvature_ff_blend_;
 
     // 좌우 조향 한계 [rad]. 둘 다 같으면 기존 대칭 거동과 동일.
     double max_steering_left_ = MAX_STEERING_ANGLE;
     double max_steering_right_ = MAX_STEERING_ANGLE;
     double steer_limit_min_ = MAX_STEERING_ANGLE;   // 속도 캡용 보수값
 
-    SteeringLookupTable lookup_table_;
 
     // 차량 상태 / 출력 이력
     double current_x_ = 0.0, current_y_ = 0.0, current_yaw_ = 0.0, current_speed_ = 0.0;

@@ -30,7 +30,7 @@ find_package(visualization_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 
 # ==============================================================================
-# 2. Control MAP 노드 빌드 (L1 Guidance + Steering LUT)
+# 2. Control MAP 노드 빌드 (L1 Guidance + 정상상태 자전거 역모델 조향)
 # ==============================================================================
 add_executable(control_map_node
   control_code/control_map_node.cpp
@@ -87,12 +87,6 @@ install(TARGETS
 
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
-)
-
-# Steering Lookup Table(LUT) CSV — 패키지 share에 설치해 이식성 있는 ament 경로로 로드
-# (control_map_node가 get_package_share_directory("f1tenth_control")+"/cfg/..."로 조회)
-install(FILES control_code/LUT_calibrated.csv
-  DESTINATION share/${PROJECT_NAME}/cfg
 )
 
 # 섹터 스케일 테이블 — scripts/sector_learner.py가 읽어 /sector_scales로 발행한다.
