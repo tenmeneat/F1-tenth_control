@@ -19,13 +19,15 @@ L = 0.33
 LAG = 0.14
 YAW_ACC_MAX = 3.0     # [rad/s²] 준정상상태 게이트
 
+# ⚠️ 절대 홈 경로를 박지 말 것 — 이 파일은 git으로 젯슨/팀원 머신에 그대로 간다.
+_LOG = os.path.expanduser("~/rosbag_log")
 _DEFAULT = [
-    ("신", "/home/tenmeneat/rosbag_log/0816/run_0816_225916"),
-    ("신", "/home/tenmeneat/rosbag_log/0816/run_0816_230107"),
-    ("신", "/home/tenmeneat/rosbag_log/0816/run_0816_230340"),
-    ("구", "/home/tenmeneat/rosbag_log/0814/run_0814_214351"),
-    ("구", "/home/tenmeneat/rosbag_log/0814/run_0814_214021"),
-    ("구", "/home/tenmeneat/rosbag_log/0813/run_0813_154525"),
+    ("신", f"{_LOG}/0816/run_0816_225916"),
+    ("신", f"{_LOG}/0816/run_0816_230107"),
+    ("신", f"{_LOG}/0816/run_0816_230340"),
+    ("구", f"{_LOG}/0814/run_0814_214351"),
+    ("구", f"{_LOG}/0814/run_0814_214021"),
+    ("구", f"{_LOG}/0813/run_0813_154525"),
 ]
 # 인자로 bag 디렉터리를 주면 그것들만 본다:  analyze_grip_envelope.py ~/rosbag_log/0817/run_*
 BAGS = [("신", os.path.expanduser(p)) for p in sys.argv[1:]] or _DEFAULT

@@ -30,7 +30,7 @@ BAGS = [(None, p) for p in _ARGS] or _DEFAULT
 
 for day, name in BAGS:
     dbs = glob.glob((name if day is None else
-                     f"/home/tenmeneat/rosbag_log/{day}/{name}") + "/*.db3")
+                     os.path.expanduser(f"~/rosbag_log/{day}/{name}")) + "/*.db3")
     name = os.path.basename(name)
     if not dbs:
         continue
