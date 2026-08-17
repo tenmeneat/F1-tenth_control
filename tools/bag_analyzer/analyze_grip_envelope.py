@@ -8,7 +8,7 @@ v2의 두 결함
      요레이트가 빠르게 쌓이는 순간 v·ψ̇ 가 실제 횡가속을 과대평가한다.
      → |dψ̇/dt| 게이트로 준정상상태만 남긴다.
 """
-import sqlite3, glob, os, math
+import sqlite3, glob, os, math, sys
 import numpy as np
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
@@ -19,7 +19,7 @@ L = 0.33
 LAG = 0.14
 YAW_ACC_MAX = 3.0     # [rad/s²] 준정상상태 게이트
 
-BAGS = [
+_DEFAULT = [
     ("신", "/home/tenmeneat/rosbag_log/0816/run_0816_225916"),
     ("신", "/home/tenmeneat/rosbag_log/0816/run_0816_230107"),
     ("신", "/home/tenmeneat/rosbag_log/0816/run_0816_230340"),
@@ -27,6 +27,8 @@ BAGS = [
     ("구", "/home/tenmeneat/rosbag_log/0814/run_0814_214021"),
     ("구", "/home/tenmeneat/rosbag_log/0813/run_0813_154525"),
 ]
+# 인자로 bag 디렉터리를 주면 그것들만 본다:  analyze_grip_envelope.py ~/rosbag_log/0817/run_*
+BAGS = [("신", os.path.expanduser(p)) for p in sys.argv[1:]] or _DEFAULT
 
 
 def read_topic(cur, topics, typemap, name):
