@@ -224,7 +224,7 @@ def declare_common_args(sector_scale_enable_default='false'):
             # 가능성이 있다(07-31 각도기 실측은 링키지 정상 1.003). steering_model:=bicycle
             # 로 전환하면 그 부족분이 사라지므로 이 값도 재검토 대상이다. 단 δ_avail(조향
             # 권한 캡)까지 같이 움직이니 반드시 저속 A/B로 확인하고 단독으로 바꾸지 말 것.
-            'steering_reach_ratio', default_value='0.85',
+            'steering_reach_ratio', default_value='1.0',
             description='명령 조향각 중 바퀴가 실제 도달하는 비율. 보상(1/ratio)과 조향권한 캡을 '
                         '동시 지배. 1.0 = 보상 없음(2026-07-31 실측: 링키지 정상, 단 08-07에 '
                         '"하중 걸린 주행 마진 아님"으로 상향 기각됨 — 실측만으로 다시 올리지 말 것)'

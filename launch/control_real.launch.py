@@ -27,7 +27,7 @@ def generate_launch_description():
     )
 
     max_lateral_accel_arg = DeclareLaunchArgument(
-        'max_lateral_accel', default_value='7.0',
+        'max_lateral_accel', default_value='6.0',
         description='코너 그립 클램프 a_lat [m/s^2]. 조향 생성의 a_cmd 상한도 겸한다(②-p)'
     )
 
