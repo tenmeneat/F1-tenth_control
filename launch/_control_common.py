@@ -294,7 +294,7 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='명령 속도 램프가 실측보다 앞설 수 있는 최대폭 [m/s]. 0이면 비활성(구 거동)'
         ),
         DeclareLaunchArgument(
-            'understeer_gradient', default_value='0.014',
+            'understeer_gradient', default_value='0.010',
             description='언더스티어 그래디언트 K_us [rad/(m/s^2)]. 0이면 조향 권한 캡 비활성'
         ),
         DeclareLaunchArgument(
