@@ -2,8 +2,18 @@
 """bag의 토픽 공백 ↔ 젯슨 부하 로그를 같은 시계로 붙여 "왜 멈췄나"를 가른다.
 
 사용법:
-    python3 analyze_jetson_load.py <bag폴더> <부하폴더>
+    python3 analyze_jetson_load.py <bag폴더> <부하폴더>   # 정식: 공백 시점의 실제 부하
     python3 analyze_jetson_load.py <부하폴더>            # 부하만 요약
+    python3 analyze_jetson_load.py <bag폴더>             # bag만 → **대리지표**(아래)
+
+🔑 bag만 있을 때(부하 측정을 같이 안 돌린 주행): CPU%·메모리는 원리적으로 못 나온다.
+   대신 스케줄링 압박이 셋으로 드러난다 —
+     (a) 발행 지터: 타이머 노드가 규정 주기를 못 지키는 정도. 순수 타이머인
+         `/drive_autonomous`(50 Hz)의 지터가 가장 깨끗한 압박 지표다.
+     (b) 발행 지연: header.stamp(생성) → bag 기록(수신). **`/pf/pose/odom`의 이 값이
+         곧 MCL 1사이클 연산시간**이라 25 ms 예산 대비 여유를 바로 읽을 수 있다.
+     (c) 레이트 드룹: 실측 Hz가 공칭보다 낮은가.
+   ⚠️ bag이 젯슨 녹화여야 의미가 있다(랩탑 녹화면 wifi 지연이 섞인다).
 
 전제: bag과 부하 로그가 **둘 다 젯슨에서** 기록됐고(jetson_rec.sh / jetson_load.sh)
       따라서 같은 시계다. bag 타임스탬프는 epoch ns라 그대로 붙는다.
@@ -47,10 +57,75 @@ def num(rows, key):
     return np.array(out)
 
 
+SPEC = {"/pf/pose/odom": 40.0, "/scan": 40.0, "/odom": 50.0, "/drive_autonomous": 50.0,
+        "/sensors/imu/raw": 50.0, "/car_state/frenet/odom": 40.0, "/local_waypoints": 40.0}
+
+
+def proxy(bag):
+    """부하 로그 없이 bag만으로 내는 대리지표."""
+    import sqlite3
+    db = bag if bag.endswith(".db3") else [
+        os.path.join(bag, f) for f in sorted(os.listdir(bag)) if f.endswith(".db3")][0]
+    con = sqlite3.connect(db)
+    tmap = {n: (i, t) for i, n, t in con.execute("select id,name,type from topics")}
+    print(f"=== 젯슨 부하 **대리지표** (bag만, CPU%는 원리적으로 안 나옴)  {os.path.basename(bag)}")
+    print(f"  {'토픽':>24} {'공칭':>5} {'실측Hz':>7} {'주기':>9} {'지터p99':>8} {'지터max':>9} "
+          f"{'지연중앙':>9} {'지연p99':>8}")
+    worst = []
+    for tp, hz in SPEC.items():
+        if tp not in tmap: continue
+        tid, typ = tmap[tp]
+        rows = con.execute("select timestamp,data from messages where topic_id=? order by timestamp",
+                           (tid,)).fetchall()
+        if len(rows) < 10: continue
+        rec = np.array([r[0] / 1e9 for r in rows])
+        ls = l9 = float("nan")
+        try:
+            from rclpy.serialization import deserialize_message
+            from rosidl_runtime_py.utilities import get_message
+            cls = get_message(typ)
+            hdr = np.array([(lambda m: m.header.stamp.sec + m.header.stamp.nanosec * 1e-9)(
+                deserialize_message(r[1], cls)) for r in rows])
+            lat = (rec - hdr) * 1000.0
+            lat = lat[np.isfinite(lat)]
+            if len(lat): ls, l9 = np.median(lat), np.percentile(lat, 99)
+        except Exception:
+            pass
+        g = np.diff(rec) * 1000.0
+        per = np.median(g); jit = np.abs(g - per)
+        print(f"  {tp:>24} {hz:5.0f} {1000/per:7.1f} {per:8.2f}ms {np.percentile(jit,99):7.1f}ms "
+              f"{jit.max():8.1f}ms {ls:8.1f}ms {l9:7.1f}ms")
+        worst.append((tp, np.percentile(jit, 99), jit.max(), ls, per))
+    con.close()
+    print()
+    ctl = [w for w in worst if w[0] == "/drive_autonomous"]
+    mcl = [w for w in worst if w[0] == "/pf/pose/odom"]
+    if ctl:
+        j = ctl[0][1]
+        verdict = "여유 충분" if j < 3 else ("압박 있음" if j < 10 else "🔴 심한 스케줄링 압박")
+        print(f"  컨트롤러(순수 50 Hz 타이머) 지터 p99 {j:.1f} ms → {verdict}")
+    if mcl and mcl[0][3] == mcl[0][3]:
+        lat, per = mcl[0][3], mcl[0][4]
+        print(f"  MCL 1사이클 연산 ≈ {lat:.1f} ms / 예산 {per:.1f} ms = 활용률 {100*lat/per:.0f}%"
+              f"  (p99가 예산을 넘으면 여유가 없다)")
+    print("\n  ⚠️ 이건 대리지표다. CPU·메모리·I/O 중 무엇인지 가르려면 주행 중")
+    print("     tools/jetson_load.sh 를 jrec과 같이 돌릴 것.")
+
+
 def main():
     args = [a for a in sys.argv[1:]]
     if not args:
         print(__doc__); sys.exit(1)
+    for a in args:
+        if not os.path.exists(a):
+            print(f"❌ 경로가 없습니다: {a}"); sys.exit(1)
+
+    def is_bag(p):
+        if p.endswith(".db3"): return True
+        return os.path.isdir(p) and any(f.endswith(".db3") for f in os.listdir(p))
+
+    if len(args) == 1 and is_bag(args[0]):
+        proxy(args[0]); return
     bag, loaddir = (None, args[0]) if len(args) == 1 else (args[0], args[1])
 
     meta = {}
