@@ -57,6 +57,15 @@ def declare_common_args(sector_scale_enable_default='false'):
 
         # ── 경로소스 신선도 ──
         DeclareLaunchArgument(
+            'odom_timeout', default_value='0.5',
+            description=(
+                'odom 워치독 [s], 0이면 비활성. 이 시간 넘게 <odom_topic> 미수신이면 '
+                '조향을 직전 각으로 유지한 채 속도 0으로 안전 정지. '
+                '0818 run_0818_134408: MCL 1.1s 정지 중 컨트롤러가 얼어붙은 명령을 '
+                '50Hz로 계속 발행해 벽 충돌'
+            )
+        ),
+        DeclareLaunchArgument(
             'local_fresh_timeout', default_value='0.3',
             description='이 시간(s) 넘게 /local_waypoints 미수신 시 글로벌 경로로 폴백'
         ),
@@ -450,6 +459,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'downscale_factor': LaunchConfiguration('downscale_factor'),
             'speed_lookahead': LaunchConfiguration('speed_lookahead'),
             'speed_lookahead_for_steering': LaunchConfiguration('speed_lookahead_for_steering'),
+            'odom_timeout': LaunchConfiguration('odom_timeout'),
             'local_fresh_timeout': LaunchConfiguration('local_fresh_timeout'),
             'closest_idx_max_heading_err': LaunchConfiguration('closest_idx_max_heading_err'),
             # 섹터별 횡가속 권한 스케일 (기본 꺼짐 — 켜기 전 bag_analyzer 판정 필수)

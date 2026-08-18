@@ -327,6 +327,19 @@ public:
         }
 
         engage_gate_enable_ = declare_parameter<bool>("engage_gate_enable", true);
+        // odom 워치독. /local_waypoints·/drive_mode는 전부 신선도 타임아웃이 있는데 **odom만
+        // 없었다**(2026-08-04 a71890c에서 제거). 위치추정(MCL)이 죽으면 current_x_/y_/speed_가
+        // stale 상태로 얼고, 컨트롤러는 그 얼어붙은 pose로 계산한 조향·속도를 50 Hz로 계속
+        // 발행한다 — 노드는 완전히 정상으로 보인다.
+        //   🔴 2026-08-18 `run_0818_134408`이 정확히 이 형태로 벽에 박았다: /pf/pose/odom이
+        //      1125 ms 끊긴 동안 /drive_autonomous는 20.0 ms 간격을 유지한 채 값이 그대로
+        //      얼었고(speed 3.572 / steer +0.1286이 0.8초간 동일), 그사이 차는 3.9 m를 더
+        //      달려 횡오차가 0.44 → 1.09 m로 벌어졌다. MCL이 3.25 m 점프하며 복귀한 직후 접촉.
+        //   같은 날 정상 런의 최대 공백은 51 ms(140819, 201초)이고, 기동 직후 과도구간에서만
+        //   336~380 ms가 관측된다 — 0.5 s는 그 위에 충분한 여유를 두면서 1.1 s는 잡는 값이다.
+        // 0이면 비활성. NaN pose(MCL 붕괴)는 odom_callback이 샘플을 버리므로 여기서 stale로 잡힌다.
+        odom_timeout_ = declare_parameter<double>("odom_timeout", 0.5);
+
         drive_mode_topic_ = declare_parameter<std::string>("drive_mode_topic", "/drive_mode");
         engaged_mode_value_ = declare_parameter<std::string>("engaged_mode_value", "autonomous");
         drive_mode_timeout_ = declare_parameter<double>("drive_mode_timeout", 1.0);
@@ -502,6 +515,10 @@ public:
             std::chrono::milliseconds(20), std::bind(&ControlMapNode::control_loop, this));
 
         last_time_ = this->now();
+        // 노드 클럭으로 초기화해 둔다. (odom_seen_ 게이트가 먼저 걸리므로 논리적으로는
+        //  미수신 상태에서 이 값이 쓰이지 않지만, 기본 생성된 rclcpp::Time은 클럭 타입이
+        //  달라 use_sim_time에서 뺄셈이 예외를 던진다.)
+        odom_last_recv_time_ = this->now();
         RCLCPP_INFO(this->get_logger(),
                     "RoboRacer L1 Guidance + 자전거 역모델 조향 제어 노드가 시작되었습니다.");
     }
@@ -537,6 +554,7 @@ private:
         current_y_ = y;
         current_yaw_ = yaw;
         current_speed_ = v;
+        odom_last_recv_time_ = this->now();
         odom_seen_ = true;
     }
 
@@ -908,11 +926,18 @@ private:
 
     // 경로를 모를 때의 안전 정지. 발행을 멈추지 않고 명시적 0을 보내는 이유는, 침묵하면
     // 하류(ackermann_mux→VESC)가 **직전 명령을 그대로 유지**해 타력주행이 되기 때문이다.
-    void publish_safe_stop() {
-        last_steering_angle_ = 0.0;
+    //
+    // hold_steering=true면 조향을 0으로 펴지 않고 **직전 각을 유지한 채** 속도만 0으로 준다.
+    // ⚠️ odom 워치독 전용 옵션이다. 굴러가는 중에 조향을 0으로 만드는 것은 ②-r에서
+    //    이미 확인된 실패 모드다 — 코너 한복판 비상정지가 바깥 벽으로의 직진이 된다.
+    //    경로를 아예 모르는 경우(기존 호출부)는 직전 각도 근거가 없으므로 종전대로 0을 쓴다.
+    void publish_safe_stop(bool hold_steering = false) {
+        const double steer = hold_steering ? last_steering_angle_ : 0.0;
+        last_steering_angle_ = steer;
+        // 램프 상태를 실측에 붙여 둔다 — 복귀 시 계단 명령이 안 나가게 하는 bumpless 처리.
         last_target_speed_ = std::max(0.0, current_speed_);
         last_published_speed_ = 0.0;
-        publish_drive(0.0, 0.0, 0.0);
+        publish_drive(steer, 0.0, 0.0);
     }
 
     double ramp_speed(double last_cmd, double target, double dt,
@@ -964,6 +989,38 @@ private:
                 "odom(%s) 미수신 — 위치추정이 뜨기 전에는 주행하지 않는다", odom_topic_.c_str());
             publish_safe_stop();
             return;
+        }
+
+        // 0-a2. odom 워치독 — 위치추정이 도중에 끊기면 제어가 성립하지 않는다.
+        //   ⚠️ 경로 중재보다 **먼저** 와야 한다. 아래 단계는 전부 current_x_/y_/yaw_를 쓰는데,
+        //      끊긴 동안 그 값은 얼어 있고 차는 계속 달린다(0818 134408: 0.8초에 3.9 m).
+        //   조향은 직전 각을 유지한 채 속도만 0으로 준다 — ②-r 참고.
+        const double odom_age = (current_time - odom_last_recv_time_).seconds();
+        if (odom_timeout_ > 0.0 && odom_age > odom_timeout_) {
+            if (!odom_stale_) {
+                odom_stale_ = true;
+                ++odom_stale_count_;
+                odom_stale_since_ = odom_last_recv_time_;   // 마지막 정상 수신 시각
+            }
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                "odom(%s) %.2fs 끊김(> %.2fs) — 안전 정지(조향 %.3f rad 유지). "
+                "위치추정/네트워크 확인 (누적 %u회)",
+                odom_topic_.c_str(), odom_age, odom_timeout_,
+                last_steering_angle_, odom_stale_count_);
+            publish_safe_stop(/*hold_steering=*/true);
+            return;
+        }
+        if (odom_stale_) {
+            odom_stale_ = false;
+            // 복귀 시점의 pose는 크게 점프해 있을 수 있다(134408: 3.25 m). 램프는 위
+            // publish_safe_stop이 매 사이클 실측에 붙여 뒀으므로 계단 명령은 안 나가지만,
+            // 최근접 인덱스는 다시 찾아야 하므로 로그로 남긴다.
+            // ⚠️ 여기서 odom_age를 찍으면 **방금 받은 샘플의 나이**(≈0)가 나와 두절 길이를
+            //    오해하게 된다. 마지막 정상 수신 시각부터 재개까지의 실제 공백을 찍는다.
+            const double outage = (odom_last_recv_time_ - odom_stale_since_).seconds();
+            RCLCPP_WARN(this->get_logger(),
+                "odom(%s) 복구 — 실제 두절 %.2fs (누적 %u회). 복귀 직후 pose 점프 주의",
+                odom_topic_.c_str(), outage, odom_stale_count_);
         }
 
         // 0. 경로 소스 중재: 로컬(신선) → 글로벌 → 둘 다 없으면 안전 정지
@@ -1756,8 +1813,13 @@ private:
     double last_published_speed_ = 0.0;      // 발행 acceleration(명령 속도 미분)의 기준
     rclcpp::Time last_time_;
 
-    // odom 수신 여부 — 위치추정이 뜨기 전에는 주행하지 않는다
+    // odom 워치독 — 위치추정 없이/끊긴 채로 주행하지 않는다
     bool odom_seen_ = false;
+    double odom_timeout_ = 0.5;              // [s] 0이면 비활성
+    rclcpp::Time odom_last_recv_time_;
+    bool odom_stale_ = false;                // 워치독 발동 중인가(에지 로그·복귀 처리용)
+    rclcpp::Time odom_stale_since_;          // 두절 직전 마지막 정상 수신 시각
+    uint32_t odom_stale_count_ = 0;          // 발동 누적(진단용)
 
     // 경로 & 인덱스 추적
     std::vector<Waypoint> waypoints_;        // 글로벌 (닫힌 루프)
