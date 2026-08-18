@@ -120,7 +120,7 @@ def declare_common_args(sector_scale_enable_default='false'):
                         '[track_length, (s0,s1,scale)×N], transient_local)'
         ),
         DeclareLaunchArgument(
-            'sector_scale_max', default_value='1.5',
+            'sector_scale_max', default_value='1.3',
             description='허용 최대 scale. 이보다 큰 값이 오면 테이블 전체를 버린다'
         ),
         DeclareLaunchArgument(
