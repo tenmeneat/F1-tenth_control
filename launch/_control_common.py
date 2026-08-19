@@ -99,7 +99,7 @@ def declare_common_args(sector_scale_enable_default='false'):
                         '구 이름 l1_gain'
         ),
         DeclareLaunchArgument(
-            'l1_speed_gain', default_value='0.4',
+            'l1_speed_gain', default_value='0.35',
             description='L1 룩어헤드 거리의 **속도 계수** [s] (공식: l1_offset + v*l1_speed_gain). '
                         '구 이름 l1_distance'
         ),
@@ -217,7 +217,7 @@ def declare_common_args(sector_scale_enable_default='false'):
         # ── 조향 생성: 자전거 역모델 + FF/FB 분리 (②-p) ───────────────────────
         # 구 LUT 역조회는 2026-08-17에 삭제됐다(롤백은 git 0d16173 — 메모리 참고).
         DeclareLaunchArgument(
-            'steering_fb_gain', default_value='1.0',
+            'steering_fb_gain', default_value='0.8',
             description='FF/FB 분리 게인 (bicycle 모델 전용). L1 명령 중 경로 곡률로 '
                         '설명되지 않는 보정분에만 곱한다. 1.0 = 분리 전과 수학적으로 동일 '
                         '(안전한 출발점). 낮추면 경로 추종은 FF가, 오차 보정은 L1이 맡아 '
