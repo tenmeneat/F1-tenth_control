@@ -26,6 +26,10 @@ sector_learner.py — 섹터 MLA 스케일 온라인 학습기 (AIMD)
                           "오프라인으로 검증한 표를 아무도 안 건드리게" 쓰고 싶을 때.
    `--mode guard` (기본) : 하향만 한다. **결선용.** 연습에서 수렴시킨 표를 싣고 들어가
                           위험이 감지될 때만 되돌린다 → 모든 고장이 느려지는 쪽.
+                          🟢 표를 안 주면 `learned/`의 **최신 학습 결과를 자동으로 싣는다**
+                          (2026-08-19). explore/static은 일부러 안 그런다 — 자동 로드는
+                          언제나 "빨라지는" 방향이라 그 둘은 1.0에서 시작하는 보장을
+                          유지한다. 끄려면 `--no-auto-latest`.
    `--mode explore`      : 상향+하향. **연습 전용.** 차가 스스로 코너 속도를 올린다.
 
 `--watch`를 주면 YAML 저장 시 표를 다시 읽는다(차 옆에서 라이브 튜닝).
@@ -41,9 +45,15 @@ sector_learner.py — 섹터 MLA 스케일 온라인 학습기 (AIMD)
 
 사용법:
   source /opt/ros/<distro>/setup.bash && source ~/2026_IFAC/install/setup.bash
-  python3 scripts/sector_learner.py config/sectors.yaml --mode explore   # 연습
-  python3 scripts/sector_learner.py config/sectors.yaml                  # 결선(하향만)
-  python3 scripts/sector_learner.py config/sectors.yaml --mode explore --out learned.yaml
+  python3 scripts/sector_learner.py --mode explore                # 연습 (표는 κ로 자동 생성)
+  python3 scripts/sector_learner.py --mode guard                  # 결선(하향만) — learned/ 최신본 자동 로드
+  python3 scripts/sector_learner.py learned/xxx.yaml --mode guard # 표를 직접 지정할 때
+  python3 scripts/sector_learner.py --mode explore --out learned.yaml
+
+🟢 2026-08-19: `config/sectors.yaml`은 **삭제됐다.** 라인이 바뀌면 어차피 κ로 경계를 새로
+   만들고 scale 1.0에서 시작하므로(autobuild) 씨앗 파일이 필요 없다. 표 없이 시작하면
+   첫 `/global_waypoints`에서 자동 생성한다. 검증된 표를 싣고 싶을 때만 **위치 인자로**
+   경로를 준다(런치에서는 `sector_scale_file:=<경로>`).
 """
 import sys, os, math, argparse, time, signal
 
@@ -60,7 +70,14 @@ from nav_msgs.msg import Odometry
 from ackermann_msgs.msg import AckermannDriveStamped
 
 try:
-    from f110_msgs.msg import WpntArray, StateMachine
+    # `# type: ignore` 는 **Pylance 전용**이고 런타임과 무관하다.
+    # 이 저장소 루트에 메시지 **소스** 폴더 `f110_msgs/`(CMakeLists + msg/*.msg, 파이썬 모듈
+    # 아님)가 있어서, Pylance가 워크스페이스 루트를 먼저 뒤지다 그걸 네임스페이스 패키지로
+    # 잡고 멈춘다 → `WpntArray`/`StateMachine` 두 심볼에 빨간줄이 뜬다
+    # (.vscode/settings.json의 extraPaths에 빌드된 진짜 모듈을 넣어 놨지만, Pyright는
+    #  워크스페이스 루트를 extraPaths보다 먼저 본다). 파이썬 런타임은 규칙이 달라
+    # `__init__.py`가 있는 **정식 패키지**를 우선하므로 실행에는 아무 문제가 없다.
+    from f110_msgs.msg import WpntArray, StateMachine  # type: ignore[attr-defined]
 except ImportError:  # 시뮬 등 f110_msgs 없는 환경
     WpntArray = StateMachine = None
 
@@ -295,9 +312,65 @@ def resolve_out_dir(yaml_path):
         pass
     return os.path.expanduser("~")
 
+def pick_latest_learned(out_dir, warn=None):
+    """`learned/`에서 가장 최근 학습 결과를 고른다 (mtime 기준).
+
+    🔑 `guard` 모드 전용이다. 그 모드의 존재 이유가 "연습에서 수렴시킨 표를 싣고 들어가
+       위험할 때만 되돌린다"인데, 표를 매번 손으로 지정해야 하면 그 취지가 무너진다.
+    ⚠️ `explore`/`static`에는 **일부러 적용하지 않는다.** scale은 1.0 이상만 허용이라
+       자동 로드는 언제나 "차가 빨라지는" 방향이다. 매 주행이 1.0에서 시작한다는 보장은
+       그 두 모드에서 유지하고, 속도를 물려받는 건 guard에서 **명시적으로** 한다.
+    ⚠️ 라인이 바뀐 표를 집어도 안전하다 — 첫 `/global_waypoints`에서 track_length가 안 맞아
+       폐기되고 κ로 새로 만들어 1.0에서 시작한다(cb_wpnts). 즉 최악이 "느려지는 쪽"이다.
+    """
+    import glob, re
+    files = glob.glob(os.path.join(out_dir, "learned_sectors_*.yaml"))
+    if not files:
+        return ""
+
+    def when(f):
+        # 파일명(learned_sectors_MMDD_HHMMSS.yaml)의 시각을 우선 쓴다 — mtime은 복사·편집·
+        # rsync로 쉽게 뒤집히는데(통합시험에서 sed -i 한 번에 순서가 바뀌었다) 파일명은
+        # "그 학습 주행이 언제였나"를 그대로 보존한다. 이름이 규격 밖이면 mtime으로 물러선다.
+        m = re.search(r"learned_sectors_(\d{4})_(\d{6})", os.path.basename(f))
+        return (1, m.group(1) + m.group(2)) if m else (0, "%020d" % int(os.path.getmtime(f)))
+
+    def laps_of(f):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = yaml.safe_load(fh) or {}
+            return int(d.get("laps", -1))       # 구 파일(필드 없음)은 -1 = 판단 보류
+        except Exception:
+            return -1
+
+    # 0랩 파일은 학습이 일어난 적이 없으므로 후보에서 뺀다(구 파일 -1은 남긴다).
+    usable = [f for f in files if laps_of(f) != 0] or files
+    latest = max(usable, key=when)
+    if warn:
+        age_h = (time.time() - os.path.getmtime(latest)) / 3600.0
+        head = ""
+        try:
+            with open(latest, encoding="utf-8") as f:
+                for ln in f:
+                    if ln.startswith("# 모드"):
+                        head = ln.strip().lstrip("# ")
+                        break
+        except OSError:
+            pass
+        skipped = len(files) - len(usable)
+        if skipped > 0:
+            head += f"  (0랩 파일 {skipped}개는 건너뜀)"
+        warn(f"[guard] 최신 학습 결과를 자동으로 싣는다: {latest}\n"
+             f"        {head}  ({age_h:.1f}시간 전)\n"
+             f"        ⚠️ 라인이 그 사이 바뀌었으면 track_length 불일치로 폐기되고 "
+             f"scale 1.0에서 다시 시작한다(안전 방향).\n"
+             f"        다른 표를 쓰려면 경로를 인자로, 자동 로드를 끄려면 --no-auto-latest")
+    return latest
+
 def resolve_yaml(raw_path):
-    """구 sector_pub.py와 **같은 규칙**으로 sectors.yaml을 찾는다. 런치가 빈 문자열을
-    넘길 수 있으므로(sector_scale_file 기본값이 '') 여기서 자동 탐색해야 한다."""
+    """표 파일을 찾는다. 런치가 빈 문자열을 넘길 수 있으므로(sector_scale_file 기본값이 '')
+    여기서 자동 탐색한다. ⚠️ 2026-08-19부터 **못 찾는 게 정상**이다 —
+    `config/sectors.yaml`을 지웠고, 그 경우 κ 기반 autobuild가 표를 만든다."""
     if raw_path:
         p = os.path.expanduser(raw_path)
         if os.path.isfile(p):
@@ -318,6 +391,16 @@ def resolve_yaml(raw_path):
     if raw_path:
         return os.path.expanduser(raw_path)
     return candidates[0]
+
+def resolve_table_path(args, warn=None):
+    """실제로 읽을 표 경로. 명시 경로 > (guard 한정) 최신 학습 결과 > 자동 탐색."""
+    if args.yaml:
+        return resolve_yaml(args.yaml)
+    if args.mode == "guard" and getattr(args, "auto_latest", True):
+        latest = pick_latest_learned(resolve_out_dir(resolve_yaml("")), warn)
+        if latest:
+            return latest
+    return resolve_yaml("")
 
 def load_sectors(path, scale_max=SCALE_MAX, warn=print):
     """YAML → (track_length, blend_len, [Sector]).
@@ -387,8 +470,30 @@ class SectorLearner(Node):
     def __init__(self, args):
         super().__init__("sector_learner")
         self.args = args
-        self.yaml_path = resolve_yaml(args.yaml)
-        self.track_len, self.blend, self.sectors = load_sectors(self.yaml_path)
+        self.yaml_path = resolve_table_path(args, warn=self.get_logger().warn)
+        # 🟢 2026-08-19: 표 파일은 더 이상 **필수가 아니다**.
+        #    라인이 바뀌면 어차피 `autobuild_sectors()`가 κ로 경계를 새로 만들고 scale 1.0에서
+        #    시작하므로(08-13 신설), 파일의 유일한 실질 역할은 "노드가 뜨게 하는 부트스트랩"
+        #    뿐이었다. 그런데 없으면 FileNotFoundError로 **트레이스백을 뱉고 죽었다** —
+        #    자동 재생성이 있는데 씨앗 파일이 없다고 죽는 건 앞뒤가 안 맞는다.
+        #    track_len 0.0으로 시작하면 첫 `/global_waypoints`에서 랩길이 불일치로 판정돼
+        #    자동 재생성 경로를 그대로 탄다. `publish_table()`은 빈 표를 안 쏜다.
+        # ⚠️ `--no-auto-sectors`에서는 종전대로 치명적이다 — 자동 재생성을 껐으면 표 없이
+        #    복구할 방법이 없으므로 조용히 도는 것보다 죽는 게 낫다.
+        try:
+            self.track_len, self.blend, self.sectors = load_sectors(self.yaml_path)
+        except (OSError, ValueError) as e:
+            if not args.auto_sectors:
+                raise SystemExit(
+                    f"🔴 섹터 표를 읽을 수 없는데 자동 재생성이 꺼져 있다(--no-auto-sectors):\n"
+                    f"   {self.yaml_path}\n   {e}\n"
+                    f"   → 자동 재생성을 쓰거나(기본값), 표 경로를 위치 인자로 줄 것"
+                    f"(런치에서는 sector_scale_file:=<경로>). "
+                    f"표는 analyze_sector_clearance.py --yaml 로 뽑는다.") from e
+            self.track_len, self.blend, self.sectors = 0.0, 0.5, []
+            self._seed_error = str(e)
+        else:
+            self._seed_error = None
         self.mode = args.mode
         self.explore = (args.mode == "explore")
         self.static = (args.mode == "static")
@@ -447,7 +552,10 @@ class SectorLearner(Node):
         self.get_logger().info(
             f"🟢 sector_learner 시작 — 모드 {mode_desc} | "
             f"섹터 {len(self.sectors)}개 | 랩길이 {self.track_len:.3f} m | 발행 {args.topic}\n"
-            f"   표: {self.yaml_path}" + ("  (--watch: 저장 시 재로드)" if str(args.watch).lower() == "true" else "")
+            + (f"   표: (없음/불량 — {self._seed_error.splitlines()[0][:90]})\n"
+               f"        → /global_waypoints를 받는 즉시 κ로 자동 생성한다(scale 전부 1.0)"
+               if self._seed_error else f"   표: {self.yaml_path}")
+            + ("  (--watch: 저장 시 재로드)" if str(args.watch).lower() == "true" else "")
             + (f"\n   저장: {self.out_path}" + ("" if args.out else "  (자동 경로 — --out 으로 지정 가능)")
                if self.out_path else "\n   ⚠️ 저장 안 함(--no-auto-save)")
             + (f"\n   라인이 바뀌면 섹터 경계를 κ>{args.corner_kappa}로 자동 재생성한다 (scale 1.0 시작)"
@@ -772,7 +880,20 @@ class SectorLearner(Node):
             self.get_logger().warn(
                 "자동 저장 건너뜀 — /global_waypoints를 못 받아 표가 실제 라인과 대조되지 않았다")
             return
+        # 🔑 한 랩도 못 돈 주행은 자동 저장하지 않는다. 게이트가 랩 단위라 0랩이면 학습이
+        #    일어난 적이 없고(scale 전부 1.0), 그런 파일이 learned/에 쌓이면 guard 모드의
+        #    "최신 학습 결과 자동 로드"가 **진짜 학습본 대신 그 빈 파일을 집는다**
+        #    (2026-08-19 통합시험에서 실제로 발생). --out을 명시하면 그대로 저장한다.
+        if self.laps_done == 0 and not self.args.out:
+            self.get_logger().warn(
+                "자동 저장 건너뜀 — 완주 0랩이라 학습된 게 없다(전부 scale 1.0). "
+                "굳이 남기려면 --out 으로 경로를 지정할 것")
+            return
         doc = {
+            # laps/mode는 `pick_latest_learned`가 주석 대신 읽는 필드다(주석 파싱은 깨지기 쉽다).
+            # load_sectors는 모르는 키를 무시하므로 하위호환이 유지된다.
+            "laps": self.laps_done,
+            "mode": self.args.mode,
             "track_length": round(self.track_len, 3),
             "blend_len": self.blend,
             "sectors": [
@@ -811,6 +932,12 @@ def main():
     ap.add_argument("--no-auto-save", dest="auto_save", action="store_false",
                     help="--out 미지정 시의 자동 저장을 끈다")
     ap.set_defaults(auto_save=True)
+    ap.add_argument("--no-auto-latest", dest="auto_latest", action="store_false",
+                    help="guard 모드에서 learned/의 최신 학습 결과를 자동으로 싣지 않는다")
+    # 런치는 불리언을 문자열로 넘긴다(--watch와 같은 관례) — 둘 다 받는다.
+    ap.add_argument("--auto-latest", dest="auto_latest_str", default="",
+                    help="true/false. 런치용 (--no-auto-latest와 동일한 스위치)")
+    ap.set_defaults(auto_latest=True)
     ap.add_argument("--no-auto-sectors", dest="auto_sectors", action="store_false",
                     help="라인이 바뀌었을 때 섹터 경계를 κ로 자동 재생성하지 않고 발행을 멈춘다(구 거동)")
     ap.set_defaults(auto_sectors=True)
@@ -831,9 +958,13 @@ def main():
     # ⚠️ 런치가 `--ros-args -r __node:=...`를 뒤에 붙인다. 그대로 parse_args를 하면
     #    "unrecognized arguments"로 죽는다 — rclpy 유틸로 걷어낸다.
     args = ap.parse_args(rclpy.utilities.remove_ros_args(sys.argv)[1:])
+    # ⚠️ --dry-run 처리보다 **먼저** 해야 한다 — 안 그러면 dry-run이 다른 표를 보고
+    #    "이 설정으로 뜬다"고 거짓 보고한다.
+    if args.auto_latest_str:
+        args.auto_latest = args.auto_latest_str.strip().lower() in ("true", "1", "yes")
 
     if args.dry_run:
-        path = resolve_yaml(args.yaml)
+        path = resolve_table_path(args)
         try:
             tl, blend, secs = load_sectors(path, warn=lambda m: print(m, file=sys.stderr))
         except (ValueError, yaml.YAMLError, OSError) as e:

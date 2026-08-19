@@ -74,7 +74,17 @@ def generate_launch_description():
     sector_learner_node = common.build_sector_learner_node()
 
     return LaunchDescription([
-        *common.declare_common_args(sector_scale_enable_default='true'),
+        # 🔵 2026-08-19: 실차 기본값 true → **false**. 제거가 아니라 **결선 구성에서만 끈** 것이고
+        #    `sector_scale_enable:=true` 한 인자로 되돌아온다. 근거는 CLAUDE.md ②-x:
+        #     ① 지금 켜 봐야 **수학적으로 no-op**이다. `config/sectors.yaml`의 track_length
+        #        35.592가 현재 라인 41.282와 안 맞아 컨트롤러가 표를 폐기하고, 학습기의
+        #        autobuild가 scale 전부 1.0으로 다시 만들어 준다 →
+        #        `w.mla = max_lateral_accel × 1.0` = 끈 것과 **비트 단위로 동일**.
+        #     ② 그런데 켜 두면 `sector_learner` 노드·토픽·데드맨·`/state` 게이팅이 결선
+        #        구성에 그대로 남아, 이득 0인 채로 조용히 실패할 수 있는 표면만 늘린다.
+        #     ③ explore는 **연습 전용**이고 아직 실차 순이득이 확인된 적이 없다(0814 두 판
+        #        순효과 0). 연습에서 쓸 때만 인자로 켤 것.
+        *common.declare_common_args(sector_scale_enable_default='false'),
         odom_topic_arg,
         max_speed_arg,
         max_lateral_accel_arg,

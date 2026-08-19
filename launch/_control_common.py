@@ -25,8 +25,25 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='가속 중(acc_mean>=1.0) 조향각에 곱하는 스케일러'
         ),
         DeclareLaunchArgument(
-            'deceleration_scaler_for_steering', default_value='0.85',
-            description='감속 중(acc_mean<=-1.0) 조향각에 곱하는 스케일러'
+            # 🔴 2026-08-19: 0.85 → 1.0 (무력화). 제거가 아니라 기본값만 중립으로 돌린 것이라
+            # `:=0.85`로 언제든 되돌릴 수 있다. 근거는 CLAUDE.md ②-w:
+            #  ① **다른 노드가 이 항의 권한을 조용히 3배로 키웠다.** 게이트가 |a_x| ≥ ref(1.0)
+            #     인데, 07-26 젯슨 서비스 브레이크 패치 전에는 감속이 coast −0.4 m/s²라 w≈0.4로
+            #     거의 안 물렸다. 패치 후 실측 |a_x| p50 1.06~1.97 · 감속 사이클 28~52%라
+            #     **코너 진입마다 0.85로 포화**한다 — 아무도 그렇게 결정한 적이 없다.
+            #  ② 같은 저장소가 이미 같은 실수를 한 번 되돌렸다: 바로 아래 `start_scale_speed`
+            #     주석의 "턴인 구간 상시 −15% 다운스케일 → 코너 탈출 바깥쪽 오차 +0.11~0.21 m".
+            #     이 항은 그 −15%를 **턴인 구간에 무조건** 건다.
+            #  ③ ②-p로 조향이 LUT → 자전거 역모델이 된 뒤로는 모델이 하중 의존성을
+            #     K_us(a_lat)로 담는다. 최종 조향각에 곱하는 상수 배율은 기하항(L·κ/v²)까지
+            #     같이 깎아서 물리적으로 틀린 자리에 걸린다.
+            #  ④ 폐루프 시뮬: 0.85에서 max 0.658 / >0.2 m 47.7% (실측 0818 p95 0.608 ·
+            #     52.5%와 일치) → 1.0에서 max 0.216 / 2.1%. **현재 추종오차의 최대 단일 원인.**
+            #  ⚠️ 이 항을 켜 둔 채 steering_fb_gain을 내리면 **더 나빠진다**(0.658 → 0.805).
+            #     배율이 FF까지 깎는데 FF에는 되돌릴 피드백이 없기 때문이다. 순서가 중요하다.
+            'deceleration_scaler_for_steering', default_value='1.0',
+            description='감속 중 조향각에 곱하는 스케일러. 1.0 = 무개입(2026-08-19 기본값). '
+                        '0.85가 구 기본값이며 코너 진입에서 상시 −15%가 걸렸다 — ②-w'
         ),
         DeclareLaunchArgument(
             # ⚠️ 2026-08-16 08-15 실측 트랙 기준(최고 5.7~6.96 m/s)으로 3.2/4.6로 낮췄던 값을
@@ -121,7 +138,9 @@ def declare_common_args(sector_scale_enable_default='false'):
         ),
         DeclareLaunchArgument(
             'sector_scale_file', default_value='',
-            description='섹터 스케일 sectors.yaml 파일 경로 (비워두면 자동 탐색)'
+            description='섹터 스케일 표(YAML) 경로. 비우면 자동 탐색하고, 못 찾으면 '
+                        '/global_waypoints의 κ로 표를 자동 생성한다(scale 전부 1.0). '
+                        '🟢 2026-08-19에 config/sectors.yaml을 삭제했으므로 기본은 자동 생성이다 — ②-x'
         ),
         DeclareLaunchArgument(
             'sector_scale_topic', default_value='/sector_scales',
@@ -170,9 +189,20 @@ def declare_common_args(sector_scale_enable_default='false'):
                         'guard=하향만(결선, 안전) / explore=상향+하향(연습 전용). '
                         '⚠️ explore는 차가 스스로 코너 속도를 올린다 — E-stop에 손을 올릴 것'
         ),
+        # 🟢 2026-08-19: guard 모드에서 learned/의 최신 학습 결과를 자동으로 싣는다.
+        # guard의 존재 이유가 "연습에서 수렴시킨 표를 싣고 들어가는 것"인데 매번 경로를
+        # 손으로 줘야 하면 취지가 무너진다. 0랩 파일(학습 없음)은 건너뛰고, 라인이 바뀐
+        # 표를 집어도 track_length 불일치로 폐기되어 scale 1.0에서 시작한다(안전 방향).
+        # ⚠️ explore/static에는 적용되지 않는다 — 자동 로드는 항상 "빨라지는" 방향이라
+        #    그 둘은 1.0에서 시작한다는 보장을 유지한다.
+        DeclareLaunchArgument(
+            'sector_learn_auto_latest', default_value='true',
+            description='guard 모드에서 learned/ 최신 학습 결과를 자동 로드 (false면 끔). '
+                        'sector_scale_file을 명시하면 그쪽이 우선 — ②-x'
+        ),
         DeclareLaunchArgument(
             'sector_learn_watch', default_value='true',
-            description='sectors.yaml 저장을 감시해 재로드(라이브 튜닝). '
+            description='표 YAML 저장을 감시해 재로드(라이브 튜닝, --yaml을 준 경우). '
                         '⚠️ 재로드는 학습 상태를 초기화한다'
         ),
         DeclareLaunchArgument(
@@ -295,7 +325,42 @@ def declare_common_args(sector_scale_enable_default='false'):
         ),
         DeclareLaunchArgument(
             'understeer_gradient', default_value='0.010',
-            description='언더스티어 그래디언트 K_us [rad/(m/s^2)]. 0이면 조향 권한 캡 비활성'
+            description='언더스티어 그래디언트 K_us [rad/(m/s^2)]. 0이면 조향 권한 캡 비활성. '
+                        '좌/우 분리값(_left/_right)이 양수면 조향·권한캡·트림 추정은 그쪽을 쓰고 '
+                        '이 값은 방향 미상(κ=0)일 때만 남는다'
+        ),
+        # ── 좌/우 분리 K_us (2026-08-18 실측, 08-19 이식) ────────────────────────
+        # `rosbag2_2026_08_18-20_34_05` 정상상태 요레이트 전달률 역산: 좌 ≈0.008 / 우 ≈0.024.
+        # 공용 스칼라는 그 중간이라 우코너 FF가 만성 부족 → 매 랩 s25~31 우커브 탈출에서
+        # +1.05 m 와이드(좌벽 0.38 m 스침) → 복구 오버슈트로 다음 좌커브 진입이 밀려
+        # 우벽 스침/접촉. 실차 검증(22:39, 14랩 무접촉): 바깥 이탈 p90 −1.05 → −0.59 m,
+        # 측벽 40 cm 이내 진입 10.05% → 0.70%, 30 cm 이내 3.15% → 0%.
+        # ⚠️ 좌 0.011은 하중별 재측정 결과다(2~4:0.0140 / 4~6:0.0103 / 6~9:0.0063 →
+        #    주 대역 4~6에 맞춤). 처음 넣은 0.008은 고하중 좌커브에서 부족했다.
+        # ⚠️ `understeer_gradient_adapt_gain > 0`과 **동시 사용 불가** — 적응 스칼라가
+        #    좌우 공용으로 우선한다(추정기가 방향을 분리하지 않는다).
+        # 되돌리기: 둘 다 -1.0 (= 공용 understeer_gradient로 폴백).
+        DeclareLaunchArgument(
+            'understeer_gradient_left', default_value='0.011',
+            description='좌회전 K_us [rad/(m/s^2)]. <=0 = 공용 understeer_gradient 사용'
+        ),
+        DeclareLaunchArgument(
+            'understeer_gradient_right', default_value='0.024',
+            description='우회전 K_us [rad/(m/s^2)]. <=0 = 공용 understeer_gradient 사용'
+        ),
+        # ── 조향 권한 마진 (2026-08-19 신설, CLAUDE.md ②-y) ──────────────────────
+        # 조향 명령 클램프 = (섹터 스케일 적용된) max_lateral_accel × 이 값.
+        # 🔑 `mla` 하나가 "코너를 얼마로 돌 계획인가"(속도 캡)와 "조향이 요구할 수 있는
+        #    최대 a_lat"(클램프) 두 일을 겸하고 있었다. 라인이 전 코너에서 a_lat = mla를
+        #    요구하면 둘이 같아져 **횡오차 보정 예산이 구조적으로 0**이 되고, 실제 K_us가
+        #    가정보다 25%만 커도 오차를 되돌릴 권한이 없어 발산한다(max 1.29 m).
+        # 🔑 이걸 분리하면 "라인은 보수적으로 뽑고 주행 중 섹터 학습으로 코너 속도를
+        #    올린다"는 구조가 성립한다 — 속도 예산(= 학습 대상)과 보정 권한이 더 이상
+        #    같은 숫자가 아니기 때문이다. 1.0 = 구 거동.
+        DeclareLaunchArgument(
+            'steering_accel_margin', default_value='1.15',
+            description='조향 명령 클램프 = mla × 이 값 [배]. 1.0이면 구 거동(보정 예산 0). '
+                        '속도 캡에는 적용되지 않는다 — ②-y'
         ),
         DeclareLaunchArgument(
             'steer_authority_ratio', default_value='0.95',
@@ -395,7 +460,10 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'max_speed': max_speed,
             'min_speed': LaunchConfiguration('min_speed'),
             'max_lateral_accel': max_lateral_accel,
+            'steering_accel_margin': LaunchConfiguration('steering_accel_margin'),
             'understeer_gradient': LaunchConfiguration('understeer_gradient'),
+            'understeer_gradient_left': LaunchConfiguration('understeer_gradient_left'),
+            'understeer_gradient_right': LaunchConfiguration('understeer_gradient_right'),
             'steer_authority_ratio': LaunchConfiguration('steer_authority_ratio'),
             'curvature_lookahead_count': ParameterValue(
                 LaunchConfiguration('curvature_lookahead_count'), value_type=int),
@@ -496,6 +564,7 @@ def build_sector_learner_node():
             '--mode', LaunchConfiguration('sector_learn_mode'),
             '--watch', LaunchConfiguration('sector_learn_watch'),
             '--out', LaunchConfiguration('sector_learn_out'),
+            '--auto-latest', LaunchConfiguration('sector_learn_auto_latest'),
             '--topic', LaunchConfiguration('sector_scale_topic'),
             '--odom', LaunchConfiguration('odom_topic'),
         ],

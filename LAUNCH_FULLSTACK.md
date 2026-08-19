@@ -7,7 +7,7 @@
 |---|---|
 | 젯슨 | **`jetson`** (= `miru@10.1.1.1`, wifi `wlP1p1s0`), Ubuntu 24.04 / **ROS 2 Jazzy** |
 | 본체 PC | `10.1.1.24` (wifi `wlo1`), **ROS 2 Jazzy** |
-| 워크스페이스 | 젯슨 `~/f1tenth_ws`(하드웨어) + `~/2026_IFAC`(제어·플래닝·MCL) |
+| 워크스페이스 | 젯슨 `~/f1tenth_ws`(하드웨어) + `~/2026_IFAC`(제어·플래닝·위치추정) |
 | 지도 이름 | **`map`** (slam_toolbox 기본 저장명 그대로) |
 | `ROS_DOMAIN_ID` | **70** |
 
@@ -21,7 +21,8 @@
 
 | # | 함정 | 대응 |
 |---|---|---|
-| 1 | **지도를 넣었으면 재빌드** — MCL은 `src/`가 아니라 설치된 share에서 읽고, 지도는 심볼릭 링크가 아닌 **실제 복사본** | [§2](#2-지도-넣었으면-재빌드-젯슨) |
+| 1 | **지도를 넣었으면 재빌드** — localization은 `src/`가 아니라 설치된 share에서 읽고, 지도는 심볼릭 링크가 아닌 **실제 복사본** | [§2](#2-지도-넣었으면-재빌드-젯슨) |
+| 1b | **KICP는 `.kissmap`이 따로 필요하다** — occupancy 맵만 넣으면 맵 로드 실패로 **즉시 종료**(FATAL) | [§1-④](#-kicp용-kissmap-만들기-localization이-실제로-쓰는-맵) |
 | 2 | 지도 yaml의 `image:`가 `.pgm`으로 써질 때가 있다 | 저장 시 `--fmt png` ([§1](#1-지도-만들기--옮기기-새-트랙일-때만)) |
 | 3 | `odom→base_link` TF 이중 발행 | `mcl_launch.py`의 `publish_odom_base_tf` 기본 false ([§6](#6-tf-책임-구조)) |
 | 4 | **랩탑 ufw가 DDS 디스커버리를 막는다** — ping·ssh는 되는데 토픽만 0개 | [§7](#7-통신이-안-될-때) |
@@ -34,7 +35,7 @@
 
 | 패키지 | 어디서 읽나 | 기본값 |
 |---|---|---|
-| **MCL** (`particle_filter_cpp`) | `map_name:=` 인자 (**`F1_MAP`을 안 읽는다**) | `map` ✅ |
+| **localization** (`kinematic_localization` / 구 `particle_filter_cpp`) | `map_name:=` 인자 (**둘 다 `F1_MAP`을 안 읽는다**) | KICP는 **빈 값**(= 순수 odometry) 🔴 항상 명시 / MCL `map` ✅ |
 | **global_planning** | `F1_MAP` 환경변수 | `map` ✅ |
 | **local_planning** | `F1_MAP` 환경변수 | `map` ✅ ← 구 `ifac_track`에서 수정됨 |
 
@@ -51,14 +52,16 @@ ssh jetson "sed -i 's/^export F1_MAP=.*/export F1_MAP=map/' ~/.zshrc"
 # 이미 열어둔 터미널엔 반영 안 된다 → 새 터미널 또는 그 창에서: export F1_MAP=map
 ```
 
-MCL은 어느 경우에도 `F1_MAP`을 안 읽으므로 **`map_name:=map`을 항상 명시**한다.
+localization은 어느 경우에도 `F1_MAP`을 안 읽으므로 **`map_name:=map`을 항상 명시**한다.
+🔴 KICP는 기본값이 빈 문자열이라 안 주면 **맵 없이 순수 odometry로 조용히 돈다.**
 
 ### 0-2. 현재 워크스페이스 패키지 (2026-08-17)
 
 ```
 ~/2026_IFAC/src/
 ├── f1tenth_control/          ← 이 저장소 (제어)
-├── monte_carlo_localization/ ← 패키지명은 particle_filter_cpp
+├── kinematic_localization/   ← 🟢 현 위치추정 (Kinematic-ICP, 2026-08-19 이식)
+├── monte_carlo_localization/ ← 패키지명은 particle_filter_cpp (구 MCL, 롤백용 보존)
 ├── global_planning/          ← 글로벌 라인 발행 + frenet_odom_node
 ├── local_planning/           ← 회피 경로 생성
 ├── state_machine/            ← /state 판정 + /local_waypoints 선택 발행
@@ -180,9 +183,32 @@ print('차량 한계 초과 점: %d / %d' % (sum(1 for v in k if v > 1.317), len
 ```
 초과 점이 0이 아니면 `--max-curvature`를 낮추거나 `--safety-width`를 키워 다시 뽑는다.
 
+### ④ KICP용 `.kissmap` 만들기 (localization이 실제로 쓰는 맵)
+
+`kinematic_localization`은 occupancy 맵이 아니라 **점 맵(`.kissmap`)**에 정합한다.
+새 지도를 만들었으면 여기서 한 번 변환한다(주행 불필요, 1초).
+
+```bash
+cd ~/2026_IFAC
+cp ~/slam_toolbox/map.png ~/slam_toolbox/map.yaml src/kinematic_localization/maps/
+python3 src/kinematic_localization/scripts/pgm_to_kissmap.py \
+  src/kinematic_localization/maps/map.yaml \
+  src/kinematic_localization/maps/map.kissmap \
+  --voxel-size 1.0 --max-range 30 --downsample 0.1
+```
+
+⚠️ **`--downsample`을 키우지 말 것**(기본 0.1). 성기면 벽 점 사이가 벌어져 고속에서 ICP
+대응점이 잘못 스냅된다. `--voxel-size`는 헤더 메타데이터일 뿐 밀도와 무관하다.
+⚠️ `.kissmap`과 occupancy 맵은 **한 쌍**이다 — 지도를 새로 만들면 둘 다 갱신할 것.
+
 ### 본체 → 젯슨 전송
 ```bash
-# 지도 (MCL용) — 재빌드 필요
+# 지도 — 재빌드 필요
+scp ~/slam_toolbox/map.png ~/slam_toolbox/map.yaml \
+    jetson:~/2026_IFAC/src/kinematic_localization/maps/
+scp ~/2026_IFAC/src/kinematic_localization/maps/map.kissmap \
+    jetson:~/2026_IFAC/src/kinematic_localization/maps/
+# (구 MCL도 같이 쓸 거면)
 scp ~/slam_toolbox/map.png ~/slam_toolbox/map.yaml \
     jetson:~/2026_IFAC/src/monte_carlo_localization/maps/
 
@@ -222,14 +248,14 @@ cd ~/2026_IFAC && python3 -c "import json,sys; print(json.load(open(sys.argv[1])
 ```bash
 cd ~/2026_IFAC && source /opt/ros/jazzy/setup.zsh
 MAKEFLAGS="-j4" colcon build --symlink-install --executor sequential \
-  --packages-select particle_filter_cpp global_planning local_planning
+  --packages-select kinematic_localization global_planning local_planning
 source install/setup.zsh
 ```
 ⚠️ Orin Nano는 메모리가 좁다 — `-j4 --executor sequential` 빼면 OOM으로 죽는다(`cb` alias가 이 설정).
 
 확인:
 ```bash
-ls -lh "$(ros2 pkg prefix particle_filter_cpp)/share/particle_filter_cpp/maps/map."{yaml,png}
+ls -lh "$(ros2 pkg prefix kinematic_localization)/share/kinematic_localization/maps/map."{yaml,png,kissmap}
 ```
 
 ---
@@ -238,7 +264,7 @@ ls -lh "$(ros2 pkg prefix particle_filter_cpp)/share/particle_filter_cpp/maps/ma
 
 ```
 젯슨 T1  f110 bringup     → /scan 40Hz, /odom 50Hz, /joy 20Hz
-젯슨 T2  MCL              → /map, /pf/pose/odom
+젯슨 T2  kinematic_local. → /map, /pf/pose/odom   (구 MCL 자리)
 본체     RViz2            → 2D Pose Estimate → 스캔·벽 정합 확인
 젯슨 T3  global_planning  → 경로·지도 정합 확인
 젯슨 T4  local_planning
@@ -267,7 +293,37 @@ ros2 topic echo /drive_mode --field data     # estop → (X) manual
   `IMU stale` 반복이면 IMU가 끊긴 것.
 - 조이스틱 F710은 **X 모드**(뒷면 스위치). 절전되면 로지텍 버튼으로 깨운다.
 
-### T2 (젯슨) — MCL
+### T2 (젯슨) — localization
+
+🟢 **2026-08-19부터 KICP(`kinematic_localization`)가 기본이다.** MCL과 인터페이스가 같아
+(`/pf/pose/odom` + `map→odom` TF + `/map`) 나머지 노드는 손댈 게 없다. 근거·실측은
+CLAUDE.md ②-u, 이식 상세는 `~/2026_IFAC/src/kinematic_localization/PORTING_NOTE.md`.
+
+```bash
+cd ~/2026_IFAC && source install/setup.zsh
+ros2 launch kinematic_localization kinematic_localization.launch.py map_name:=<map_name>
+# 현재 트랙:
+ros2 launch kinematic_localization kinematic_localization.launch.py map_name:=map
+```
+
+- `map_name`은 `share/kinematic_localization/maps/<map_name>.kissmap`을 가리킨다(절대경로도 가능).
+  **비워 두면 순수 odometry로 돈다** — 반드시 명시할 것.
+- 초기 포즈는 `/global_waypoints`(스타트라인 자세)로 **자동 초기화**된다(MCL parity).
+  RViz `2D Pose Estimate`로 언제든 덮어쓸 수 있고, 사람이 찍으면 그쪽이 이긴다.
+- 🔴 **자동 초기화가 거부되면 포즈를 아예 발행하지 않는다**(로그에 `Auto-init REJECTED`).
+  차가 스타트라인 근처가 아니었다는 뜻이고, ICP는 그 상태에서 **회복하지 못하므로** 일부러
+  막는 것이다 → RViz에서 초기 포즈를 직접 찍을 것.
+- `/map`은 이 노드가 직접 발행한다(별도 map_server 불필요). `.kissmap`은 occupancy 맵에서
+  만든다 — [§1](#1-지도-만들기--옮기기-새-트랙일-때만) 참고.
+
+```bash
+ros2 topic hz /pf/pose/odom                 # ≈40 Hz (스캔률)
+ros2 topic info /map --verbose              # publisher = /kinematic_localization 1개
+ros2 topic echo /kinematic_localization/diagnostics   # inlier_ratio·residual_rms·gate 상태
+```
+
+<details><summary>구 MCL로 되돌릴 때 (둘을 <b>동시에 띄우지 말 것</b> — /pf/pose/odom·TF 충돌)</summary>
+
 ```bash
 cd ~/2026_IFAC && source install/setup.zsh
 echo "F1_MAP=$F1_MAP"     # 비었거나 map 이어야 한다 (§0-1)
@@ -275,6 +331,9 @@ ros2 launch particle_filter_cpp mcl_launch.py mod:=real map_name:=map use_rviz:=
 ```
 `map_name:=map` — MCL은 `F1_MAP`을 안 읽으므로 **항상 명시**한다.
 `use_rviz:=false` — RViz는 본체에서 띄운다(젯슨 렌더 부하 0).
+
+⚠️ MCL로 돌아가면 CLAUDE.md ②-u의 "가드 복구 안 함" 판정도 같이 되돌려야 한다.
+</details>
 
 ```bash
 ros2 param get /particle_filter_map_server yaml_filename   # .../maps/map.yaml
@@ -295,8 +354,9 @@ export ROS_DOMAIN_ID=70
 ros2 daemon stop && ros2 daemon start
 rviz2 -d "$(ros2 pkg prefix particle_filter_cpp)/share/particle_filter_cpp/rviz/particle_filter.rviz"
 ```
-Fixed Frame `map` / Map `/map` / LaserScan `/scan` / Odometry `/pf/pose/odom` /
-PoseArray `/pf/viz/particles` / TF.
+Fixed Frame `map` / Map `/map` / LaserScan `/scan` / Odometry `/pf/pose/odom` / TF.
+ℹ️ 이 rviz 설정은 구 MCL 것을 그대로 쓴다 — KICP는 `/pf/viz/particles`를 발행하지 않으므로
+그 PoseArray 항목만 비어 있다(나머지는 그대로 동작).
 
 **초기 위치**: 차량 정지 → `2D Pose Estimate` → 실제 위치 클릭 → 드래그로 방향 → 스캔이 벽과
 겹치는지 확인.
@@ -459,6 +519,11 @@ python3 tools/bag_analyzer/analyze_local_path_jump.py <bag...>   # Frenet s → 
 python3 tools/bag_analyzer/analyze_sector_clearance.py <bag>     # 섹터별 벽 여유
 python3 tools/bag_analyzer/compare_steering_model.py  <bag...>   # LUT vs 자전거모델
 bash   tools/f1net_client.sh                                     # 네트워크 자가진단 (§7)
+
+# 조향 추종오차 파라미터 사다리 (CLAUDE.md ②-v) — 차 없이 오프라인
+cd tools/bag_analyzer
+python3 extract_line_and_run.py <bag>/<bag>_0.db3          # run.npz 생성
+SIM_DATA_DIR=. PYTHONPATH=. python3 sim_tracking_ladder.py # 단계별 예상 횡오차
 ```
 
 ---
@@ -480,9 +545,9 @@ kill -SIGINT <정확한_PID>
 ## 7. TF 책임 구조
 
 ```
-particle_filter     → map → odom
-vesc_to_odom_node   → odom → base_link
-static TF           → base_link → laser
+kinematic_localization → map → odom      (구 particle_filter 자리)
+vesc_to_odom_node      → odom → base_link
+static TF              → base_link → laser
 ```
 `odom→base_link`를 MCL과 `vesc_to_odom`이 동시에 내던 것을 07-29에 해소
 (`publish_odom_base_tf` 런치 인자, 기본 false). odom을 믿는 근거는 07-28 검증
@@ -547,7 +612,9 @@ AP(HY_MIRU)의 멀티캐스트 전달 자체는 정상임이 확인됐으므로 
 | 본체에서 젯슨 토픽이 안 보임 | **`f1net_client.sh` 먼저** (§8). ufw / `ROS_DOMAIN_ID` 양쪽 70 / `ros2 daemon stop && start` |
 | 스캔이 벽과 안 맞음 | 지도, `2D Pose Estimate`, `base_link→laser` static TF, MCL |
 | 스캔은 맞는데 경로만 어긋남 | `global_waypoints.json`의 `map_info_str`, 지도 `origin`/`resolution` |
-| MCL만 다른 지도를 봄 | `map_name:=map`을 안 넘겼다 — MCL은 `F1_MAP`을 안 읽는다 (§0-1) |
+| localization만 다른 지도를 봄 | `map_name:=map`을 안 넘겼다 — MCL·KICP 둘 다 `F1_MAP`을 안 읽는다 (§0-1) |
+| KICP가 포즈를 아예 안 냄 | 로그에 `Auto-init REJECTED`면 차가 스타트라인이 아니다 → RViz `2D Pose Estimate`. `Waiting for initial pose`만 반복이면 `/global_waypoints`(T3)가 아직 없다 |
+| KICP 기동 직후 죽음 | `map_name`이 가리키는 `.kissmap`이 없다(맵 로드 실패 = FATAL 종료). §1-④로 생성 |
 | global/local이 경로를 못 찾음 | 젯슨 `.zshrc`에 옛 `F1_MAP`이 박혀 있는지 (§0-1). 기본값은 셋 다 `map` |
 | 지도를 넣었는데 없다고 함 | 재빌드 안 함 (§2) |
 | `/local_waypoints` 무발행 | `child_frame_id`가 정수 문자열인지 (T5) |

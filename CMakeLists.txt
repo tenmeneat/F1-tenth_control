@@ -89,12 +89,10 @@ install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
 
-# 섹터 스케일 테이블 — scripts/sector_learner.py가 읽어 /sector_scales로 발행한다.
-# ⚠️ --symlink-install로 빌드하면 install 쪽이 src를 가리키는 심볼릭 링크가 되어
-#    **재빌드 없이 값 수정이 즉시 반영**된다(런치 파일과 같은 성질).
-install(FILES config/sectors.yaml
-  DESTINATION share/${PROJECT_NAME}/config
-)
+# 🟢 2026-08-19: config/sectors.yaml 삭제. sector_learner가 /global_waypoints의 κ로
+#    섹터 경계를 그 자리에서 만들므로(autobuild, 08-13) 씨앗 파일이 필요 없어졌다.
+#    표를 직접 주고 싶으면 `sector_scale_file:=<경로>` 하나로 넘긴다(학습 결과는
+#    learned/ 에 저장된다). 자세한 배경은 CLAUDE.md ②-x.
 
 install(PROGRAMS scripts/sector_learner.py
   DESTINATION lib/${PROJECT_NAME}
