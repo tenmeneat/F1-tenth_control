@@ -301,7 +301,6 @@ CLAUDE.md ②-u, 이식 상세는 `~/2026_IFAC/src/kinematic_localization/PORTIN
 
 ```bash
 cd ~/2026_IFAC && source install/setup.zsh
-ros2 launch kinematic_localization kinematic_localization.launch.py map_name:=<map_name>
 # 현재 트랙:
 ros2 launch kinematic_localization kinematic_localization.launch.py map_name:=map
 ```
