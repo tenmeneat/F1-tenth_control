@@ -156,6 +156,27 @@ def main():
     ma = num(sysr, "mem_avail_kb")
     print(f"  가용 메모리  최소 {np.nanmin(ma)/1024:.0f} MB")
 
+    # 🔑 이더넷 링크 — 라이다가 이더넷이라(192.168.0.10:10940) 링크가 내려가면
+    #    urg_node가 TCP 재연결에 약 8초를 쓴다(0819 실측). 이게 찍히면 원인 확정이다.
+    link_keys = [k for k in sysr[0].keys() if k.startswith("link_")]
+    if link_keys:
+        for k in link_keys:
+            v = num(sysr, k)
+            down = np.sum(v == 0); unread = np.sum(v < 0)
+            if down == 0 and unread == 0:
+                print(f"  이더넷 {k[5:]:<8} 링크 유지 (끊김 0회)")
+                continue
+            # 전이 구간을 찾아 길이와 시점을 찍는다
+            segs, st = [], None
+            for i, x in enumerate(v):
+                if x == 0 and st is None: st = i
+                elif x != 0 and st is not None: segs.append((t[st], t[i] - t[st])); st = None
+            if st is not None: segs.append((t[st], t[-1] - t[st]))
+            print(f"  🔴 이더넷 {k[5:]:<8} 링크 끊김 {len(segs)}회 "
+                  f"(총 {np.sum(v == 0) * dt:.2f} s, 읽기실패 {unread})")
+            for t0_, dur in segs[:10]:
+                print(f"       t={t0_ - t[0]:7.2f}s 부터 {dur * 1000:8.0f} ms")
+
     procr = load_csv(os.path.join(loaddir, "proc.csv"))
     if procr:
         names = {}

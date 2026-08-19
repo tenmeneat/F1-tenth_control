@@ -44,15 +44,17 @@ def generate_launch_description():
                     'steering_angle_to_servo_gain_left(-0.5785) + offset(0.4672) 과 한 쌍'
     )
     max_steering_right_arg = DeclareLaunchArgument(
-        'max_steering_right', default_value='0.383',
+        'max_steering_right', default_value='0.361',
         description='우조향(δ<0) 명령 한계 [rad] = 실제 바퀴 각. 젯슨 vesc.yaml 의 '
                     'steering_angle_to_servo_gain_right(-0.4702) + offset 과 한 쌍. '
-                    '2026-08-19: 젯슨 offset이 0.4672 -> 0.48로 바뀌어 우조향이 '
-                    '(0.66-0.48)/0.4702 = 0.3828 rad(21.93도)에서 servo_max에 걸린다. '
-                    '컨트롤러가 0.410을 계획하면 낼 수 없는 각을 계획하는 것이라 0.383으로 맞췄다. '
-                    '이 트랙 랩타임 영향 0(조향 권한 캡이 0.410/0.383 어느 쪽에서도 172점 중 '
-                    '0점만 구속, 실측 최대 명령각 0.287~0.291). '
-                    '⚠️ offset을 0.4672로 되돌리면 이 값도 0.410으로 되돌릴 것'
+                    '2026-08-19: 젯슨 offset이 0.4672 -> 0.49로 바뀌어 우조향이 '
+                    '(0.66-0.49)/0.4702 = 0.3615 rad(20.72도)에서 servo_max에 걸린다. '
+                    '컨트롤러가 0.410을 계획하면 낼 수 없는 각을 계획하는 것이라 0.361로 맞췄다. '
+                    '이 트랙 랩타임 영향 0(조향 권한 캡이 0.410/0.361 어느 쪽에서도 172점 중 '
+                    '0점만 구속, 실측 최대 명령각 0.287~0.291 = 여유 19.5%). '
+                    '⚠️ **젯슨 offset을 바꾸면 이 값을 반드시 같이 고칠 것**: '
+                    'max_steering_right = (servo_max 0.66 - offset) / gain_right 0.4702. '
+                    'offset 0.4672 -> 0.410 / 0.48 -> 0.383 / 0.49 -> 0.361'
     )
 
     base_max_accel_arg = DeclareLaunchArgument(

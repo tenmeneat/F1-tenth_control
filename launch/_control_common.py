@@ -290,6 +290,46 @@ def declare_common_args(sector_scale_enable_default='false'):
             'steering_trim_max_steer', default_value='0.15',
             description='이 조향각[rad]을 넘으면 학습 정지 — 선형 자전거모델 유효 영역 밖'
         ),
+        # ── 트림 웜업 단축 (2026-08-19) ──────────────────────────────────────────
+        # 트림 게이트 듀티가 25~29%뿐이라 실효 시상수가 τ/듀티 ≈ 14 s → 수렴에 3~4랩이
+        # 걸리고, 그 사이 직선 횡오차가 +0.11 m에서 시작한다(0819 실측).
+        # 0819 bag 리플레이(±0.3° 정착 / 정상상태 리플):
+        #     gain 0.25 단독            20.9 s / 0.056°
+        #     + 웜업 상한 2.0            **9.8 s** / 0.055°   ← 리플이 늘지 않는다
+        #     gain 0.5 로 올리기         65.6 s / 0.108°      ← 리플이 2배, 정착은 더 나쁨
+        #   → **정상 게인을 올리는 것은 답이 아니다.** 웜업 구간만 빠르게 하는 게 맞다.
+        DeclareLaunchArgument(
+            'steering_trim_init', default_value='0.0',
+            description='조향 트림 시작값 [rad] (재체결 리셋값도 이 값). '
+                        '지난 주행 상태 로그의 `trim: xx°` 수렴값을 rad로 실으면 웜업이 0이 된다. '
+                        '0819 실측 수렴값: 젯슨 offset 0.4672에서 -0.032 rad(-1.8°), '
+                        'offset 0.48에서는 -0.014 rad(-0.8°) 부근이 예상값. '
+                        '⚠️ 서보암/타이로드/젯슨 offset을 만졌으면 반드시 0으로 되돌리고 다시 배울 것'
+        ),
+        DeclareLaunchArgument(
+            'steering_trim_warmup_gain', default_value='2.0',
+            description='트림 웜업 상한 게인 [1/s], 0이면 비활성(구 거동). '
+                        'g_eff = clamp(1/게이트누적시간, steering_trim_adapt_gain, 이 값). '
+                        '초기엔 표본평균과 등가로 빠르게 붙고 t_g > 1/gain 이후 기존 LPF로 '
+                        '정확히 복귀하므로 정상상태 리플이 늘지 않는다'
+        ),
+        # ③ 자동 저장/복원 — 사람이 값을 옮겨 적을 필요가 없다.
+        #    지문(K_us 좌/우·공용, reach, lag, 조향 한계 좌/우)이 다르면 기동 시 폐기하고,
+        #    나이가 max_age를 넘어도 폐기한다. 둘 다 통과하면 웜업 없이 시작한다.
+        #    ⚠️ 지문으로 **젯슨 vesc.yaml의 steering_angle_to_servo_offset 변경은 못 잡는다**
+        #       (다른 패키지라 안 보인다). 그래서 나이 제한 + 웜업 스케줄을 같이 둔다 —
+        #       웜업이 켜져 있으면 틀린 값을 실어도 게이트 열린 뒤 ~10초에 실측으로 덮인다.
+        #       즉 최악이 "0에서 시작한 것과 같음"이고 그보다 나빠지지 않는다.
+        DeclareLaunchArgument(
+            'steering_trim_persist_file', default_value='~/.f1tenth/steering_trim.yaml',
+            description='조향 트림 자동 저장 경로. 빈 문자열이면 비활성(구 거동). '
+                        '5초마다 원자적 교체로 쓰고, 기동 시 지문·나이 검사 후 싣는다'
+        ),
+        DeclareLaunchArgument(
+            'steering_trim_persist_max_age', default_value='43200.0',
+            description='트림 저장본 유효 나이 [s], 0이면 무제한. 기본 12시간 = 테스트 하루. '
+                        '기계 중립은 정비/주행마다 움직인다(0810 실측 -2.2/-1.9/+1.6°)'
+        ),
         DeclareLaunchArgument(
             'steering_trim_min_speed', default_value='2.0',
             description='이 속도[m/s] 미만이면 학습 정지 (저속은 요레이트 역산이 폭발)'
@@ -528,6 +568,12 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'steering_trim_adapt_gain': LaunchConfiguration('steering_trim_adapt_gain'),
             'steering_trim_limit': LaunchConfiguration('steering_trim_limit'),
             'steering_trim_max_steer': LaunchConfiguration('steering_trim_max_steer'),
+            'steering_trim_init': LaunchConfiguration('steering_trim_init'),
+            'steering_trim_persist_file':
+                LaunchConfiguration('steering_trim_persist_file'),
+            'steering_trim_persist_max_age':
+                LaunchConfiguration('steering_trim_persist_max_age'),
+            'steering_trim_warmup_gain': LaunchConfiguration('steering_trim_warmup_gain'),
             'steering_trim_min_speed': LaunchConfiguration('steering_trim_min_speed'),
             'steering_trim_max_lat_acc': LaunchConfiguration('steering_trim_max_lat_acc'),
             'steering_trim_lag': LaunchConfiguration('steering_trim_lag'),

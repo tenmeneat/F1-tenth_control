@@ -8,6 +8,10 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/imu.hpp"
@@ -256,6 +260,33 @@ public:
             std::max(0.1, declare_parameter<double>("steering_trim_max_lat_acc", 2.0));
         steering_trim_lag_ =
             std::clamp(declare_parameter<double>("steering_trim_lag", 0.14), 0.0, 0.5);
+        // ── 트림 웜업 단축 (2026-08-19) ─────────────────────────────────────────
+        // 문제: 게이트 듀티가 25~29%뿐이라 실효 시상수가 τ/듀티 ≈ 14초 → 수렴에 3~4랩.
+        //       그 사이 직선 횡오차가 +0.11 m에서 시작한다(0819 실측). 게다가 미체결마다
+        //       0으로 리셋되므로 재체결하는 측정 하네스는 **매번** 웜업을 다시 산다.
+        // ① steering_trim_init: 시작값(과 재체결 리셋값)을 알려진 값으로 준다.
+        //    기계 중립은 주행 단위로 느리게 변하는 성질이라, 지난 주행의 수렴값
+        //    (상태 로그 `trim: xx°`)을 그대로 실으면 웜업이 **0**이 된다.
+        //    ⚠️ 서보암/타이로드/젯슨 offset을 만졌으면 반드시 0으로 되돌리고 다시 배울 것.
+        // ② steering_trim_warmup_gain: 게이트가 열린 누적시간 t_g에 대해
+        //    g_eff = clamp(1/t_g, gain, warmup_gain). 초기에는 사실상 표본평균이라
+        //    빠르게 붙고, t_g > 1/gain 이후에는 **정확히 기존 LPF로 되돌아간다**
+        //    → 정상상태 리플이 늘지 않는다(0819 리플레이: σ 0.056° → 0.055°).
+        //    0819 리플레이 ±0.3° 정착: 20.9 s → 9.8 s. 0 = 비활성(구 거동).
+        steering_trim_init_ = std::clamp(
+            declare_parameter<double>("steering_trim_init", 0.0),
+            -steering_trim_limit_, steering_trim_limit_);
+        steering_trim_warmup_gain_ =
+            std::max(0.0, declare_parameter<double>("steering_trim_warmup_gain", 2.0));
+        // ③ 자동 저장/복원 — 사람이 값을 옮겨 적지 않아도 되게 한다.
+        //    파일에 트림 + **그 값이 학습된 조건의 지문**을 같이 적고, 기동 시 지문이
+        //    다르면 버린다. 지문이 없으면 "어제 서보암을 만졌는데 어제 트림을 싣는" 사고가 난다.
+        steering_trim_persist_file_ =
+            expand_user(declare_parameter<std::string>("steering_trim_persist_file",
+                                                       "~/.f1tenth/steering_trim.yaml"));
+        steering_trim_persist_max_age_ = std::max(
+            0.0, declare_parameter<double>("steering_trim_persist_max_age", 43200.0));
+        steering_trim_ = steering_trim_init_;
 
         max_speed_ = declare_parameter<double>("max_speed", 12.0);
         min_speed_ = declare_parameter<double>("min_speed", 2.0);
@@ -528,6 +559,25 @@ public:
                         steering_trim_limit_ * 180.0 / M_PI, steering_trim_min_speed_,
                         steering_trim_max_steer_ * 180.0 / M_PI, steering_trim_max_lat_acc_,
                         steering_trim_lag_ * 1000.0, imu_angular_scale_);
+            // ⚠️ 로그보다 **먼저** 싣는다 — 안 그러면 "시작값 +0.00°"를 찍어 놓고
+            //    실제로는 저장본으로 출발해 사람이 로그를 오독한다.
+            // (명시적으로 준 steering_trim_init 이 있으면 그쪽이 이미 반영돼 있고,
+            //  저장본이 지문·나이 검사를 통과하면 저장본이 최신이므로 이긴다.)
+            load_persisted_trim();
+            RCLCPP_INFO(this->get_logger(),
+                "  트림 웜업: 시작값 %+.2f° (재체결 시에도 이 값으로 복귀) | 웜업 상한 게인 %.1f 1/s%s",
+                steering_trim_init_ * 180.0 / M_PI, steering_trim_warmup_gain_,
+                (steering_trim_warmup_gain_ > steering_trim_gain_)
+                    ? " (게이트 누적 1/t_g 스케줄 → 정상 게인으로 자동 복귀)"
+                    : " (비활성 = 구 거동)");
+            if (!steering_trim_persist_file_.empty()) {
+                RCLCPP_INFO(this->get_logger(),
+                    "  트림 자동 저장: %s (5초마다, 지문·나이 %.0f시간 검사)",
+                    steering_trim_persist_file_.c_str(),
+                    steering_trim_persist_max_age_ / 3600.0);
+                trim_persist_timer_ = this->create_wall_timer(
+                    std::chrono::seconds(5), [this]() { save_persisted_trim(); });
+            }
             if (std::abs(imu_angular_scale_ - 1.0) < 1e-6) {
                 RCLCPP_WARN(this->get_logger(),
                     "⚠️ imu_angular_scale=1.0 — 시뮬(sim_imu_bridge_node)이면 정상이지만 "
@@ -620,6 +670,128 @@ private:
     // 곡률 추종에 쓸 수 있는 **실제 도달** 조향각 [rad].
     //   좌우 중 작은 한계 × 도달각 비율 × 곡률 추종 배정 비율.
     // 나머지(1 − steer_authority_ratio)는 횡오차 보정·요레이트 피드백 여유로 남긴다.
+
+    // ── 조향 트림 영속화 (2026-08-19) ───────────────────────────────────────────
+    // 왜: 트림 게이트 듀티가 25~29%라 매 기동마다 웜업을 다시 산다. 게다가 미체결마다
+    //     리셋되므로 랩마다 재체결하는 하네스는 영영 수렴값을 못 본다(②-n).
+    // 🔑 **지문(fingerprint) 검사가 이 기능의 안전장치다.** 트림은 "이 조향 파이프라인
+    //    에서의 잔차"라, 파이프라인이 바뀌면 그 값은 의미가 없다. 지문이 다르면 버린다.
+    // ⚠️ 지문으로 못 잡는 변화가 하나 있다: **젯슨 vesc.yaml 의
+    //    steering_angle_to_servo_offset**. 그건 다른 패키지라 여기서 안 보인다.
+    //    그래서 ① 나이 제한(steering_trim_persist_max_age)과 ② 웜업 스케줄을 같이 둔다 —
+    //    웜업이 켜져 있으면 틀린 값을 실어도 게이트 열린 뒤 ~10초면 실측으로 덮인다.
+    //    즉 **최악이 "0에서 시작한 것과 같음"**이지 그보다 나빠지지 않는다.
+    static std::string expand_user(const std::string& p) {
+        if (p.empty() || p[0] != '~') return p;
+        const char* home = std::getenv("HOME");
+        if (!home) return p;
+        return std::string(home) + p.substr(1);
+    }
+
+    // 트림이 유효한 조건. 하나라도 다르면 저장값을 버린다.
+    std::string trim_fingerprint() const {
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+                      "kl=%.5f,kr=%.5f,kg=%.5f,reach=%.4f,lag=%.3f,sl=%.4f,sr=%.4f",
+                      understeer_gradient_left_, understeer_gradient_right_,
+                      understeer_gradient_, steering_reach_ratio_, steering_trim_lag_,
+                      max_steering_left_, max_steering_right_);
+        return std::string(buf);
+    }
+
+    // 기동 시 1회. 실패는 전부 "안 싣는다"로 수렴한다(치명적이지 않다).
+    void load_persisted_trim() {
+        if (steering_trim_persist_file_.empty() || steering_trim_gain_ <= 0.0) return;
+        std::ifstream f(steering_trim_persist_file_);
+        if (!f) {
+            RCLCPP_INFO(this->get_logger(),
+                "  트림 저장본 없음(%s) — 0에서 학습 시작. 이번 주행 끝에 자동 저장된다.",
+                steering_trim_persist_file_.c_str());
+            return;
+        }
+        std::string line, fp; double val = 0.0, stamp = 0.0; bool has_val = false;
+        while (std::getline(f, line)) {
+            auto c = line.find(':');
+            if (c == std::string::npos) continue;
+            std::string k = line.substr(0, c), v = line.substr(c + 1);
+            auto trim_ws = [](std::string& x) {
+                const char* ws = " \t\r\n\"";
+                auto b = x.find_first_not_of(ws); auto e = x.find_last_not_of(ws);
+                x = (b == std::string::npos) ? "" : x.substr(b, e - b + 1);
+            };
+            trim_ws(k); trim_ws(v);
+            if (k == "steering_trim_rad") { val = std::atof(v.c_str()); has_val = true; }
+            else if (k == "fingerprint")  { fp = v; }
+            else if (k == "stamp")        { stamp = std::atof(v.c_str()); }
+        }
+        if (!has_val) {
+            RCLCPP_WARN(this->get_logger(), "  트림 저장본을 못 읽었다(형식 이상) — 0에서 시작");
+            return;
+        }
+        const std::string cur = trim_fingerprint();
+        if (fp != cur) {
+            RCLCPP_WARN(this->get_logger(),
+                "  트림 저장본 폐기 — 조향 파이프라인이 바뀌었다.\n"
+                "      저장: %s\n      현재: %s", fp.c_str(), cur.c_str());
+            return;
+        }
+        const double age = this->now().seconds() - stamp;
+        if (steering_trim_persist_max_age_ > 0.0 &&
+            (age < 0.0 || age > steering_trim_persist_max_age_)) {
+            RCLCPP_WARN(this->get_logger(),
+                "  트림 저장본 폐기 — 나이 %.1f시간 > 한계 %.1f시간. 기계 중립은 정비/주행마다 "
+                "움직이므로(0810 실측 −2.2/−1.9/+1.6°) 오래된 값은 싣지 않는다.",
+                age / 3600.0, steering_trim_persist_max_age_ / 3600.0);
+            return;
+        }
+        steering_trim_init_ = std::clamp(val, -steering_trim_limit_, steering_trim_limit_);
+        steering_trim_ = steering_trim_init_;
+        RCLCPP_INFO(this->get_logger(),
+            "  🟢 트림 저장본 적용: %+.2f° (나이 %.0f분) — 웜업 없이 시작한다",
+            steering_trim_init_ * 180.0 / M_PI, age / 60.0);
+    }
+
+    // 저속 타이머(0.2 Hz)에서만 호출한다. 50 Hz 제어 루프에서 파일을 쓰면 젯슨이 bag을
+    // 디스크에 쓰는 동안(PSI io) 블로킹될 수 있다.
+    void save_persisted_trim() {
+        if (steering_trim_persist_file_.empty() || steering_trim_gain_ <= 0.0) return;
+        // 의미 있는 학습이 실제로 일어난 뒤에만 쓴다. 안 그러면 시작값을 그대로 다시 써서
+        // 틀린 값이 영원히 자기 자신을 갱신한다(나이 검사가 무력화된다).
+        if (steering_trim_samples_ < 200) return;
+        if (std::abs(steering_trim_ - steering_trim_saved_) < 1e-4) return;
+
+        const std::string dir = steering_trim_persist_file_.substr(
+            0, steering_trim_persist_file_.find_last_of('/'));
+        if (!dir.empty() && dir != steering_trim_persist_file_) {
+            std::string cmd = "mkdir -p '" + dir + "'";
+            if (std::system(cmd.c_str()) != 0) { /* 실패해도 아래에서 조용히 포기 */ }
+        }
+        // 원자적 교체 — 쓰는 도중 전원이 끊겨도 반쪽 파일이 남지 않는다.
+        const std::string tmp = steering_trim_persist_file_ + ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::trunc);
+            if (!f) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 60000,
+                    "트림 저장 실패(쓰기 불가): %s", steering_trim_persist_file_.c_str());
+                return;
+            }
+            f << "# control_map_node 조향 트림 자동 저장 — 손으로 고치지 말 것\n"
+              << "# fingerprint 가 다르거나 stamp 가 오래되면 기동 시 자동 폐기된다.\n"
+              << "steering_trim_rad: " << steering_trim_ << "\n"
+              << "steering_trim_deg: " << steering_trim_ * 180.0 / M_PI << "\n"
+              << "samples: " << steering_trim_samples_ << "\n"
+              << "stamp: " << std::fixed << this->now().seconds() << "\n"
+              << "fingerprint: " << trim_fingerprint() << "\n";
+        }
+        if (std::rename(tmp.c_str(), steering_trim_persist_file_.c_str()) == 0) {
+            steering_trim_saved_ = steering_trim_;
+        } else {
+            std::remove(tmp.c_str());
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 60000,
+                "트림 저장 실패(rename): %s", steering_trim_persist_file_.c_str());
+        }
+    }
+
     double steer_avail() const {
         return steer_authority_ratio_ * steer_limit_min_ * steering_reach_ratio_;
     }
@@ -831,7 +1003,16 @@ private:
         const double delta_wheel =
             yaw_rate_now_ * (wheelbase_ / v + understeer_gradient_eff(yaw_rate_now_) * v);
         const double e = past - delta_wheel / std::max(0.3, steering_reach_ratio_);
-        steering_trim_ += steering_trim_gain_ * (e - steering_trim_) * dt;
+        // 게이트가 실제로 열려 있던 누적시간. 웜업 스케줄의 유일한 입력이다.
+        steering_trim_gated_time_ += dt;
+        double g = steering_trim_gain_;
+        if (steering_trim_warmup_gain_ > steering_trim_gain_) {
+            // 1/t_g = 표본평균과 등가. 아래로는 정상 게인, 위로는 warmup 상한으로 자른다.
+            // ⚠️ 상한이 필요하다: 자르지 않으면 첫 샘플에서 α = g·dt가 1을 넘어 발산한다.
+            g = std::clamp(1.0 / std::max(steering_trim_gated_time_, 1e-3),
+                           steering_trim_gain_, steering_trim_warmup_gain_);
+        }
+        steering_trim_ += g * (e - steering_trim_) * dt;
         steering_trim_ = std::clamp(steering_trim_, -steering_trim_limit_, steering_trim_limit_);
         steering_trim_samples_++;
     }
@@ -1397,8 +1578,13 @@ private:
             launch_time_ = 0.0;
             // 조향 트림 추정도 리셋한다 — 미체결 중엔 발행이 하류로 안 나가므로 그 구간의
             // "명령 vs 요레이트"는 물리적 의미가 없고, 재체결 시 남은 값이 계단으로 나간다.
-            steering_trim_ = 0.0;
+            // ⚠️ 0이 아니라 steering_trim_init_ 로 되돌린다. 미체결 구간의 관측이
+            //    무의미한 것이지, 차의 **기계 중립이 0이 되는 게 아니다**. 0으로 되돌리면
+            //    재체결마다 웜업을 다시 사고(0819 실측 직선오차 +0.11 m에서 재시작),
+            //    랩마다 재체결하는 측정 하네스는 영영 수렴값을 못 본다.
+            steering_trim_ = steering_trim_init_;
             steering_trim_samples_ = 0;
+            steering_trim_gated_time_ = 0.0;
             steer_hist_.clear();
             // ⚠️ 2초 throttle이면 대기 중 계속 찍힌다(0807 로그 1007줄 중 156줄). 상태 전이는
             //    이미 위 "자율 체결 상태 변경"이 1회 찍으므로, 여기선 30초 하트비트로 충분하다.
@@ -1801,6 +1987,13 @@ private:
     bool yaw_rate_seen_ = false;
 
     double steering_trim_ = 0.0;             // 추정된 트림 [rad], 발행 명령에 더해진다
+    double steering_trim_init_ = 0.0;        // 시작값 = 재체결 리셋값 [rad]
+    double steering_trim_warmup_gain_ = 0.0; // 웜업 상한 게인 [1/s], 0 = 비활성
+    double steering_trim_gated_time_ = 0.0;  // 게이트가 열려 있던 누적시간 [s]
+    std::string steering_trim_persist_file_;  // 트림 저장 경로, 빈 문자열 = 비활성
+    double steering_trim_persist_max_age_ = 0.0;  // 저장본 유효 나이 [s]
+    double steering_trim_saved_ = 1e9;        // 마지막으로 파일에 쓴 값 [rad]
+    rclcpp::TimerBase::SharedPtr trim_persist_timer_;
     double steering_trim_gain_ = 0.0;        // 1/τ [1/s], 0 = 비활성
     double steering_trim_limit_ = 0.06;      // |trim| 상한 [rad] (≈3.4°)
     double steering_trim_max_steer_ = 0.10;  // 이 각을 넘는 조향 중엔 학습 정지 [rad]

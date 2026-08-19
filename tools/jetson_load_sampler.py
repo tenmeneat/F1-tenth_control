@@ -59,6 +59,26 @@ def psi(kind):
     return (some, full)
 
 
+def net_ifaces():
+    """라이다가 붙은 이더넷 인터페이스 후보. 무선/루프백/도커는 제외한다."""
+    out = []
+    try:
+        for n in sorted(os.listdir("/sys/class/net")):
+            if n == "lo" or n.startswith(("wl", "docker", "veth", "br-", "can", "usb")):
+                continue
+            if os.path.exists(f"/sys/class/net/{n}/carrier"):
+                out.append(n)
+    except OSError:
+        pass
+    return out
+
+
+def carrier(iface):
+    """1 = 링크 살아있음, 0 = 끊김, -1 = 읽기 실패(보통 인터페이스 down)."""
+    v = read(f"/sys/class/net/{iface}/carrier").strip()
+    return int(v) if v in ("0", "1") else -1
+
+
 def cpu_jiffies():
     """/proc/stat 첫 줄 → (busy, total)."""
     line = read("/proc/stat").split("\n")[0].split()
@@ -156,8 +176,14 @@ def main():
 
     ncpu = os.cpu_count() or 1
     sysf = open(f"{outdir}/sys.csv", "w", buffering=1)
+    # 🔑 라이다는 이더넷이다(192.168.0.10:10940). 0819에 8.04초 링크 두절로 벽에 박았는데
+    #    bag만으로는 "라이다가 죽었다"까지만 알고 원인(링크/드라이버)을 못 갈랐다.
+    #    carrier를 20 Hz로 같이 찍으면 그 순간 링크가 내려갔는지가 확정된다.
+    ifaces = net_ifaces()
+    link_cols = "".join(f",link_{n}" for n in ifaces)
     sysf.write("t,cpu_pct,psi_cpu_some_us,psi_io_some_us,psi_io_full_us,"
-               "psi_mem_some_us,psi_mem_full_us,load1,nr_running,ctxt_per_s,mem_avail_kb,tick_slip_ms\n")
+               "psi_mem_some_us,psi_mem_full_us,load1,nr_running,ctxt_per_s,mem_avail_kb,tick_slip_ms"
+               + link_cols + "\n")
     procf = open(f"{outdir}/proc.csv", "w", buffering=1)
     procf.write("t,name,pid,cpu_pct,majflt_delta,threads,rss_kb\n")
 
@@ -172,6 +198,8 @@ def main():
     prev_ctxt = 0
     for line in read("/proc/stat").splitlines():
         if line.startswith("ctxt"): prev_ctxt = int(line.split()[1])
+    link_prev = {n: None for n in ifaces}
+    link_events = []
     prev_t = time.time()
     tick = 0
     period = 1.0 / SYS_HZ
@@ -212,8 +240,17 @@ def main():
         for line in read("/proc/meminfo").splitlines():
             if line.startswith("MemAvailable"): mem_avail = int(line.split()[1]); break
 
+        links = [carrier(n) for n in ifaces]
+        for n, cur in zip(ifaces, links):
+            if link_prev.get(n) is not None and cur != link_prev[n]:
+                # 전이는 stdout에도 즉시 남긴다 — csv를 안 열어봐도 보이게.
+                print(f"[jetson_load] {time.strftime('%H:%M:%S')} 링크 {n}: "
+                      f"{link_prev[n]} -> {cur}  (0=끊김)", flush=True)
+                link_events.append((now, n, link_prev[n], cur))
+            link_prev[n] = cur
         sysf.write(f"{now:.3f},{cpu_pct:.1f},{row['cpu_some']},{row['io_some']},{row['io_full']},"
-                   f"{row['memory_some']},{row['memory_full']},{load1},{nr_run},{dctxt},{mem_avail},{slip:.1f}\n")
+                   f"{row['memory_some']},{row['memory_full']},{load1},{nr_run},{dctxt},{mem_avail},{slip:.1f}"
+                   + "".join(f",{v}" for v in links) + "\n")
 
         if tick % PROC_EVERY == 0:
             for pid, name in list(plist.items()):
@@ -236,6 +273,10 @@ def main():
     with open(f"{outdir}/meta.txt", "a") as f:
         f.write(f"end_epoch\t{time.time():.6f}\n")
         f.write(f"samples\t{tick}\n")
+        f.write(f"net_ifaces\t{','.join(ifaces) if ifaces else 'NONE'}\n")
+        f.write(f"link_events\t{len(link_events)}\n")
+        for t_, n_, a_, b_ in link_events:
+            f.write(f"link_event\t{t_:.3f}\t{n_}\t{a_}->{b_}\n")
     print(f"\n[jetson_load] 종료 — {tick} 샘플, {outdir}", flush=True)
 
 
