@@ -74,12 +74,15 @@ def declare_common_args(sector_scale_enable_default='false'):
 
         # ── 경로소스 신선도 ──
         DeclareLaunchArgument(
-            'odom_timeout', default_value='0.5',
+            'odom_timeout', default_value='0.35',
             description=(
                 'odom 워치독 [s], 0이면 비활성. 이 시간 넘게 <odom_topic> 미수신이면 '
                 '조향을 직전 각으로 유지한 채 속도 0으로 안전 정지. '
                 '0818 run_0818_134408: MCL 1.1s 정지 중 컨트롤러가 얼어붙은 명령을 '
-                '50Hz로 계속 발행해 벽 충돌'
+                '50Hz로 계속 발행해 벽 충돌. '
+                '2026-08-19: 0.5 -> 0.35. KICP max_dead_reckoning_sec를 2.0 -> 0.4로 '
+                '함께 줄여 최악 블라인드 구간을 2.5s(약 14 m) -> 0.75s(약 5 m)로 압축. '
+                '정상 주행 /pf/pose/odom 최대 공백이 48~161 ms라 0.35는 2배 이상 여유'
             )
         ),
         DeclareLaunchArgument(
@@ -316,7 +319,7 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='명령 속도 하강 rate limit [m/s^2]. 낮추면 감속 명령이 늦게 도달하므로 높게 유지'
         ),
         DeclareLaunchArgument(
-            'prebrake_decel', default_value='2.6',
+            'prebrake_decel', default_value='3.5',
             description='곡률 사전감속 제동거리 산출용 감속 권한 [m/s^2]. 낮을수록 코너를 일찍 봄'
         ),
         DeclareLaunchArgument(
@@ -340,12 +343,37 @@ def declare_common_args(sector_scale_enable_default='false'):
         # ⚠️ `understeer_gradient_adapt_gain > 0`과 **동시 사용 불가** — 적응 스칼라가
         #    좌우 공용으로 우선한다(추정기가 방향을 분리하지 않는다).
         # 되돌리기: 둘 다 -1.0 (= 공용 understeer_gradient로 폴백).
+        # ── 2026-08-19 재측정 (0819 bag 2개, 마모 타이어) ────────────────────────
+        # 🔑 이번엔 **기울기와 절편을 분리해서** 쟀다. 앞선 측정(excess/a_lat 중앙값)은
+        #    트림을 K_us에 섞어 넣어 부호가 반대로 나왔다 — 컨트롤러는 트림을 FF와
+        #    **따로** 더하므로(②-n) FF가 메워야 하는 건 `K_true·a_lat + (b_dir − b_직선)`이다.
+        # 실측(pooled, 게이트 |dψ̇/dt|<2 · v>2.5):
+        #     좌  K_slope=+0.0041  b=+0.0116 rad      (n=870)
+        #     우  K_slope=+0.0163  b=−0.0516 rad      (n=144, R²=0.62)
+        #     직선 트림 기준 b_straight = −0.0369 rad
+        #   → 필요 FF 유효 K_us = K_slope + (b_dir − b_straight)/a_lat
+        #     좌: 0.0041 + 0.0485/a_lat → a_lat 4/5/6에서 0.0162 / 0.0138 / 0.0122
+        #     우: 0.0163 + 0.0147/a_lat → a_lat 4/5/6에서 0.0200 / 0.0192 / 0.0188
+        #   주 대역 a_lat 4~6에 맞춰 **좌 0.014 / 우 0.019**.
+        # ✅ 이 모델은 관측된 오차 **부호를 맞춘다**(구 값 0.011/0.024 기준):
+        #     a_lat 5에서 좌 −0.0141 rad 부족 → 좌코너 바깥 이탈, 우 +0.0239 rad 과다
+        #     → 우코너 안쪽 파고듦.  0819_114417(트림 수렴) 실측 좌코너 e=−0.085(바깥),
+        #     우코너 e=−0.038(안쪽)와 일치. 0819_115512(트림 미수렴)의 반대 부호도
+        #     트림이 −0.016까지만 간 것으로 설명된다.
+        # 🔴 **b(절편)가 좌우로 0.064 rad(3.7°) 갈린다** — 이건 K_us(기울기)가 아니라
+        #    링키지/서보 게인 비대칭이다. 지금은 K_us 기울기로 대신 메우고 있어
+        #    **a_lat 4~6 밖에서는 다시 어긋난다.** 근본 해결은 젯슨 좌/우 서보 게인
+        #    재측정이다(servo_range_probe.py).
+        # ⚠️ 이 값은 젯슨 `steering_angle_to_servo_offset` = 0.4672에서 유도했다.
+        #    offset을 바꾸면 b가 좌우 다르게(ΔC/0.5785 vs ΔC/0.4702) 움직이므로
+        #    **저속 셰이크다운으로 재확인할 것.**
+        # 되돌리기: understeer_gradient_left:=0.011 understeer_gradient_right:=0.024
         DeclareLaunchArgument(
-            'understeer_gradient_left', default_value='0.011',
+            'understeer_gradient_left', default_value='0.014',
             description='좌회전 K_us [rad/(m/s^2)]. <=0 = 공용 understeer_gradient 사용'
         ),
         DeclareLaunchArgument(
-            'understeer_gradient_right', default_value='0.024',
+            'understeer_gradient_right', default_value='0.019',
             description='우회전 K_us [rad/(m/s^2)]. <=0 = 공용 understeer_gradient 사용'
         ),
         # ── 조향 권한 마진 (2026-08-19 신설, CLAUDE.md ②-y) ──────────────────────
