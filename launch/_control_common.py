@@ -216,6 +216,29 @@ def declare_common_args(sector_scale_enable_default='false'):
 
         # ── 조향 생성: 자전거 역모델 + FF/FB 분리 (②-p) ───────────────────────
         # 구 LUT 역조회는 2026-08-17에 삭제됐다(롤백은 git 0d16173 — 메모리 참고).
+        # 🔴 2026-08-20: 코드 기본값 1.35 → 1.0. 1.35에는 이 저장소의 실측 근거가 없었다
+        #    (CLAUDE.md 파라미터 표에 항목 자체가 없고, nhw_ifac에서 통째로 들여온 값이다).
+        #    08-16에 고친 것은 "언제 켜지나"(local_fresh → /state)였고 크기 1.35는 검토된 적이
+        #    없다. 실효 L1 offset 0.6 → 0.81이 되는데, 08-14에 기각된 것은 0.6 → 0.4로 **줄이는**
+        #    방향이었지 키우는 쪽이 검증된 것이 아니다.
+        #    실측(2026-08-19 run_001453, 자율·장애물 없음·v>2.0, 곡률·속도 대역 정합):
+        #      라인 추종오차 p50/p90  GLOBAL 0.120/0.296 m  vs  AVOID 0.169/0.464 m (+41%/+57%)
+        #      L1 거리 실측          GLOBAL 2.25 m         vs  AVOID 2.73 m (+21%)
+        #    같은 백에서 FSM이 자율 시간의 88%를 AVOID에 고착돼 있었고(복귀 조건 결함, 별건),
+        #    그동안 이 배수가 상시 걸려 추종을 악화시키고 있었다. 1.0 = AVOID에서도 GLOBAL과
+        #    같은 L1 → 고착의 피해가 사라진다.
+        #    되돌리기: avoidance_l1_scale_max:=1.35 (진짜 회피 중 횡진동이 관측되면 1.15부터)
+        DeclareLaunchArgument(
+            'avoidance_l1_scale_max', default_value='1.0',
+            description='/state != STATE_GLOBAL 일 때 L1 룩어헤드에 곱하는 배수. '
+                        '1.0 = GLOBAL과 동일(기본). 키우면 감쇠가 늘어 회피 중 횡진동은 '
+                        '줄지만 추종오차가 커진다. 2026-08-19 실측으로 1.35의 근거가 '
+                        '없음이 확인되어 1.0으로 되돌렸다'
+        ),
+        DeclareLaunchArgument(
+            'avoidance_l1_damping_enable', default_value='true',
+            description='위 배수를 적용할지. false 면 배수와 무관하게 항상 GLOBAL과 같은 L1'
+        ),
         DeclareLaunchArgument(
             'steering_fb_gain', default_value='0.8',
             description='FF/FB 분리 게인 (bicycle 모델 전용). L1 명령 중 경로 곡률로 '
@@ -487,6 +510,21 @@ def declare_common_args(sector_scale_enable_default='false'):
             'launch_standstill_speed', default_value='0.3',
             description='실측이 이 속도[m/s] 미만이면 정지 판정 → 킥 시작(exit보다 낮아 히스테리시스)'
         ),
+        # 🟢 2026-08-20 신설. 킥이 launch_boost_time 안에 관통 못 하고 포기하면 예전엔
+        #    **차가 실제로 launch_exit_speed를 넘을 때까지** 영구히 재시도하지 않았다 —
+        #    못 나가고 있을 때 킥이 사라진다는 뜻이다. 회피 세이프스톱 재출발처럼 플래너
+        #    목표가 킥 바닥(2.0)보다 낮은 상황에서 정확히 이게 손해다(0819 run_214041 실측:
+        #    킥 만료 후 명령이 1.49로 떨어진 채 인계 시도 → 붕괴 → 총 1.82 s).
+        #    이 값[s]만큼 **정지가 계속되고 여전히 갈 의도가 있으면** 다시 무장한다.
+        # 🔑 성공하는 출발에는 비용이 정확히 0이다(래치가 안 서면 타이머가 돌지 않는다).
+        # 🔴 기본 0 = 구 거동(영구 래치). 실차 A/B 전까지 켜지 않는다 —
+        #    "인계 명령이 클수록 옵저버가 더 잘 깨진다"는 반대 방향 실측(0810)이 있어
+        #    재시도가 이득인지 아직 데이터로 못 갈랐다. 켜기: launch_relatch_time:=2.0
+        DeclareLaunchArgument(
+            'launch_relatch_time', default_value='0.0',
+            description='런치 킥 포기 후 재무장까지 필요한 정지 지속 시간 [s]. '
+                        '0 = 재시도 안 함(구 거동). 회피 재출발에서 킥이 사라지는 것을 막는다'
+        ),
 
         # IMU 보정 on/off. 끄면 조향 가감속 스케일러가 중립(acc_mean=0)으로 떨어져
         # 순수 L1(시뮬 검증 상태)이 된다.
@@ -544,6 +582,7 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'launch_boost_time': LaunchConfiguration('launch_boost_time'),
             'launch_exit_speed': LaunchConfiguration('launch_exit_speed'),
             'launch_standstill_speed': LaunchConfiguration('launch_standstill_speed'),
+            'launch_relatch_time': LaunchConfiguration('launch_relatch_time'),
             'l1_use_actual_distance': ParameterValue(
                 LaunchConfiguration('l1_use_actual_distance'), value_type=bool),
             # ⚠️ 좌우 조향 한계는 진입점 런치가 환경별로 넘긴다. 실차는 젯슨 vesc.yaml의
@@ -552,6 +591,10 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'max_steering_left': max_steering_left,
             'max_steering_right': max_steering_right,
             'steering_reach_ratio': LaunchConfiguration('steering_reach_ratio'),
+            'avoidance_l1_scale_max': ParameterValue(
+                LaunchConfiguration('avoidance_l1_scale_max'), value_type=float),
+            'avoidance_l1_damping_enable': ParameterValue(
+                LaunchConfiguration('avoidance_l1_damping_enable'), value_type=bool),
             'steering_fb_gain': LaunchConfiguration('steering_fb_gain'),
             'curvature_ff_preview': LaunchConfiguration('curvature_ff_preview'),
             'understeer_gradient_adapt_gain':

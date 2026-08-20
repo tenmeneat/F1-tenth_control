@@ -243,6 +243,7 @@ public:
         launch_boost_time_ = declare_parameter<double>("launch_boost_time", 0.6);
         launch_exit_speed_ = declare_parameter<double>("launch_exit_speed", 0.8);
         launch_standstill_speed_ = declare_parameter<double>("launch_standstill_speed", 0.3);
+        launch_relatch_time_ = declare_parameter<double>("launch_relatch_time", 0.0);
 
         use_imu_ = declare_parameter<bool>("use_imu", true);
         imu_linear_scale_ = declare_parameter<double>("imu_linear_scale", 1.0);
@@ -371,7 +372,10 @@ public:
         //    (실효 L1 offset 0.6→0.81, ②-m이 확정한 0.6 결론을 조용히 무효화). 진짜 회피 신호인
         //    `/state`(STATE_GLOBAL 아님)로 바꾼다 — 회피 판정은 아래 avoiding_now() 참고.
         avoidance_l1_damping_enable_ = declare_parameter<bool>("avoidance_l1_damping_enable", true);
-        avoidance_l1_scale_max_ = declare_parameter<double>("avoidance_l1_scale_max", 1.35);
+        // 🔴 2026-08-20: 1.35 → 1.0. 1.35 에는 실측 근거가 없었다(런치에서 넘기지도 않아
+        //    이 기본값이 그대로 쓰였다). 실측 근거와 되돌리기는 _control_common.py 의
+        //    avoidance_l1_scale_max 인자 주석 참고.
+        avoidance_l1_scale_max_ = declare_parameter<double>("avoidance_l1_scale_max", 1.0);
 
         // 좌우 조향 한계. 둘 다 같으면 기존 대칭 거동과 100% 동일.
         max_steering_left_ =
@@ -1576,6 +1580,7 @@ private:
             //    킥이 무한 재무장돼 미체결 중에도 발행값이 부스트 값으로 덮인다.
             launch_active_ = false;
             launch_time_ = 0.0;
+            launch_relatch_timer_ = 0.0;
             // 조향 트림 추정도 리셋한다 — 미체결 중엔 발행이 하류로 안 나가므로 그 구간의
             // "명령 vs 요레이트"는 물리적 의미가 없고, 재체결 시 남은 값이 계단으로 나간다.
             // ⚠️ 0이 아니라 steering_trim_init_ 로 되돌린다. 미체결 구간의 관측이
@@ -1599,6 +1604,32 @@ private:
             bool standstill = std::abs(current_speed_) < launch_standstill_speed_;
             if (moving) launch_latched_off_ = false;   // 움직였으면 다음 정지서 다시 킥
             if (target_speed > 0.1) {                  // 갈 의도가 있을 때만
+                // 🟢 2026-08-20: 포기 래치 재무장(`launch_relatch_time`, 0 = 구 거동).
+                //    예전엔 래치가 한 번 서면 **차가 실제로 launch_exit_speed를 넘을 때까지**
+                //    영구히 안 풀렸다 = 못 나가고 있을 때 킥이 사라진다. 재출발이 한 번
+                //    실패하면 그 뒤로는 램프(=플래너 목표)만 남는데, 회피 서행 목표가 킥 바닥
+                //    (launch_boost_speed)보다 낮은 재출발에서 정확히 이게 손해다.
+                //    0819 `run_0819_214041` 실측: 5.51 s 무장 → 7.01 s에 정확히 1.50 s로 만료
+                //    → 명령이 2.00에서 플래너 목표 1.49로 떨어짐 → 7.43 s 인계 시도는 킥 없이
+                //    1.49로 하다 붕괴 → 7.71 s에야 돌파(총 1.82 s).
+                // 🔑 **성공하는 출발에는 비용이 정확히 0이다** — 래치가 서지 않으면 이 타이머는
+                //    돌지도 않는다. 즉 "이미 실패 중일 때만" 작동하는 변경이다.
+                // ⚠️ 조건을 "정지 지속"으로 잡은 것이 핵심이다. 시간만 세면 데드존을 걸터앉아
+                //    기어가는 중(0.3~0.9 m/s)에도 재무장돼 굴러가는 차에 킥이 꽂힌다.
+                if (launch_relatch_time_ > 0.0 && launch_latched_off_ && standstill) {
+                    launch_relatch_timer_ += dt;
+                    if (launch_relatch_timer_ >= launch_relatch_time_) {
+                        launch_latched_off_ = false;
+                        launch_relatch_timer_ = 0.0;
+                        ++launch_relatch_count_;
+                        RCLCPP_WARN(this->get_logger(),
+                            "런치 킥 래치 재무장: 정지 %.1fs 지속 + 목표 %.2f m/s → 다시 시도한다 "
+                            "(누적 %lu회). 계속 반복되면 데드존이 아니라 기계적 구속을 의심할 것",
+                            launch_relatch_time_, target_speed, launch_relatch_count_);
+                    }
+                } else {
+                    launch_relatch_timer_ = 0.0;
+                }
                 if (!launch_active_ && standstill && !launch_latched_off_) {
                     launch_active_ = true; launch_time_ = 0.0;
                 }
@@ -1619,8 +1650,11 @@ private:
                     } else if (launch_time_ > launch_boost_time_) {
                         launch_active_ = false; launch_latched_off_ = true;
                         RCLCPP_WARN(this->get_logger(),
-                            "런치 킥 %.2fs 관통 실패 → 포기. 데드존 심함 — 푸시스타트 필요",
-                            launch_time_);
+                            "런치 킥 %.2fs 관통 실패 → 포기. 데드존 심함 — %s",
+                            launch_time_,
+                            launch_relatch_time_ > 0.0
+                                ? "정지가 이어지면 재무장한다(launch_relatch_time)"
+                                : "푸시스타트 필요");
                     } else {
                         publish_speed = std::max(publish_speed, launch_boost_speed_);
                         // ⚠️ 여기서 last_target_speed_를 건드리지 않는다 — 킥은 "발행값만
@@ -1634,6 +1668,7 @@ private:
                 }
             } else {
                 launch_active_ = false;   // 정지 명령 중엔 킥 안 함
+                launch_relatch_timer_ = 0.0;   // 갈 의도가 없으면 재무장 카운트도 멈춘다
             }
         }
 
@@ -1940,7 +1975,7 @@ private:
     double heading_damping_gain_;
     bool l1_use_actual_distance_ = true;
     bool avoidance_l1_damping_enable_ = true;
-    double avoidance_l1_scale_max_ = 1.35;
+    double avoidance_l1_scale_max_ = 1.0;
     bool steering_speed_cap_measured_ = true;  // 조향용 속도를 실측 속도로 상한
     int status_log_period_ms_ = 2000;          // 상태 한 줄 로그 주기 [ms], 0 = 끔
     size_t last_global_sig_ = 0;               // 글로벌 경로 재발행 중복 로그 억제용 서명
@@ -1974,7 +2009,10 @@ private:
     double launch_exit_speed_ = 0.8, launch_standstill_speed_ = 0.3;
     bool launch_active_ = false;
     double launch_time_ = 0.0;
-    bool launch_latched_off_ = false;        // 관통 실패로 포기(차가 실제로 움직일 때까지 재시도 안 함)
+    bool launch_latched_off_ = false;        // 관통 실패로 포기(재무장 조건은 control_loop 8-c 참고)
+    double launch_relatch_time_ = 0.0;       // 포기 후 재시도까지 필요한 정지 지속 시간 [s], 0 = 끔
+    double launch_relatch_timer_ = 0.0;      // 위 조건 누적 시간
+    unsigned long launch_relatch_count_ = 0; // 재무장 횟수(진단용)
 
     bool use_imu_;
     double imu_linear_scale_ = 1.0;
