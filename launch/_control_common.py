@@ -491,7 +491,7 @@ def declare_common_args(sector_scale_enable_default='false'):
         ),
 
         DeclareLaunchArgument(
-            'launch_boost_enable', default_value='true',
+            'launch_boost_enable', default_value='false',
             description='런치 킥 on/off (자율 정지출발 데드존 관통 펀치)'
         ),
         DeclareLaunchArgument(
