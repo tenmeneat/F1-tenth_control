@@ -145,6 +145,12 @@ if(BUILD_TESTING)
   if(TARGET test_cruise_controller)
     target_link_libraries(test_cruise_controller cruise_controller_lib)
   endif()
+  ament_add_gtest(test_longitudinal_safety test/test_longitudinal_safety.cpp)
+  if(TARGET test_longitudinal_safety)
+    target_include_directories(test_longitudinal_safety PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+  endif()
 endif()
 
 ament_package()

@@ -514,7 +514,35 @@ def declare_common_args(
         ),
         DeclareLaunchArgument(
             'hfi_launch_standstill_speed', default_value='0.1',
-            description='이 속도 미만의 완전 정지에서 HFI 정지출발 보호 재무장 [m/s]'
+            description='VESC 절대속도가 이 값 미만일 때만 완전정지로 판정 [m/s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_timeout', default_value='4.0',
+            description='HFI 시도 1회가 exit 조건을 못 채우면 중단하는 시간 [s]. 0이면 timeout 비활성'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_exit_hold', default_value='0.1',
+            description='VESC 전진속도가 exit 이상으로 연속 유지돼야 하는 시간 [s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_relatch_time', default_value='0.5',
+            description='정지 목표와 VESC 완전정지가 함께 유지돼야 다음 출발을 무장하는 시간 [s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_retry_cooldown', default_value='0.5',
+            description='시도 실패 뒤 VESC 완전정지를 유지해야 자동 재시도하는 시간 [s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_max_attempts', default_value='2',
+            description='한 출발 요청에서 허용할 총 HFI 시도 횟수(기본: 최초 1회+재시도 1회)'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_speed_topic', default_value='/odom',
+            description='HFI 출발/역회전/정지 판정 전용 VESC odom 토픽'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_speed_timeout', default_value='0.2',
+            description='HFI VESC odom 신선도 제한 [s]. 초과 시 출발 명령을 0으로 차단, 0이면 비활성'
         ),
         DeclareLaunchArgument(
             'understeer_gradient', default_value='0.010',
@@ -699,6 +727,14 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'hfi_launch_speed_cap': LaunchConfiguration('hfi_launch_speed_cap'),
             'hfi_launch_exit_speed': LaunchConfiguration('hfi_launch_exit_speed'),
             'hfi_launch_standstill_speed': LaunchConfiguration('hfi_launch_standstill_speed'),
+            'hfi_launch_timeout': LaunchConfiguration('hfi_launch_timeout'),
+            'hfi_launch_exit_hold': LaunchConfiguration('hfi_launch_exit_hold'),
+            'hfi_launch_relatch_time': LaunchConfiguration('hfi_launch_relatch_time'),
+            'hfi_launch_retry_cooldown': LaunchConfiguration('hfi_launch_retry_cooldown'),
+            'hfi_launch_max_attempts': ParameterValue(
+                LaunchConfiguration('hfi_launch_max_attempts'), value_type=int),
+            'hfi_launch_speed_topic': LaunchConfiguration('hfi_launch_speed_topic'),
+            'hfi_launch_speed_timeout': LaunchConfiguration('hfi_launch_speed_timeout'),
             'launch_boost_enable': ParameterValue(LaunchConfiguration('launch_boost_enable'), value_type=bool),
             'launch_boost_speed': LaunchConfiguration('launch_boost_speed'),
             'launch_boost_time': LaunchConfiguration('launch_boost_time'),
