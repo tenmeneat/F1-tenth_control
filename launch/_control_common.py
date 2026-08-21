@@ -5,6 +5,8 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch.conditions import IfCondition
+from launch.substitutions import PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
 
 IMU_LINEAR_SCALE_REAL = 9.80665      # g → m/s². VESC가 g로 발행(2026-07-19 소스 확인)
 IMU_LINEAR_SCALE_SIM  = 1.0          # sim_imu_bridge_node는 0 고정
@@ -18,6 +20,11 @@ IMU_ANGULAR_SCALE_SIM  = 1.0         # sim_imu_bridge_node는 이미 rad/s로 �
 def declare_common_args(sector_scale_enable_default='false'):
     """두 런치파일에서 동일하게 쓰는 인자 선언 목록."""
     return [
+
+        DeclareLaunchArgument(
+            'cruise_enable', default_value='true',
+            description='/opp_obs 기반 종방향 cruise speed cap 사용'
+        ),
 
         # ── 조향 스케일러 (가감속/속도 구간별 조향 게인 완화) ──
         DeclareLaunchArgument(
@@ -458,6 +465,25 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='조향 한계 중 곡률 추종에 배정할 비율. 나머지는 횡오차·요레이트 보정 여유 '
                         '(1.0이면 보정 여력이 0)'
         ),
+        # ── U1 그립 권한 속도 클램프 (2026-08-21 재작업) ─────────────────────────
+        # 요구 곡률 κ_L1 = 2|sinη|/L1 이 예산(마진 없는 MLA × margin)을 넘으면 목표
+        # 속도를 v ≤ √(예산/κ_L1) 로 캡한다. target_speed 단계 적용(종방향 램프 통과),
+        # 빠른 제한·느린 해제 필터, 하한 없음(안전 계산이 이김), 경로 전환 시 리셋.
+        # 🔴 기본 false — 단독 셰이크다운(저속 2랩 → 정상 3랩, 포화 경고 감소·진동 없음
+        #    확인) 후에만 켠다: grip_speed_clamp_enable:=true
+        DeclareLaunchArgument(
+            'grip_speed_clamp_enable', default_value='false',
+            description='U1: L1 요구 횡가속이 예산을 넘으면 목표 속도를 캡 (기본 꺼짐)'
+        ),
+        DeclareLaunchArgument(
+            'grip_speed_clamp_margin', default_value='1.0',
+            description='속도 예산 = 마진 없는 MLA × 이 값. 실측 스윕: 0.9=과보수(랩+2.15s), '
+                        '1.0=계약 기본(랩+1.93s 상한), 1.15=권한 일치(보정 여유 0, A/B용)'
+        ),
+        DeclareLaunchArgument(
+            'grip_speed_clamp_release_alpha', default_value='0.05',
+            description='요구 곡률 해제 필터 계수 (제한 진입은 즉시, 해제만 τ≈0.4 s)'
+        ),
         # 전방 곡률 스캔 거리 = max(count*0.1, v²/(2·prebrake_decel)). count는 저속 하한.
         DeclareLaunchArgument(
             'curvature_lookahead_count', default_value='80',
@@ -491,7 +517,7 @@ def declare_common_args(sector_scale_enable_default='false'):
         ),
 
         DeclareLaunchArgument(
-            'launch_boost_enable', default_value='false',
+            'launch_boost_enable', default_value='true',
             description='런치 킥 on/off (자율 정지출발 데드존 관통 펀치)'
         ),
         DeclareLaunchArgument(
@@ -571,6 +597,11 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'understeer_gradient_left': LaunchConfiguration('understeer_gradient_left'),
             'understeer_gradient_right': LaunchConfiguration('understeer_gradient_right'),
             'steer_authority_ratio': LaunchConfiguration('steer_authority_ratio'),
+            'grip_speed_clamp_enable': ParameterValue(
+                LaunchConfiguration('grip_speed_clamp_enable'), value_type=bool),
+            'grip_speed_clamp_margin': LaunchConfiguration('grip_speed_clamp_margin'),
+            'grip_speed_clamp_release_alpha':
+                LaunchConfiguration('grip_speed_clamp_release_alpha'),
             'curvature_lookahead_count': ParameterValue(
                 LaunchConfiguration('curvature_lookahead_count'), value_type=int),
             'base_max_accel': base_max_accel,
@@ -647,6 +678,11 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'odom_timeout': LaunchConfiguration('odom_timeout'),
             'local_fresh_timeout': LaunchConfiguration('local_fresh_timeout'),
             'closest_idx_max_heading_err': LaunchConfiguration('closest_idx_max_heading_err'),
+            'cruise_limit_enable': ParameterValue(
+                LaunchConfiguration('cruise_enable'), value_type=bool),
+            'cruise_speed_limit_topic': '/cruise_speed_limit',
+            'cruise_speed_limit_timeout': 0.15,
+            'cruise_stale_speed': 1.5,
             # 섹터별 횡가속 권한 스케일 (기본 꺼짐 — 켜기 전 bag_analyzer 판정 필수)
             'sector_scale_enable': LaunchConfiguration('sector_scale_enable'),
             'sector_scale_topic': LaunchConfiguration('sector_scale_topic'),
@@ -658,6 +694,22 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'sector_scale_state_timeout': LaunchConfiguration('sector_scale_state_timeout'),
             'sector_scale_timeout': LaunchConfiguration('sector_scale_timeout'),
         }]
+    )
+
+def build_cruise_controller_node(*, max_speed):
+    """전방 상대차 간격을 속도 상한으로 변환하는 종방향 보조 노드."""
+    config_file = PathJoinSubstitution([
+        FindPackageShare('f1tenth_control'), 'config', 'cruise_controller.yaml'
+    ])
+    return Node(
+        package='f1tenth_control',
+        executable='cruise_controller_node',
+        name='cruise_controller_node',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('cruise_enable')),
+        parameters=[config_file, {
+            'maximum_speed': ParameterValue(max_speed, value_type=float),
+        }],
     )
 
 def build_sector_learner_node():

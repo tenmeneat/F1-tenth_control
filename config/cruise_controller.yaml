@@ -1,0 +1,63 @@
+cruise_controller_node:
+  ros__parameters:
+    opponent_topic: "/opp_obs"
+    ego_frenet_topic: "/car_state/frenet/odom"
+    global_waypoints_topic: "/global_waypoints"
+    speed_limit_topic: "/cruise_speed_limit"
+    gap_data_topic: "/cruise/gap_data"
+    state_topic: "/state"
+    publish_rate_hz: 50.0
+
+    # crazy_controller의 trailing 파라미터 명명과 기본값을 계승한다.
+    # true: trailing_gap을 고정 거리[m]로 사용, false: 시간 간격[s]으로 사용한다.
+    #
+    # 시간 간격 모드의 목표 간격은 s0 + T*v다 (s0 = minimum_gap, T = trailing_gap).
+    # 구 max(s0, T*v) 형태는 v > s0/T에서 s0가 사라지고 헤드웨이가 속도에 따라 줄어들었다.
+    # 거리 모드 해석은 그대로라 이 기본값에서는 거동 변화가 없다.
+    # 2m 추종으로 좁히는 절차는 CRUISE_TUNING_GUIDE.md §6 참고.
+    trailing_mode_distance: true
+    trailing_gap: 5.0
+    minimum_gap: 0.8
+    # 목표 간격의 하드 상한 [m]. 0 = 상한 없음.
+    # state_machine.yaml의 interference_distance_m(5.0)을 넘으면 cruise가 유지하려는 간격에서
+    # 상태머신이 CRUISE를 빠져나가 진입/이탈 리밋사이클이 된다. 반드시 그 값 이하로 둘 것.
+    # 시간 간격 모드를 켤 때 s0 + T*max_speed가 그 값을 넘을 수 있으므로 같이 설정한다.
+    max_desired_gap: 0.0
+    trailing_p_gain: 1.0
+    trailing_i_gain: 0.0
+    # D는 상대속도(접근속도)에 직접 작용하므로 코너 진입 오버슈트를 줄이는 손잡이다.
+    trailing_d_gain: 0.5
+    integral_limit: 2.0
+    allow_accel_trailing: true
+
+    maximum_speed: 12.0
+    emergency_stop_distance: 0.45
+    # braking cap sqrt(v_opp^2 + 2*a*gap)의 a. "내가 실제로 낼 수 있는 감속도"를 뜻한다.
+    # 코너에서는 그립을 횡방향에 쓰므로 직선 실측(prebrake_decel 3.5)보다 훨씬 낮게 잡아야
+    # 안전 측이다. 값이 낮을수록 허용 접근속도가 줄고 sigma_g 전파 지평 tau_s가 길어져
+    # effective_gap도 보수적으로 계산된다.
+    relative_deceleration: 1.8
+    # 제동거리 분해. relative_deceleration 하나로는 "ego가 상대차보다 얼마나 더 감속할 수
+    # 있나"만 표현되고 지연시간이 아예 안 들어간다. 아래 셋이 그것을 쪼갠다:
+    #   무충돌 조건  v*tau + v^2/(2*b_ego) <= usable_gap + v_opp^2/(2*b_opp)
+    # 0.0 = relative_deceleration으로 폴백 / 지연 없음 = 구 식과 비트 동일(착지 기본값).
+    # 실측 없이 켜지 말 것 — tau는 상대차 감속 관측부터 실제 제동 개시까지의 전체 지연이고
+    # bag으로 재야 한다. 절차는 CRUISE_TUNING_GUIDE.md §4.
+    ego_deceleration: 0.0
+    opponent_deceleration: 0.0
+    actuation_latency: 0.0
+    ego_front_offset: 0.25
+    uncertainty_sigma: 2.0
+    # 시간 전파 확장 (interference_judgment_migration_proposal.md §3.4). 둘 다 0.0 = 전파
+    # 없음 = 구 거동과 비트 동일(착지 기본값). f110_msgs에 교차공분산 필드가 없어 cov 항은
+    # 항상 0 — 원안이 정의한 무상관 강등 경로(state_machine.yaml 주석과 동일 근거).
+    gap_uncertainty_horizon_max: 1.0   # tau_max [s]. CV 유효 지평(interference_horizon_sec과 정렬)
+    opp_speed_confidence_z: 1.0        # z_v. A/B 활성화
+
+    opponent_timeout: 0.15
+    ego_timeout: 0.20
+    state_timeout: 0.30
+    # /opp_obs가 이 시간 동안 비어야 타깃을 놓아준다. 놓는 순간 상한이 maximum_speed로
+    # 완전히 풀리므로(onTimer의 !opponent_active_ 분기) 짧으면 코너 차폐 중 가속한다.
+    clear_confirm_sec: 1.00
+    blind_trailing_speed: 1.5

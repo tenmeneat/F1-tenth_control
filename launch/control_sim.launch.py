@@ -43,6 +43,10 @@ def generate_launch_description():
         imu_angular_scale=common.IMU_ANGULAR_SCALE_SIM,
     )
 
+    cruise_controller = common.build_cruise_controller_node(
+        max_speed=LaunchConfiguration('max_speed')
+    )
+
     # 시뮬 전용: odom 요레이트 → /imu/data 중계 (gym_bridge는 IMU를 발행하지 않음)
     sim_imu_bridge = Node(
         package='f1tenth_control',
@@ -68,6 +72,7 @@ def generate_launch_description():
         max_lateral_accel_arg,
         max_speed_arg,
         sim_imu_bridge,
+        cruise_controller,
         steering_control,
         drive_source_selector,
     ])

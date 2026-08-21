@@ -20,6 +20,7 @@
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
 
 #include "f1tenth_control/types.hpp"
@@ -311,6 +312,31 @@ public:
         // 1.0 = 구 거동(보정 예산 0). 값은 CLAUDE.md ②-y 참고.
         steering_accel_margin_ =
             std::max(1.0, declare_parameter<double>("steering_accel_margin", 1.0));
+        // ── U1 그립 권한 속도 클램프 (2026-08-21 재작업, run_220742·run_013203 충돌) ──
+        // a_cmd 클램프는 조향 요구를 권한 안으로 자르지만 **속도는 아무도 안 줄였다**.
+        // 요구 곡률(κ_L1 = 2|sinη|/L1, 추종오차 보정 포함)이 예산을 넘으면 목표 속도를
+        // v ≤ √(예산/κ_L1) 로 캡한다. 검토 계약(2026-08-21):
+        //  - 예산은 **마진 없는 MLA × grip_speed_clamp_margin(0.9)** — 조향 클램프의
+        //    steering_accel_margin(1.15)은 얹지 않는다. "계획 속도는 보수적으로, 보정
+        //    권한은 넉넉히"의 분리를 속도 쪽에서도 지키기 위함이다.
+        //  - 필터는 **빠른 제한·느린 해제**: 요구가 튀면 즉시 물고(안전 기능의 진입을
+        //    늦추지 않는다), 풀릴 때만 시상수를 둔다(경로 전환 스파이크 후 과감속 방지).
+        //  - 하한 없음 — 안전 계산값이 항상 이긴다. 정지 권한은 플래너의 것이지만,
+        //    이 캡은 감속 요구일 뿐 정지를 만들지 않는다(κ 가드로 0 나누기만 방지).
+        //  - 적용 위치는 target_speed 단계 — 기존 종방향 램프(base_max_decel)가 감속을
+        //    실현 가능하게 다듬은 뒤 나가고, 램프가 못 따라가면 deficit 경고를 남긴다.
+        // 🔴 기본 false — 단독 셰이크다운(저속 2랩 → 정상 3랩)에서 검증 후 켠다.
+        grip_speed_clamp_enable_ =
+            declare_parameter<bool>("grip_speed_clamp_enable", false);
+        // margin 기본 1.0 (2026-08-21 실측 스윕, run_220742 오픈루프): 0.9는 개입 43.5%
+        // 랩 +2.15 s 로 과보수(현 라인이 v²κ=6.0 까지 쓰므로 계획속도까지 깎음), 1.0 은
+        // 개입 34.7% 랩 +1.93 s(오픈루프 상한 — 폐루프에선 감속→오차 감소→요구 감소로
+        // 자가완화). 두 충돌 창 모두 margin 무관하게 진입 4.1~4.2 → 3.0~3.8 로 예산 안.
+        // 1.15(=조향 클램프 권한과 동일)는 비용 최소지만 보정 여유 0 — A/B 용으로만.
+        grip_clamp_margin_ = std::clamp(
+            declare_parameter<double>("grip_speed_clamp_margin", 1.0), 0.5, 1.3);
+        grip_clamp_release_alpha_ = std::clamp(
+            declare_parameter<double>("grip_speed_clamp_release_alpha", 0.05), 0.005, 1.0);
         understeer_gradient_ = declare_parameter<double>("understeer_gradient", 0.019);
         // ── 좌/우 분리 K_us (2026-08-18 실측, 2026-08-19 이 저장소로 이식) ──────
         // `rosbag2_2026_08_18-20_34_05` 정상상태 요레이트 전달률 역산: 좌 ≈0.008 /
@@ -412,6 +438,15 @@ public:
         // 경로 소스 중재
         local_fresh_timeout_ = declare_parameter<double>("local_fresh_timeout", 0.3);
 
+        // Cruise controller는 경로를 바꾸지 않고 종방향 속도 상한만 제공한다.
+        cruise_limit_enable_ = declare_parameter<bool>("cruise_limit_enable", true);
+        cruise_speed_limit_topic_ =
+            declare_parameter<std::string>("cruise_speed_limit_topic", "/cruise_speed_limit");
+        cruise_speed_limit_timeout_ =
+            std::max(0.01, declare_parameter<double>("cruise_speed_limit_timeout", 0.15));
+        cruise_stale_speed_ =
+            std::max(0.0, declare_parameter<double>("cruise_stale_speed", 1.5));
+
         closest_idx_max_heading_err_ =
             declare_parameter<double>("closest_idx_max_heading_err", 1.40);
 
@@ -426,6 +461,13 @@ public:
             "/local_waypoints", rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
             std::bind(&ControlMapNode::local_path_callback, this, std::placeholders::_1));
         local_last_recv_time_ = this->now();  // 노드 클럭 타입으로 초기화(clock mismatch 방지)
+
+        if (cruise_limit_enable_) {
+            cruise_speed_limit_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+                cruise_speed_limit_topic_, 10,
+                std::bind(&ControlMapNode::cruise_speed_limit_callback,
+                          this, std::placeholders::_1));
+        }
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             odom_topic_, 10, std::bind(&ControlMapNode::odom_callback, this, std::placeholders::_1));
@@ -1149,6 +1191,17 @@ private:
         local_last_recv_time_ = this->now();
     }
 
+    void cruise_speed_limit_callback(const std_msgs::msg::Float64::ConstSharedPtr msg) {
+        if (!std::isfinite(msg->data) || msg->data < 0.0) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "비정상 cruise speed limit %.3f 무시", msg->data);
+            return;
+        }
+        cruise_speed_limit_ = msg->data;
+        cruise_speed_limit_last_recv_time_ = this->now();
+        cruise_speed_limit_seen_ = true;
+    }
+
     // 경로를 모를 때의 안전 정지. 발행을 멈추지 않고 명시적 0을 보내는 이유는, 침묵하면
     // 하류(ackermann_mux→VESC)가 **직전 명령을 그대로 유지**해 타력주행이 되기 때문이다.
     //
@@ -1556,6 +1609,69 @@ private:
         global_speed = std::min(global_speed, curvature_speed_limit);
         global_speed = std::min(global_speed, max_speed_);
         double target_speed = global_speed;
+
+        // Cruise는 기존 경로 기하를 유지하고 종방향 목표 속도에 상한만 적용한다.
+        if (cruise_limit_enable_ && cruise_speed_limit_seen_) {
+            const bool cruise_fresh =
+                (current_time - cruise_speed_limit_last_recv_time_).seconds() <=
+                cruise_speed_limit_timeout_;
+            const double cruise_cap = cruise_fresh ? cruise_speed_limit_ : cruise_stale_speed_;
+            target_speed = std::min(target_speed, cruise_cap);
+            if (!cruise_fresh) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "cruise speed limit stale — %.2f m/s fail-safe cap 적용",
+                    cruise_stale_speed_);
+            }
+        }
+
+        // 7-a. U1 그립 권한 속도 클램프 (계약은 선언부 주석 참고, 기본 비활성).
+        //      target_speed 단계 적용이라 아래 8번 램프가 감속률을 실현 가능하게 다듬고,
+        //      램프가 못 따라가는 판(진입이 이미 과속)은 deficit 카운트로 드러난다.
+        {
+            const bool engaged_now = !(engage_gate_active() && !is_engaged_);
+            if (following_local != grip_prev_following_local_ || !engaged_now) {
+                // 경로 세대 전환(로컬↔글로벌)·미체결 구간: 이전 경로의 요구 곡률을
+                // 새 경로에 물려주지 않는다 (검토 계약: 전환 시 필터 리셋).
+                grip_demand_kappa_filt_ = 0.0;
+            }
+            grip_prev_following_local_ = following_local;
+            const double demand_kappa = 2.0 * std::abs(sin_eta) / l1_denom;
+            if (demand_kappa > grip_demand_kappa_filt_) {
+                grip_demand_kappa_filt_ = demand_kappa;   // 빠른 제한 — 진입을 늦추지 않는다
+            } else {
+                grip_demand_kappa_filt_ +=
+                    grip_clamp_release_alpha_ * (demand_kappa - grip_demand_kappa_filt_);
+            }
+            if (grip_speed_clamp_enable_ && engaged_now &&
+                grip_demand_kappa_filt_ > 1e-4)
+            {
+                const double budget =
+                    ((wps[closest_idx].mla > 0.0) ? wps[closest_idx].mla
+                                                  : max_lateral_accel_) * grip_clamp_margin_;
+                const double v_grip = std::sqrt(budget / grip_demand_kappa_filt_);
+                if (v_grip < target_speed) {
+                    if (target_speed - v_grip > 0.3) {
+                        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                            "그립 클램프: 목표 %.2f → %.2f m/s (κ_L1 %.3f, 예산 %.2f m/s², "
+                            "누적 %lu)",
+                            target_speed, v_grip, grip_demand_kappa_filt_, budget,
+                            static_cast<unsigned long>(grip_clamp_count_));
+                    }
+                    target_speed = v_grip;
+                    ++grip_clamp_count_;
+                }
+                const double v_meas = std::max(0.0, current_speed_);
+                if (v_meas * v_meas * grip_demand_kappa_filt_ > budget * 1.15) {
+                    // 실측이 이미 예산 밖 = 진입 과속을 램프가 못 따라간 것. 진단 전용.
+                    ++grip_decel_deficit_count_;
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                        "그립 클램프 감속 부족: 실측 %.2f m/s 요구 %.2f > 예산 %.2f m/s² "
+                        "(누적 %lu)",
+                        v_meas, v_meas * v_meas * grip_demand_kappa_filt_, budget,
+                        static_cast<unsigned long>(grip_decel_deficit_count_));
+                }
+            }
+        }
 
         // 8. 명령 속도 램프
         double final_speed = ramp_speed(last_target_speed_, target_speed, dt,
@@ -2002,6 +2118,13 @@ private:
     double base_max_decel_;                  // 명령 속도 하강 rate limit [m/s²]
     double prebrake_decel_ = 1.5;            // 곡률 사전감속용 실측 감속 권한 [m/s²]
     double max_speed_, min_speed_;
+    bool cruise_limit_enable_ = true;
+    std::string cruise_speed_limit_topic_ = "/cruise_speed_limit";
+    double cruise_speed_limit_timeout_ = 0.15;
+    double cruise_stale_speed_ = 1.5;
+    double cruise_speed_limit_ = 0.0;
+    bool cruise_speed_limit_seen_ = false;
+    rclcpp::Time cruise_speed_limit_last_recv_time_{0, 0, RCL_ROS_TIME};
 
     // 런치 킥
     bool launch_boost_enable_ = true;
@@ -2075,6 +2198,14 @@ private:
     double max_lateral_accel_;
     // 조향 클램프 = mla × 이 값. 1.0이면 구 거동(보정 예산 0). ②-y
     double steering_accel_margin_ = 1.0;
+    // U1 그립 권한 속도 클램프 상태 (선언부 주석 참고)
+    bool grip_speed_clamp_enable_ = false;
+    double grip_clamp_margin_ = 0.9;
+    double grip_clamp_release_alpha_ = 0.05;
+    double grip_demand_kappa_filt_ = 0.0;
+    bool grip_prev_following_local_ = false;
+    uint64_t grip_clamp_count_ = 0;
+    uint64_t grip_decel_deficit_count_ = 0;
     double understeer_gradient_ = 0.019;     // K_us [rad/(m/s²)] — 조향 권한 캡, 0이면 비활성
     double understeer_gradient_left_ = 0.019;   // 좌회전 K_us (생성자에서 해소, ≤0 = 공용값)
     double understeer_gradient_right_ = 0.019;  // 우회전 K_us (실측상 좌보다 크다 — 0818)
@@ -2149,6 +2280,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr drive_mode_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr global_path_sub_;
     rclcpp::Subscription<f110_msgs::msg::WpntArray>::SharedPtr local_path_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr cruise_speed_limit_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr l1_marker_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
