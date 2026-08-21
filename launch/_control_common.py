@@ -505,8 +505,9 @@ def declare_common_args(
             description='HFI 실차 정지출발 중 저속 포착 구간 속도 상한 사용 여부'
         ),
         DeclareLaunchArgument(
-            'hfi_launch_speed_cap', default_value='0.7',
-            description='HFI 정지출발 포착 전 발행 속도 상한 [m/s]'
+            'hfi_launch_speed_cap', default_value='0.9',
+            description='HFI 정지출발 포착 전 발행 속도 상한 [m/s]. 현재 4420 ERPM/(m/s)에서 '
+                        '약 3978 ERPM으로 HFI 전환 문턱 3000 ERPM에 충분한 여유를 둠'
         ),
         DeclareLaunchArgument(
             'hfi_launch_exit_speed', default_value='0.5',
@@ -537,7 +538,7 @@ def declare_common_args(
             description='HFI가 실제 0을 발행하고 VESC도 완전정지해야 다음 출발을 무장하는 시간 [s]'
         ),
         DeclareLaunchArgument(
-            'hfi_launch_moving_bypass_speed', default_value='1.0',
+            'hfi_launch_moving_bypass_speed', default_value='0.5',
             description='이미 이 전진속도 이상이면 정지출발 재무장을 우회해 수동→자율을 연속 인계 [m/s]. '
                         '0 이하면 비활성'
         ),
@@ -550,7 +551,7 @@ def declare_common_args(
             description='시도 실패 뒤 VESC 완전정지를 유지해야 자동 재시도하는 시간 [s]'
         ),
         DeclareLaunchArgument(
-            'hfi_launch_no_progress_timeout', default_value='1.2',
+            'hfi_launch_no_progress_timeout', default_value='2.0',
             description='이 시간까지 최소 순전진거리를 못 채우면 4초를 기다리지 않고 재시도 [s]'
         ),
         DeclareLaunchArgument(

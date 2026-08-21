@@ -27,7 +27,7 @@ def generate_launch_description():
     )
 
     max_lateral_accel_arg = DeclareLaunchArgument(
-        'max_lateral_accel', default_value='6.0',
+        'max_lateral_accel', default_value='6.8',
         description='코너 그립 클램프 a_lat [m/s^2]. 조향 생성의 a_cmd 상한도 겸한다(②-p). '
                     '⚠️ 2026-08-19에 7.0으로 올라가 있던 것을 6.0으로 되돌렸다: 현재 라인은 '
                     'a_lat을 최대 6.03만 요구해서 그립 캡이 172점 중 0~1점만 구속한다 → '

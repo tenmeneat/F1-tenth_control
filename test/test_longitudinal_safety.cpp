@@ -414,19 +414,20 @@ TEST(HfiLaunchGuard, ActualMotionAtPoint20ResetsStandstillDwell) {
     EXPECT_TRUE(state.armed);
 }
 
-TEST(HfiLaunchGuard, NoProgressRetriesBeforeFourSecondHardTimeout) {
+TEST(HfiLaunchGuard, NoProgressWaitsTwoSecondsBeforeRetry) {
     fc::HfiLaunchGuardState state;
     auto cfg = test_hfi_config();
     cfg.timeout = 4.0;
-    cfg.no_progress_timeout = 1.2;
+    cfg.no_progress_timeout = 2.0;
     cfg.no_progress_min_distance = 0.05;
 
     auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
-    for (int i = 0; i < 60 && d.event != fc::HfiLaunchEvent::kRetryScheduled; ++i)
+    for (int i = 0; i < 100 && d.event != fc::HfiLaunchEvent::kRetryScheduled; ++i)
         d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.02, 0.02);
     EXPECT_EQ(d.event, fc::HfiLaunchEvent::kRetryScheduled);
     EXPECT_EQ(state.last_failure_reason, fc::HfiLaunchFailureReason::kNoForwardProgress);
-    EXPECT_LT(state.elapsed, 1.3);
+    EXPECT_GE(state.elapsed, 2.0);
+    EXPECT_LT(state.elapsed, 2.1);
 }
 
 TEST(HfiLaunchGuard, ObservedSlowLaunchProgressIsNotAborted) {
@@ -443,4 +444,42 @@ TEST(HfiLaunchGuard, ObservedSlowLaunchProgressIsNotAborted) {
     for (int i = 0; i < 5; ++i)
         d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.5, 0.02);
     EXPECT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
+}
+
+TEST(HfiLaunchGuard, ExitCrossingAtTimeoutGetsContinuousHoldWindow) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 4.0;
+    cfg.exit_hold = 0.1;
+    cfg.no_progress_timeout = 0.0;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    for (int i = 0; i < 199; ++i) {
+        d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.1, 0.02);
+        ASSERT_NE(d.event, fc::HfiLaunchEvent::kRetryScheduled);
+    }
+
+    // 060605 회귀: 제한시간 경계에 처음 관통해도 같은 사이클에 실패시키지 않는다.
+    for (int i = 0; i < 5; ++i)
+        d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.5, 0.02);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
+    EXPECT_FALSE(d.force_stop);
+}
+
+TEST(HfiLaunchGuard, Point86ForwardMotionBypassesRelatchWithoutForcedStop) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.moving_bypass_speed = 0.5;
+    cfg.moving_bypass_hold = 0.1;
+    state.armed = false;
+    state.relatch_pending = true;
+
+    fc::HfiLaunchDecision d;
+    for (int i = 0; i < 5; ++i) {
+        d = fc::update_hfi_launch_guard(state, cfg, false, 4.0, 0.86, 0.02);
+        EXPECT_FALSE(d.force_stop);
+    }
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kMovingBypass);
+    EXPECT_FALSE(state.relatch_pending);
 }

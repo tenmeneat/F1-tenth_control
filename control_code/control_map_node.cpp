@@ -245,7 +245,7 @@ public:
         hfi_launch_guard_enable_ =
             declare_parameter<bool>("hfi_launch_guard_enable", false);
         hfi_launch_speed_cap_ = std::max(
-            0.0, declare_parameter<double>("hfi_launch_speed_cap", 0.7));
+            0.0, declare_parameter<double>("hfi_launch_speed_cap", 0.9));
         hfi_launch_exit_speed_ = std::clamp(
             declare_parameter<double>("hfi_launch_exit_speed", 0.5),
             0.0, hfi_launch_speed_cap_);
@@ -264,7 +264,7 @@ public:
         hfi_launch_relatch_time_ = std::max(
             0.0, declare_parameter<double>("hfi_launch_relatch_time", 0.5));
         hfi_launch_moving_bypass_speed_ =
-            declare_parameter<double>("hfi_launch_moving_bypass_speed", 1.0);
+            declare_parameter<double>("hfi_launch_moving_bypass_speed", 0.5);
         if (hfi_launch_moving_bypass_speed_ > 0.0) {
             hfi_launch_moving_bypass_speed_ = std::max(
                 hfi_launch_moving_bypass_speed_, hfi_launch_exit_speed_);
@@ -274,7 +274,7 @@ public:
         hfi_launch_retry_cooldown_ = std::max(
             0.0, declare_parameter<double>("hfi_launch_retry_cooldown", 0.5));
         hfi_launch_no_progress_timeout_ = std::max(
-            0.0, declare_parameter<double>("hfi_launch_no_progress_timeout", 1.2));
+            0.0, declare_parameter<double>("hfi_launch_no_progress_timeout", 2.0));
         hfi_launch_no_progress_min_distance_ = std::max(
             0.0, declare_parameter<double>("hfi_launch_no_progress_min_distance", 0.05));
         hfi_launch_reverse_abort_speed_ = std::max(
@@ -2334,7 +2334,7 @@ private:
     double base_max_accel_;
     double ramp_lead_max_ = 2.4;   // 램프 안티와인드업 선행 상한 [m/s], 0이면 비활성
     bool hfi_launch_guard_enable_ = false;
-    double hfi_launch_speed_cap_ = 0.7;
+    double hfi_launch_speed_cap_ = 0.9;
     double hfi_launch_exit_speed_ = 0.5;
     double hfi_launch_standstill_speed_ = 0.1;
     double hfi_launch_standstill_exit_speed_ = 0.20;
@@ -2342,10 +2342,10 @@ private:
     double hfi_launch_timeout_ = 4.0;
     double hfi_launch_exit_hold_ = 0.1;
     double hfi_launch_relatch_time_ = 0.5;
-    double hfi_launch_moving_bypass_speed_ = 1.0;
+    double hfi_launch_moving_bypass_speed_ = 0.5;
     double hfi_launch_moving_bypass_hold_ = 0.1;
     double hfi_launch_retry_cooldown_ = 0.5;
-    double hfi_launch_no_progress_timeout_ = 1.2;
+    double hfi_launch_no_progress_timeout_ = 2.0;
     double hfi_launch_no_progress_min_distance_ = 0.05;
     double hfi_launch_reverse_abort_speed_ = 0.10;
     double hfi_launch_reverse_abort_hold_ = 0.15;

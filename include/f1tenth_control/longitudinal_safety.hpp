@@ -39,7 +39,10 @@ enum class HfiLaunchFailureReason {
 
 struct HfiLaunchGuardConfig {
     bool enabled = false;
-    double speed_cap = 0.7;
+    // 4420 ERPM/(m/s) 기준 0.7 m/s는 3094 ERPM으로 VESC의 HFI→sensorless 전환
+    // 문턱(3000 ERPM)에 3%밖에 여유가 없었다. 060605/060751 실차에서 이 상한에
+    // 머문 시도가 반복적으로 제자리 덜걱임을 보였으므로 0.9(3978 ERPM)로 둔다.
+    double speed_cap = 0.9;
     double exit_speed = 0.5;
     // 정지 진입/해제 Schmitt trigger. 0822 VESC /odom의 0.13~0.15 m/s 정지 노이즈가
     // 0.5초 재무장 dwell을 계속 초기화하지 않되, 실제 0.20 m/s 이상 움직임은 즉시 깬다.
@@ -51,13 +54,13 @@ struct HfiLaunchGuardConfig {
     double relatch_time = 0.5;
     // 이미 전진 중인 수동→자율/일시 정지명령 복귀는 정지출발이 아니다. 이 속도를
     // 연속 유지하면 relatch_pending을 우회한다. 0 이하면 우회 비활성.
-    double moving_bypass_speed = 1.0;
+    double moving_bypass_speed = 0.5;
     double moving_bypass_hold = 0.1;
     double retry_cooldown = 0.5;
     unsigned int max_attempts = 2;
-    // 034812 실패는 첫 1.2초 순전진 0.024m, 가장 느린 035120 정상 포착은
-    // 0.111m였다. 전진하지 못하고 제자리에서 덜걱거리는 시도는 hard timeout 전에 끊는다.
-    double no_progress_timeout = 1.2;
+    // 060751에서 정상 포착도 1.58~1.62초가 걸렸고 1.2초 watchdog이 아직 살아날
+    // 시도를 강제로 0으로 잘랐다. 2초까지 5 cm도 전진하지 못한 시도만 조기 중단한다.
+    double no_progress_timeout = 2.0;
     double no_progress_min_distance = 0.05;
     double reverse_abort_speed = 0.10;
     double reverse_abort_hold = 0.15;
@@ -329,7 +332,12 @@ inline HfiLaunchDecision update_hfi_launch_guard(
         const bool no_forward_progress = config.no_progress_timeout > 0.0 &&
             state.elapsed >= config.no_progress_timeout &&
             state.launch_signed_distance < config.no_progress_min_distance;
-        const bool hard_timeout = config.timeout > 0.0 && state.elapsed >= config.timeout;
+        // timeout 직전에 exit_speed를 처음 넘은 경우에는 연속 hold를 끝낼 기회를 준다.
+        // 060605에서는 2차 시도가 4.00초에 +0.55 m/s까지 실제로 관통했는데, hold가
+        // 한 샘플만 쌓였다는 이유로 같은 사이클에 최종 실패 래치됐다. 속도가 다시
+        // 문턱 아래로 내려가면 exit_hold_elapsed가 0이 되어 다음 사이클 즉시 실패한다.
+        const bool hard_timeout = config.timeout > 0.0 &&
+            state.elapsed >= config.timeout && state.exit_hold_elapsed <= 0.0;
         if (sustained_reverse || no_forward_progress || hard_timeout) {
             state.active = false;
             state.armed = false;
