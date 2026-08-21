@@ -541,7 +541,7 @@ def declare_common_args(sector_scale_enable_default='false'):
         # 🔴 기본 false — 단독 셰이크다운(저속 2랩 → 정상 3랩, 포화 경고 감소·진동 없음
         #    확인) 후에만 켠다: grip_speed_clamp_enable:=true
         DeclareLaunchArgument(
-            'grip_speed_clamp_enable', default_value='false',
+            'grip_speed_clamp_enable', default_value='true',
             description='U1: L1 요구 횡가속이 예산을 넘으면 목표 속도를 캡 (기본 꺼짐)'
         ),
         DeclareLaunchArgument(

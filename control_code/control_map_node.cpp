@@ -1611,15 +1611,20 @@ private:
         double target_speed = global_speed;
 
         // Cruise는 기존 경로 기하를 유지하고 종방향 목표 속도에 상한만 적용한다.
-        if (cruise_limit_enable_ && cruise_speed_limit_seen_) {
-            const bool cruise_fresh =
+        if (cruise_limit_enable_) {
+            // Fail closed from process start. Waiting until the first cruise message made a
+            // missing/failed cruise node indistinguishable from "no constraint" and allowed the
+            // full waypoint speed indefinitely. Once a message has been seen, the same timeout
+            // watchdog covers a later publisher failure.
+            const bool cruise_fresh = cruise_speed_limit_seen_ &&
                 (current_time - cruise_speed_limit_last_recv_time_).seconds() <=
                 cruise_speed_limit_timeout_;
             const double cruise_cap = cruise_fresh ? cruise_speed_limit_ : cruise_stale_speed_;
             target_speed = std::min(target_speed, cruise_cap);
             if (!cruise_fresh) {
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "cruise speed limit stale — %.2f m/s fail-safe cap 적용",
+                    "cruise speed limit %s — %.2f m/s fail-safe cap 적용",
+                    cruise_speed_limit_seen_ ? "stale" : "not received yet",
                     cruise_stale_speed_);
             }
         }

@@ -65,6 +65,9 @@ struct CruiseControllerInput
 struct CruiseControllerOutput
 {
   double speed_limit{0.0};
+  // Conservative gap used only by braking/emergency safety constraints. The feedback loop tracks
+  // raw_gap so desired_gap remains the physical bumper-to-bumper equilibrium requested by the
+  // state-machine contract.
   double effective_gap{0.0};
   double gap_error{0.0};
   double relative_speed{0.0};

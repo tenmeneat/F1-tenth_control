@@ -29,9 +29,10 @@ control_map_node:  target_speed = min(경로 프로파일 vx_mps, cruise_cap)
 ```
 
 **`min()`이라는 점이 중요합니다.** cruise는 상한만 내리므로 플래너가 요구한 속도를 절대 못
-높입니다. 즉 회피 중 권한 침범이 원리적으로 불가능하고, cruise가 죽거나 토픽이 끊겨도
-"느려지는 방향"으로만 실패합니다(`cruise_speed_limit_timeout` 0.15 s 초과 시
-`cruise_stale_speed` 1.5 m/s).
+높입니다. 즉 회피 중 권한 침범이 원리적으로 불가능하고, cruise가 기동하지 못했거나
+죽거나 토픽이 끊겨도 "느려지는 방향"으로만 실패합니다. 첫 상한 수신 전부터,
+그리고 `cruise_speed_limit_timeout` 0.15 s 초과 후에도 `cruise_stale_speed` 1.5 m/s가
+적용됩니다.
 
 **GLOBAL·AVOID 상태에서는 `maximum_speed`(12.0)를 발행**하므로 기존 주행에 전혀 개입하지
 않습니다. 즉 CRUISE로 전이되지 않으면 이 노드의 파라미터는 무엇을 돌려도 효과가 0입니다.
@@ -81,11 +82,16 @@ v_opp_lb = max(0, v_opp − opp_speed_confidence_z × √vs_var)          # 상�
 τ_s      = clamp((v_ego − v_opp_lb) / relative_deceleration, 0, gap_uncertainty_horizon_max)
 σ_g      = √( max(0, s_var + 2·τ_s·s_vs_cov + τ_s²·vs_var) )
 effective_gap = max(0, raw_gap − uncertainty_sigma × σ_g)
-gap_error     = effective_gap − desired_gap
+gap_error     = raw_gap − desired_gap
 ```
 
 `τ_s`는 "상대속도를 지우는 데 걸리는 시간"이고, 그 시간만큼 상대차 위치 추정의 불확실도가
 등속 모델로 커집니다. 접근이 빠를수록 τ_s가 커지고 → σ_g가 커지고 → 간격을 더 깎습니다.
+
+`effective_gap`은 제동거리·비상정지 안전 제약에만 쓰고, PID는 실제 범퍼 간
+`raw_gap`을 추종합니다. `effective_gap`으로 PID 오차를 만들면 실제 평형 간격이
+`desired_gap + uncertainty_sigma·σ_g`가 되어, 목표 5 m/상태머신 임계 5 m 설정에서
+CRUISE 이탈·재진입 리밋사이클을 만들 수 있습니다.
 
 ### 단계 4 — 비상정지 (여기서 끝날 수 있음)
 
@@ -394,6 +400,10 @@ CRUISE 진입 판정 거리입니다(`P(gap < 이 값) > 0.7`이면 진입).
   **급정지/재가속 리밋사이클**
 - `desired_gap < interference_distance_m` 이면 안전합니다 (5 m에서 진입해 2 m까지 붙는
   정상 동작).
+
+고정 거리 기본값의 `desired_gap == interference_distance_m == 5.0 m`는 실제
+`raw_gap`을 PID가 추종하므로 평형점이 일치합니다. 불확실성은 이 평형점을 늘리지
+않고 제동·비상 상한만 보수적으로 낮춥니다.
 
 ⚠️ 시간 모드는 목표 간격이 속도에 따라 커지므로, `s0 + T·v_max`가 이 값을 넘을 수 있습니다.
 `max_desired_gap`을 반드시 함께 설정하십시오.

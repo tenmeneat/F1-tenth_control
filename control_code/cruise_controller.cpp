@@ -74,7 +74,12 @@ CruiseControllerOutput CruiseLongitudinalController::update(
   output.horizon_tau = tau_s;
   output.effective_gap = std::max(
     0.0, input.gap - config_.uncertainty_sigma * sigma_g);
-  output.gap_error = output.effective_gap - output.desired_gap;
+  // Track the requested physical bumper-to-bumper gap. Using effective_gap here moved the raw
+  // equilibrium to desired_gap + z*sigma, which can exceed the state machine's interference
+  // distance even when desired_gap is configured equal to it. Keep uncertainty in the braking
+  // and emergency constraints below; it must tighten safety caps without silently changing the
+  // steady following distance and causing GLOBAL/CRUISE limit cycles.
+  output.gap_error = output.raw_gap - output.desired_gap;
   output.relative_speed = opponent_speed - ego_speed;
 
   gap_integral_ = std::clamp(

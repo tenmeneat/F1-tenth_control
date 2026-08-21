@@ -248,7 +248,15 @@ private:
     }
 
     if (!opponent_active_) {
-      publishLimit(maximum_speed_);
+      // STATE_CRUISE is itself evidence that the state machine selected an opponent. If this
+      // process has not acquired that target yet (startup ordering, dropped first sample, or a
+      // detector failure), treating it as a clear road is fail-open. Stay at the blind cap until
+      // either a valid target arrives or the state machine leaves CRUISE.
+      publishLimit(blind_trailing_speed_);
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "STATE_CRUISE without an acquired opponent: blind cap %.2f m/s",
+        blind_trailing_speed_);
       return;
     }
 

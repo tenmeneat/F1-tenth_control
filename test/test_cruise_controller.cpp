@@ -55,10 +55,23 @@ TEST(CruiseController, PositionalUncertaintyReducesUsableGap)
   auto config = defaultConfig();
   config.uncertainty_sigma = 2.0;
   f1tenth_control::CruiseLongitudinalController controller(config);
-  const auto certain = controller.update({2.0, 1.5, 4.0, 4.0, 0.0, 0.02});
+  const auto certain = controller.update({4.0, 1.5, 4.0, 4.0, 0.0, 0.02});
   controller.reset();
-  const auto uncertain = controller.update({2.0, 1.5, 4.0, 4.0, 0.04, 0.02});
+  const auto uncertain = controller.update({4.0, 1.5, 4.0, 4.0, 0.04, 0.02});
   EXPECT_LT(uncertain.speed_limit, certain.speed_limit);
+  EXPECT_LT(uncertain.braking_speed, certain.braking_speed);
+}
+
+TEST(CruiseController, UncertaintyDoesNotMovePhysicalFollowingEquilibrium)
+{
+  auto config = defaultConfig();
+  config.uncertainty_sigma = 2.0;
+  f1tenth_control::CruiseLongitudinalController controller(config);
+  const auto output = controller.update({1.5, 1.5, 4.0, 4.0, 0.04, 0.02});
+
+  EXPECT_DOUBLE_EQ(output.gap_error, 0.0);
+  EXPECT_DOUBLE_EQ(output.feedback_speed, 4.0);
+  EXPECT_DOUBLE_EQ(output.speed_limit, 4.0);
 }
 
 TEST(CruiseController, DefaultHorizonZeroIsBitIdenticalWithOrWithoutSpeedVariance)
@@ -246,9 +259,9 @@ TEST(CruiseController, ExposesTheGapChainForDiagnostics)
   EXPECT_DOUBLE_EQ(output.raw_gap, 3.0);
   EXPECT_DOUBLE_EQ(output.desired_gap, 1.5);
   EXPECT_DOUBLE_EQ(output.sigma_gap, std::sqrt(0.04));
-  // raw - z*sigma = effective, and effective - desired = the reported error.
+  // raw - z*sigma = effective for safety constraints, while feedback tracks the physical raw gap.
   EXPECT_DOUBLE_EQ(output.effective_gap, 3.0 - 2.0 * std::sqrt(0.04));
-  EXPECT_DOUBLE_EQ(output.gap_error, output.effective_gap - output.desired_gap);
+  EXPECT_DOUBLE_EQ(output.gap_error, output.raw_gap - output.desired_gap);
 }
 
 // --- Desired gap policy -----------------------------------------------------------------------
