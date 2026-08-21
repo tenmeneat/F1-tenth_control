@@ -192,6 +192,12 @@ ros2 topic echo /cruise/gap_data
 ros2 launch f1tenth_control control_real.launch.py cruise_enable:=true
 ros2 topic echo /cruise/gap_data
 ```
+
+`config/cruise_controller.yaml`의 튜닝 값은 `_control_common.py`에 같은 이름의 launch
+인자로 노출돼 있습니다. 실험값은 YAML을 바꾸지 않고
+`trailing_p_gain:=1.0`과 같이 인자로 덮어쓰면 실험 간 기준값이 섞이지
+않습니다. 최고속도는 기존 `max_speed`를 크루즈와 공유합니다.
+
 확인 항목: `desired_gap`이 항상 **5.00** 고정 / `horizon_tau`와 `sigma_gap`이 예전과 같은
 범위 / 등속 추종 중 `active_constraint`가 `pid` / 추격 중 `braking`.
 
@@ -345,16 +351,14 @@ ros2 launch f1tenth_control control_real.launch.py cruise_enable:=true
 
 # 2단계 — 제동거리 분해를 실측값으로 켠다 (간격은 아직 5 m 그대로)
 #          캡이 내려가는 방향이라 안전 측이다.
-#          config/cruise_controller.yaml:
-#            ego_deceleration: 2.2          # §4-3 실측 하한
-#            opponent_deceleration: 2.2     # 같은 하드웨어 가정
-#            actuation_latency: 0.15        # §4-2 실측
+ros2 launch f1tenth_control control_real.launch.py \
+  ego_deceleration:=2.2 opponent_deceleration:=2.2 actuation_latency:=0.15
 
 # 3단계 — 간격을 시간 모드로 전환. 여기서 처음으로 차가 더 붙는다.
-#            trailing_mode_distance: false
-#            minimum_gap: 0.8               # s0
-#            trailing_gap: 0.2              # T → 6 m/s에서 2.0 m
-#            max_desired_gap: 5.0           # §7-2 상한
+ros2 launch f1tenth_control control_real.launch.py \
+  ego_deceleration:=2.2 opponent_deceleration:=2.2 actuation_latency:=0.15 \
+  trailing_mode_distance:=false minimum_gap:=0.8 trailing_gap:=0.2 \
+  max_desired_gap:=5.0
 
 # 4단계 — PID 미세조정. §5-2 스윕.
 ```
