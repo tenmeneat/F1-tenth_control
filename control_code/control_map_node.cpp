@@ -258,6 +258,14 @@ public:
             0.0, declare_parameter<double>("hfi_launch_exit_hold", 0.1));
         hfi_launch_relatch_time_ = std::max(
             0.0, declare_parameter<double>("hfi_launch_relatch_time", 0.5));
+        hfi_launch_moving_bypass_speed_ =
+            declare_parameter<double>("hfi_launch_moving_bypass_speed", 1.0);
+        if (hfi_launch_moving_bypass_speed_ > 0.0) {
+            hfi_launch_moving_bypass_speed_ = std::max(
+                hfi_launch_moving_bypass_speed_, hfi_launch_exit_speed_);
+        }
+        hfi_launch_moving_bypass_hold_ = std::max(
+            0.0, declare_parameter<double>("hfi_launch_moving_bypass_hold", 0.1));
         hfi_launch_retry_cooldown_ = std::max(
             0.0, declare_parameter<double>("hfi_launch_retry_cooldown", 0.5));
         hfi_launch_max_attempts_ = static_cast<unsigned int>(std::max<int64_t>(1,
@@ -510,9 +518,11 @@ public:
                 hfi_launch_speed_topic_, 10,
                 std::bind(&ControlMapNode::hfi_speed_callback, this, std::placeholders::_1));
             RCLCPP_INFO(this->get_logger(),
-                "HFI 정지출발 보호 속도원: %s (신선도 %.2fs), 최대 %u회 × %.1fs",
+                "HFI 정지출발 보호 속도원: %s (신선도 %.2fs), 최대 %u회 × %.1fs, "
+                "주행중 우회 +%.2f m/s × %.2fs",
                 hfi_launch_speed_topic_.c_str(), hfi_launch_speed_timeout_,
-                hfi_launch_max_attempts_, hfi_launch_timeout_);
+                hfi_launch_max_attempts_, hfi_launch_timeout_,
+                hfi_launch_moving_bypass_speed_, hfi_launch_moving_bypass_hold_);
         }
         imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
             "/imu/data", 10, std::bind(&ControlMapNode::imu_callback, this, std::placeholders::_1));
@@ -1835,6 +1845,14 @@ private:
         //      별도 VESC /odom(hfi_speed_)으로 전진 포착·역회전·완전정지를 판정한다.
         //      launch boost보다 뒤에서 적용해, 실수로 두 기능을 함께 켜도 HFI 상한이 이긴다.
         if (hfi_launch_guard_enable_) {
+            // local_planner safe-stop은 열린 감속 경로의 **말단 vx=0**으로 정지 의도를
+            // 표현한다. 앞쪽 waypoint는 0.95~1.9 m/s일 수 있으므로 현재 lookahead target만
+            // 보면 HFI가 플래너의 4초 래치를 조기에 우회한다(0822 t=48.516 n=5→2).
+            // 닫힌 handoff/크립 경로로 바뀐 뒤에만 새 HFI 출발을 허용한다.
+            const bool hfi_path_stop_intent = following_local && !path_closed &&
+                !wps.empty() && wps.back().speed <= 0.1;
+            const bool hfi_launch_allowed = !hfi_path_stop_intent;
+
             f1tenth_control::HfiLaunchGuardConfig config;
             config.enabled = true;
             config.speed_cap = hfi_launch_speed_cap_;
@@ -1843,8 +1861,20 @@ private:
             config.timeout = hfi_launch_timeout_;
             config.exit_hold = hfi_launch_exit_hold_;
             config.relatch_time = hfi_launch_relatch_time_;
+            config.moving_bypass_speed = hfi_launch_moving_bypass_speed_;
+            config.moving_bypass_hold = hfi_launch_moving_bypass_hold_;
             config.retry_cooldown = hfi_launch_retry_cooldown_;
             config.max_attempts = hfi_launch_max_attempts_;
+
+            // 일반 engage gate는 미수신/timeout 때 fail-open 호환 동작을 유지하지만, HFI
+            // 상태기만큼은 모드 확인 전 출발로 오판하면 안 된다(0822 bag t=2.066 가짜 시작).
+            const double drive_mode_age = drive_mode_seen_
+                ? (current_time - drive_mode_last_recv_time_).seconds()
+                : std::numeric_limits<double>::infinity();
+            const bool hfi_drive_mode_fresh = !engage_gate_enable_ ||
+                (drive_mode_seen_ && drive_mode_age < drive_mode_timeout_);
+            const bool hfi_disengaged = engage_gate_enable_ &&
+                (!hfi_drive_mode_fresh || !is_engaged_);
 
             const double hfi_speed_age = hfi_speed_seen_
                 ? (current_time - hfi_speed_last_recv_time_).seconds()
@@ -1856,20 +1886,21 @@ private:
             f1tenth_control::HfiLaunchDecision decision;
             if (hfi_speed_fresh) {
                 decision = f1tenth_control::update_hfi_launch_guard(
-                    hfi_launch_state_, config, disengaged, target_speed, hfi_speed_, dt);
+                    hfi_launch_state_, config, hfi_disengaged,
+                    target_speed, hfi_speed_, dt, hfi_launch_allowed);
             } else {
                 // 속도가 끊긴 동안 정지 요청이 들어왔다는 사실은 기억하되, 가짜 0속도로
                 // dwell을 채워 재무장하지 않는다. standstill 문턱과 같은 값을 넣으면
                 // strict '<' 판정상 정지가 아니며 dt=0이라 타이머도 진행하지 않는다.
-                if (disengaged || target_speed <= 0.1) {
+                if (hfi_disengaged || target_speed <= 0.1) {
                     (void)f1tenth_control::update_hfi_launch_guard(
-                        hfi_launch_state_, config, disengaged, target_speed,
-                        hfi_launch_standstill_speed_, 0.0);
+                        hfi_launch_state_, config, hfi_disengaged, target_speed,
+                        hfi_launch_standstill_speed_, 0.0, hfi_launch_allowed);
                 }
                 const bool speed_required = hfi_launch_state_.active ||
                     hfi_launch_state_.retry_waiting || hfi_launch_state_.relatch_pending ||
                     hfi_launch_state_.failure_latched ||
-                    (hfi_launch_state_.armed && !disengaged && target_speed > 0.1);
+                    (hfi_launch_state_.armed && !hfi_disengaged && target_speed > 0.1);
                 if (speed_required) {
                     decision.force_stop = true;
                     RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -1891,6 +1922,11 @@ private:
                     "(누적 %lu회)",
                     hfi_speed_, hfi_launch_state_.elapsed, hfi_launch_state_.attempt,
                     hfi_launch_state_.release_count);
+            } else if (decision.event == f1tenth_control::HfiLaunchEvent::kMovingBypass) {
+                RCLCPP_INFO(this->get_logger(),
+                    "HFI 정지출발 우회: 이미 VESC +%.2f m/s로 주행 중 — 속도 0 삽입 없이 "
+                    "자율 명령 인계 (누적 %lu회)",
+                    hfi_speed_, hfi_launch_state_.moving_bypass_count);
             } else if (decision.event == f1tenth_control::HfiLaunchEvent::kRetryScheduled) {
                 RCLCPP_WARN(this->get_logger(),
                     "HFI 정지출발 시도 %u/%u가 %.1fs에 실패 — 속도 0 및 VESC 완전정지 "
@@ -1929,10 +1965,11 @@ private:
                 last_target_speed_ = 0.0;
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                     "HFI 속도 0 유지: VESC %.2f m/s | 재시도대기=%s 재무장대기=%s "
-                    "최종래치=%s",
+                    "최종래치=%s 경로정지=%s",
                     hfi_speed_, hfi_launch_state_.retry_waiting ? "Y" : "N",
                     hfi_launch_state_.relatch_pending ? "Y" : "N",
-                    hfi_launch_state_.failure_latched ? "Y" : "N");
+                    hfi_launch_state_.failure_latched ? "Y" : "N",
+                    hfi_path_stop_intent ? "Y" : "N");
             }
         }
 
@@ -2270,6 +2307,8 @@ private:
     double hfi_launch_timeout_ = 4.0;
     double hfi_launch_exit_hold_ = 0.1;
     double hfi_launch_relatch_time_ = 0.5;
+    double hfi_launch_moving_bypass_speed_ = 1.0;
+    double hfi_launch_moving_bypass_hold_ = 0.1;
     double hfi_launch_retry_cooldown_ = 0.5;
     unsigned int hfi_launch_max_attempts_ = 2;
     std::string hfi_launch_speed_topic_ = "/odom";

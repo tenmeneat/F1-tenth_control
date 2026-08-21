@@ -526,7 +526,16 @@ def declare_common_args(
         ),
         DeclareLaunchArgument(
             'hfi_launch_relatch_time', default_value='0.5',
-            description='정지 목표와 VESC 완전정지가 함께 유지돼야 다음 출발을 무장하는 시간 [s]'
+            description='HFI가 실제 0을 발행하고 VESC도 완전정지해야 다음 출발을 무장하는 시간 [s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_moving_bypass_speed', default_value='1.0',
+            description='이미 이 전진속도 이상이면 정지출발 재무장을 우회해 수동→자율을 연속 인계 [m/s]. '
+                        '0 이하면 비활성'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_moving_bypass_hold', default_value='0.1',
+            description='HFI 주행중 우회 속도를 연속 확인하는 시간 [s]'
         ),
         DeclareLaunchArgument(
             'hfi_launch_retry_cooldown', default_value='0.5',
@@ -730,6 +739,10 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'hfi_launch_timeout': LaunchConfiguration('hfi_launch_timeout'),
             'hfi_launch_exit_hold': LaunchConfiguration('hfi_launch_exit_hold'),
             'hfi_launch_relatch_time': LaunchConfiguration('hfi_launch_relatch_time'),
+            'hfi_launch_moving_bypass_speed':
+                LaunchConfiguration('hfi_launch_moving_bypass_speed'),
+            'hfi_launch_moving_bypass_hold':
+                LaunchConfiguration('hfi_launch_moving_bypass_hold'),
             'hfi_launch_retry_cooldown': LaunchConfiguration('hfi_launch_retry_cooldown'),
             'hfi_launch_max_attempts': ParameterValue(
                 LaunchConfiguration('hfi_launch_max_attempts'), value_type=int),

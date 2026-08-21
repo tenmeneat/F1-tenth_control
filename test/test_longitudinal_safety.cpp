@@ -97,7 +97,7 @@ TEST(HfiLaunchGuard, ExitSpeedMustBeContinuous) {
     EXPECT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
 }
 
-TEST(HfiLaunchGuard, RelatchNeedsContinuousStopCommandAndStandstill) {
+TEST(HfiLaunchGuard, PositiveTargetCompletesGuardedRelatchWithoutDeadlock) {
     fc::HfiLaunchGuardState state;
     auto cfg = test_hfi_config();
     cfg.timeout = 1.0;
@@ -113,18 +113,131 @@ TEST(HfiLaunchGuard, RelatchNeedsContinuousStopCommandAndStandstill) {
     EXPECT_FALSE(state.armed);
     EXPECT_TRUE(state.relatch_pending);
 
-    // 0.48초 뒤 목표가 튀어도 보호 없이 출발하지 않고, 재무장 대기를 처음부터 다시 센다.
+    // 0.48초 뒤 raw 목표가 복귀해도 그 직전까지 실제 발행은 계속 0이었다. 이번 dt로
+    // 0.50초 dwell이 완성되면 교착하지 않고 제한 출발로 바로 이어진다.
     d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
-    EXPECT_TRUE(d.force_stop);
-    EXPECT_FALSE(state.active);
-
-    for (int i = 0; i < 25; ++i) {
-        d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.0, 0.02);
-    }
-    EXPECT_TRUE(state.armed);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    EXPECT_FALSE(d.force_stop);
+    EXPECT_TRUE(d.constrain_to_cap);
+    EXPECT_TRUE(state.active);
     EXPECT_FALSE(state.relatch_pending);
+}
 
-    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+TEST(HfiLaunchGuard, PositiveTargetWaitsAtZeroUntilFullRelatchDwell) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 1.0;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.5, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
+
+    // Safe-stop 목표가 잠깐만 0이었다가 크립 목표로 돌아온 0822 회귀 시나리오.
+    d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.3, 0.02);
+    ASSERT_TRUE(state.relatch_pending);
+    for (int i = 0; i < 24; ++i) {
+        d = fc::update_hfi_launch_guard(state, cfg, false, 0.7, 0.0, 0.02);
+        EXPECT_TRUE(d.force_stop) << "cycle=" << i;
+        EXPECT_FALSE(d.constrain_to_cap);
+    }
+
+    d = fc::update_hfi_launch_guard(state, cfg, false, 0.7, 0.0, 0.02);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    EXPECT_TRUE(d.constrain_to_cap);
+    EXPECT_FALSE(d.force_stop);
+}
+
+TEST(HfiLaunchGuard, PlannerStopIntentBlocksPositivePrefixUntilHandoff) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 1.0;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.5, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
+
+    // 0822 safe-stop은 열린 경로 [1.90, ..., 0.00] 뒤 [0.95, 0.00]을 발행했다.
+    // lookahead target 0.95만 보면 재출발하지만 말단 0은 플래너의 정지 래치다.
+    d = fc::update_hfi_launch_guard(
+        state, cfg, false, 1.90, 1.5, 0.02, /*launch_allowed=*/false);
+    EXPECT_FALSE(d.force_stop);  // 움직이는 동안에는 플래너의 감속 경로를 그대로 추종
+    for (int i = 0; i < 30; ++i) {
+        d = fc::update_hfi_launch_guard(
+            state, cfg, false, 0.95, 0.0, 0.02, /*launch_allowed=*/false);
+        EXPECT_NE(d.event, fc::HfiLaunchEvent::kStarted);
+        EXPECT_TRUE(d.force_stop);
+    }
+
+    // 플래너가 closed handoff/0.7 m/s creep 경로를 발행한 뒤에만 출발한다.
+    d = fc::update_hfi_launch_guard(
+        state, cfg, false, 0.7, 0.0, 0.02, /*launch_allowed=*/true);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    EXPECT_TRUE(d.constrain_to_cap);
+    EXPECT_FALSE(d.force_stop);
+}
+
+TEST(HfiLaunchGuard, ForwardMotionBypassesStationaryRelatchWithoutZeroStep) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 1.0;
+    cfg.moving_bypass_speed = 1.0;
+    cfg.moving_bypass_hold = 0.1;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.5, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
+
+    // 수동 전환/순간 stop 목표 중에도 VESC가 +2 m/s로 주행했다. dwell은 reset 구간에서
+    // 미리 쌓고, 자율 목표가 돌아온 사이클에는 0이나 0.7 cap을 삽입하지 않는다.
+    for (int i = 0; i < 5; ++i) {
+        d = fc::update_hfi_launch_guard(state, cfg, true, 0.0, 2.0, 0.02);
+    }
+    ASSERT_TRUE(state.relatch_pending);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 4.0, 2.0, 0.02);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kMovingBypass);
+    EXPECT_FALSE(d.force_stop);
+    EXPECT_FALSE(d.constrain_to_cap);
+    EXPECT_FALSE(state.relatch_pending);
+    EXPECT_EQ(state.moving_bypass_count, 1UL);
+}
+
+TEST(HfiLaunchGuard, ReverseMotionCanNeverUseMovingBypass) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 1.0;
+    cfg.moving_bypass_speed = 1.0;
+    cfg.moving_bypass_hold = 0.1;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.5, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
+    for (int i = 0; i < 10; ++i) {
+        d = fc::update_hfi_launch_guard(state, cfg, true, 0.0, -2.0, 0.02);
+    }
+
+    d = fc::update_hfi_launch_guard(state, cfg, false, 4.0, -2.0, 0.02);
+    EXPECT_TRUE(d.force_stop);
+    EXPECT_NE(d.event, fc::HfiLaunchEvent::kMovingBypass);
+    EXPECT_TRUE(state.relatch_pending);
+}
+
+TEST(HfiLaunchGuard, DisengagedStartupCannotCreateFalseLaunch) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 1.0;
+
+    for (int i = 0; i < 50; ++i) {
+        const auto d = fc::update_hfi_launch_guard(
+            state, cfg, true, 3.0, 0.0, 0.02);
+        EXPECT_NE(d.event, fc::HfiLaunchEvent::kStarted);
+        EXPECT_FALSE(state.active);
+    }
+    const auto d = fc::update_hfi_launch_guard(
+        state, cfg, false, 3.0, 0.0, 0.02);
     EXPECT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
     EXPECT_TRUE(d.constrain_to_cap);
 }
@@ -210,15 +323,13 @@ TEST(HfiLaunchGuard, TerminalLatchNeedsHalfSecondStopBeforeReset) {
     EXPECT_TRUE(state.failure_latched);
     EXPECT_NE(d.event, fc::HfiLaunchEvent::kFailureReset);
 
-    // 양의 목표 한 번으로 stop dwell이 끊기고 실패 래치가 계속 출력을 막는다.
-    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
-    EXPECT_TRUE(d.force_stop);
-    d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.0, 0.25);
-    EXPECT_TRUE(state.failure_latched);
-    d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.0, 0.25);
-    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kFailureReset);
+    // 명시적인 stop 요청이 pending을 만든 뒤에는 raw 목표가 돌아와도 guard가 발행 0을
+    // 유지하므로 남은 dwell을 완성할 수 있다. 완료 즉시 새 bounded 시도를 시작한다.
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.25);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
     EXPECT_FALSE(state.failure_latched);
-    EXPECT_TRUE(state.armed);
+    EXPECT_TRUE(state.active);
+    EXPECT_TRUE(d.constrain_to_cap);
 }
 
 TEST(HfiLaunchGuard, Observed0822CapturesUnderFourSecondsCanRelease) {

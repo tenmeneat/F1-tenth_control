@@ -23,6 +23,7 @@ enum class HfiLaunchEvent {
     kNone,
     kStarted,
     kReleased,
+    kMovingBypass,
     kRetryScheduled,
     kRetryStarted,
     kTimedOut,
@@ -37,6 +38,10 @@ struct HfiLaunchGuardConfig {
     double timeout = 4.0;
     double exit_hold = 0.1;
     double relatch_time = 0.5;
+    // 이미 전진 중인 수동→자율/일시 정지명령 복귀는 정지출발이 아니다. 이 속도를
+    // 연속 유지하면 relatch_pending을 우회한다. 0 이하면 우회 비활성.
+    double moving_bypass_speed = 1.0;
+    double moving_bypass_hold = 0.1;
     double retry_cooldown = 0.5;
     unsigned int max_attempts = 2;
 };
@@ -50,9 +55,11 @@ struct HfiLaunchGuardState {
     double elapsed = 0.0;
     double exit_hold_elapsed = 0.0;
     double relatch_elapsed = 0.0;
+    double moving_bypass_elapsed = 0.0;
     double retry_cooldown_elapsed = 0.0;
     unsigned int attempt = 0;
     unsigned long release_count = 0;
+    unsigned long moving_bypass_count = 0;
     unsigned long retry_count = 0;
     unsigned long attempt_timeout_count = 0;
     unsigned long failure_count = 0;
@@ -66,7 +73,8 @@ struct HfiLaunchDecision {
 
 inline HfiLaunchDecision update_hfi_launch_guard(
     HfiLaunchGuardState& state, const HfiLaunchGuardConfig& config,
-    bool disengaged, double target_speed, double current_speed, double dt) {
+    bool disengaged, double target_speed, double current_speed, double dt,
+    bool launch_allowed = true) {
     HfiLaunchDecision decision;
     if (!config.enabled) {
         state.active = false;
@@ -76,6 +84,7 @@ inline HfiLaunchDecision update_hfi_launch_guard(
         state.elapsed = 0.0;
         state.exit_hold_elapsed = 0.0;
         state.relatch_elapsed = 0.0;
+        state.moving_bypass_elapsed = 0.0;
         state.retry_cooldown_elapsed = 0.0;
         state.attempt = 0;
         state.armed = true;
@@ -85,8 +94,14 @@ inline HfiLaunchDecision update_hfi_launch_guard(
     const double safe_dt = std::max(0.0, dt);
     const double abs_speed = std::abs(current_speed);
     const bool standstill = abs_speed < config.standstill_speed;
-    const bool reset_requested = disengaged || target_speed <= 0.1;
+    // 열린 safe-stop 경로는 앞쪽 감속 웨이포인트가 양수여도 말단 vx=0이 플래너의
+    // 정지 의도다. launch_allowed=false 동안에는 그 중간 양수값으로 HFI를 재기동하지 않는다.
+    const bool reset_requested = disengaged || target_speed <= 0.1 || !launch_allowed;
     const double relatch_time = std::max(0.0, config.relatch_time);
+    const bool moving_bypass_enabled = config.moving_bypass_speed > 0.0;
+    const bool moving_forward = moving_bypass_enabled &&
+        current_speed >= config.moving_bypass_speed;
+    const double moving_bypass_hold = std::max(0.0, config.moving_bypass_hold);
     const unsigned int max_attempts = std::max(1U, config.max_attempts);
 
     // 순간적인 target=0이나 모드 채터로 즉시 재무장하지 않는다. 정지 명령(또는 자율
@@ -95,13 +110,21 @@ inline HfiLaunchDecision update_hfi_launch_guard(
         // 출발 시도/완료 뒤의 정지 요청은 relatch dwell이 끝날 때까지 다음 양의
         // 목표를 차단한다. target 채터가 0을 한 번 찍은 직후 보호 없이 재출발하는
         // 우회 경로를 없앤다. 최초 기동의 armed=true 상태에는 이 대기를 추가하지 않는다.
-        if (!state.armed) state.relatch_pending = true;
+        // 최초 armed 상태라도 수동 주행/타력 중이면 다음 체결은 정지출발이 아니다. 첫
+        // reset 사이클부터 pending을 세워 아래 signed moving bypass로만 통과시킨다.
+        if (!state.armed || !standstill) state.relatch_pending = true;
         state.active = false;
         state.retry_waiting = false;
         state.elapsed = 0.0;
         state.exit_hold_elapsed = 0.0;
         state.retry_cooldown_elapsed = 0.0;
         state.attempt = 0;
+
+        if (moving_forward) {
+            state.moving_bypass_elapsed += safe_dt;
+        } else {
+            state.moving_bypass_elapsed = 0.0;
+        }
 
         if (standstill) {
             state.relatch_elapsed += safe_dt;
@@ -110,20 +133,70 @@ inline HfiLaunchDecision update_hfi_launch_guard(
                 state.armed = true;
                 state.relatch_pending = false;
                 state.failure_latched = false;
+                state.moving_bypass_elapsed = 0.0;
                 if (reset_failure) decision.event = HfiLaunchEvent::kFailureReset;
             }
         } else {
             state.relatch_elapsed = 0.0;
             state.armed = false;
         }
+        // 감속 경로는 움직이는 동안 그대로 추종하고, 실제 정지한 뒤에만 0을 고정한다.
+        // 플래너가 closed handoff/creep 경로로 바꿔 launch_allowed=true가 되면 armed 상태에서
+        // 정상 HFI 출발을 시작한다. 이 게이트가 없으면 safe-stop의 앞쪽 양수 waypoint만 보고
+        // 4초 안전 래치를 조기에 우회할 수 있다.
+        if (!launch_allowed && standstill) decision.force_stop = true;
         return decision;
     }
-    state.relatch_elapsed = 0.0;
 
     if (state.relatch_pending) {
+        // 수동→자율 전환 또는 순간 target=0 뒤에도 차가 충분히 빠르게 **전진 중**이면
+        // HFI 정지출발을 다시 걸 이유가 없다. abs(speed)를 쓰지 않아 역주행은 우회하지
+        // 못한다. reset_requested 구간에서 이미 쌓인 dwell도 이어받아 bumpless transfer한다.
+        if (!state.failure_latched && moving_forward) {
+            state.relatch_elapsed = 0.0;
+            state.moving_bypass_elapsed += safe_dt;
+            // 1 m/s 이상은 HFI 포착구간을 충분히 벗어난 실측이므로 hold를 확인하는 동안도
+            // 0/brake를 삽입하지 않는다. 그렇지 않으면 바로 그 전환 계단이 새 위험이 된다.
+            if (state.moving_bypass_elapsed >= moving_bypass_hold) {
+                state.relatch_pending = false;
+                state.armed = false;
+                state.moving_bypass_elapsed = 0.0;
+                ++state.moving_bypass_count;
+                decision.event = HfiLaunchEvent::kMovingBypass;
+            }
+            return decision;
+        }
+
+        state.moving_bypass_elapsed = 0.0;
         decision.force_stop = true;
+
+        // 핵심 교착 수리: raw target이 다시 양수여도 이 분기 자체가 실제 발행을 0으로
+        // 강제하고 있으므로, VESC도 정지해 있으면 유효한 "정지 명령+실측 정지" dwell이다.
+        // 종전 코드는 양수 target에서 relatch_elapsed를 매번 0으로 만들어 영원히 못 풀렸다.
+        if (standstill) {
+            state.relatch_elapsed += safe_dt;
+        } else {
+            state.relatch_elapsed = 0.0;
+        }
+        if (standstill && state.relatch_elapsed >= relatch_time) {
+            state.relatch_pending = false;
+            state.failure_latched = false;
+            state.relatch_elapsed = 0.0;
+            state.armed = false;
+            state.active = true;
+            state.elapsed = 0.0;
+            state.exit_hold_elapsed = 0.0;
+            state.retry_cooldown_elapsed = 0.0;
+            state.attempt = 1;
+            decision.force_stop = false;
+            decision.constrain_to_cap = true;
+            decision.event = HfiLaunchEvent::kStarted;
+        }
         return decision;
     }
+
+    state.relatch_elapsed = 0.0;
+    state.moving_bypass_elapsed = 0.0;
 
     if (state.failure_latched) {
         decision.force_stop = true;
