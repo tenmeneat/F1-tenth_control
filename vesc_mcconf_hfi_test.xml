@@ -113,12 +113,12 @@
     <foc_hfi_obs_ovr_sec>0.001</foc_hfi_obs_ovr_sec>
     <foc_hfi_samples>1</foc_hfi_samples>
     <foc_offsets_cal_on_boot>1</foc_offsets_cal_on_boot>
-    <foc_offsets_current__0>2049.55</foc_offsets_current__0>
-    <foc_offsets_current__1>2049.28</foc_offsets_current__1>
-    <foc_offsets_current__2>2049.17</foc_offsets_current__2>
+    <foc_offsets_current__0>2051.17</foc_offsets_current__0>
+    <foc_offsets_current__1>2051.18</foc_offsets_current__1>
+    <foc_offsets_current__2>2051.13</foc_offsets_current__2>
     <foc_offsets_voltage__0>-0.0004</foc_offsets_voltage__0>
-    <foc_offsets_voltage__1>0.0008</foc_offsets_voltage__1>
-    <foc_offsets_voltage__2>-0.0004</foc_offsets_voltage__2>
+    <foc_offsets_voltage__1>0.0009</foc_offsets_voltage__1>
+    <foc_offsets_voltage__2>-0.0005</foc_offsets_voltage__2>
     <foc_offsets_voltage_undriven__0>0</foc_offsets_voltage_undriven__0>
     <foc_offsets_voltage_undriven__1>0</foc_offsets_voltage_undriven__1>
     <foc_offsets_voltage_undriven__2>0</foc_offsets_voltage_undriven__2>
@@ -134,10 +134,10 @@
     <foc_short_ls_on_zero_duty>0</foc_short_ls_on_zero_duty>
     <sp_pid_loop_rate>5</sp_pid_loop_rate>
     <s_pid_kp>0.004</s_pid_kp>
-    <s_pid_ki>0.004</s_pid_ki>
+    <s_pid_ki>0.0015</s_pid_ki>
     <s_pid_kd>0.0001</s_pid_kd>
     <s_pid_kd_filter>0.2</s_pid_kd_filter>
-    <s_pid_min_erpm>900</s_pid_min_erpm>
+    <s_pid_min_erpm>500</s_pid_min_erpm>
     <s_pid_allow_braking>1</s_pid_allow_braking>
     <s_pid_ramp_erpms_s>25000</s_pid_ramp_erpms_s>
     <s_pid_speed_source>0</s_pid_speed_source>

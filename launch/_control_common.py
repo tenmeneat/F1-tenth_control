@@ -17,7 +17,8 @@ IMU_ANGULAR_SCALE_SIM  = 1.0         # sim_imu_bridge_node는 이미 rad/s로 �
 # 일부러 여기로 옮기지 않고 각 진입점 파일에 그대로 둔다(환경을 잘못 골라 안전
 # 기능이 빠진 채 기동되는 실수를 구조적으로 차단하기 위함).
 
-def declare_common_args(sector_scale_enable_default='false'):
+def declare_common_args(
+        sector_scale_enable_default='false', hfi_launch_guard_enable_default='false'):
     """두 런치파일에서 동일하게 쓰는 인자 선언 목록."""
     return [
 
@@ -500,6 +501,22 @@ def declare_common_args(sector_scale_enable_default='false'):
             description='명령 속도 램프가 실측보다 앞설 수 있는 최대폭 [m/s]. 0이면 비활성(구 거동)'
         ),
         DeclareLaunchArgument(
+            'hfi_launch_guard_enable', default_value=hfi_launch_guard_enable_default,
+            description='HFI 실차 정지출발 중 저속 포착 구간 속도 상한 사용 여부'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_speed_cap', default_value='0.7',
+            description='HFI 정지출발 포착 전 발행 속도 상한 [m/s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_exit_speed', default_value='0.5',
+            description='실측 속도가 이 값을 넘으면 HFI 정지출발 상한 해제 [m/s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_standstill_speed', default_value='0.1',
+            description='이 속도 미만의 완전 정지에서 HFI 정지출발 보호 재무장 [m/s]'
+        ),
+        DeclareLaunchArgument(
             'understeer_gradient', default_value='0.010',
             description='언더스티어 그래디언트 K_us [rad/(m/s^2)]. 0이면 조향 권한 캡 비활성. '
                         '좌/우 분리값(_left/_right)이 양수면 조향·권한캡·트림 추정은 그쪽을 쓰고 '
@@ -677,6 +694,11 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'base_max_decel': LaunchConfiguration('base_max_decel'),
             'prebrake_decel': LaunchConfiguration('prebrake_decel'),
             'ramp_lead_max': LaunchConfiguration('ramp_lead_max'),
+            'hfi_launch_guard_enable': ParameterValue(
+                LaunchConfiguration('hfi_launch_guard_enable'), value_type=bool),
+            'hfi_launch_speed_cap': LaunchConfiguration('hfi_launch_speed_cap'),
+            'hfi_launch_exit_speed': LaunchConfiguration('hfi_launch_exit_speed'),
+            'hfi_launch_standstill_speed': LaunchConfiguration('hfi_launch_standstill_speed'),
             'launch_boost_enable': ParameterValue(LaunchConfiguration('launch_boost_enable'), value_type=bool),
             'launch_boost_speed': LaunchConfiguration('launch_boost_speed'),
             'launch_boost_time': LaunchConfiguration('launch_boost_time'),

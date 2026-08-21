@@ -238,6 +238,23 @@ public:
 
         ramp_lead_max_ = declare_parameter<double>("ramp_lead_max", 2.4);
 
+        // HFI 정지출발 보호. 정지 상태에서 큰 속도 오차가 한 번에 걸리면 HFI가 로터각을
+        // 포착하기 전에 속도 PID가 감긴다. 실측이 exit를 넘을 때까지만 저속 명령으로
+        // 포착 시간을 주고, 내부 램프 상태도 같은 상한으로 되감아 해제 순간 계단을 막는다.
+        hfi_launch_guard_enable_ =
+            declare_parameter<bool>("hfi_launch_guard_enable", false);
+        hfi_launch_speed_cap_ = std::max(
+            0.0, declare_parameter<double>("hfi_launch_speed_cap", 0.7));
+        hfi_launch_exit_speed_ = std::clamp(
+            declare_parameter<double>("hfi_launch_exit_speed", 0.5),
+            0.0, hfi_launch_speed_cap_);
+        hfi_launch_standstill_speed_ = std::clamp(
+            declare_parameter<double>("hfi_launch_standstill_speed", 0.1),
+            0.0, hfi_launch_exit_speed_);
+        if (hfi_launch_speed_cap_ <= 0.0 || hfi_launch_exit_speed_ <= 0.0) {
+            hfi_launch_guard_enable_ = false;
+        }
+
         // 런치 킥(자율 정지출발 시 센서리스 데드존 관통) — control_loop 8-c
         launch_boost_enable_ = declare_parameter<bool>("launch_boost_enable", true);
         launch_boost_speed_ = declare_parameter<double>("launch_boost_speed", 2.2);
@@ -1793,6 +1810,47 @@ private:
             }
         }
 
+        // 8-d. HFI 정지출발 포착 보호. 수동 명령은 control_map_node를 거치지 않으므로
+        //      이 로직의 영향을 받지 않는다. 완전 정지 또는 자율 미체결 상태에서 무장하고,
+        //      실제 차가 exit 속도를 넘을 때까지만 발행값과 내부 램프 상태를 함께 제한한다.
+        //      launch boost보다 뒤에서 적용해, 실수로 두 기능을 함께 켜도 HFI 상한이 이긴다.
+        if (hfi_launch_guard_enable_) {
+            const double abs_speed = std::abs(current_speed_);
+            const bool hfi_standstill = abs_speed < hfi_launch_standstill_speed_;
+
+            if (disengaged) {
+                hfi_launch_active_ = false;
+                if (hfi_standstill) hfi_launch_armed_ = true;
+            } else if (target_speed <= 0.1) {
+                hfi_launch_active_ = false;
+                if (hfi_standstill) hfi_launch_armed_ = true;
+            } else {
+                if (hfi_launch_armed_ && hfi_standstill && !hfi_launch_active_) {
+                    hfi_launch_active_ = true;
+                    RCLCPP_INFO(this->get_logger(),
+                        "HFI 정지출발 보호 시작: 발행 %.2f m/s 상한, %.2f m/s에서 해제",
+                        hfi_launch_speed_cap_, hfi_launch_exit_speed_);
+                }
+                if (hfi_launch_active_ && abs_speed >= hfi_launch_exit_speed_) {
+                    hfi_launch_active_ = false;
+                    hfi_launch_armed_ = false;
+                    ++hfi_launch_release_count_;
+                    RCLCPP_INFO(this->get_logger(),
+                        "HFI 정지출발 보호 해제: 실측 %.2f m/s (누적 %lu회)",
+                        current_speed_, hfi_launch_release_count_);
+                }
+            }
+
+            if (hfi_launch_active_) {
+                publish_speed = std::min(publish_speed, hfi_launch_speed_cap_);
+                final_speed = std::min(final_speed, hfi_launch_speed_cap_);
+                last_target_speed_ = std::min(last_target_speed_, hfi_launch_speed_cap_);
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                    "HFI 정지출발 보호 중: 실측 %.2f / 발행 %.2f / 목표 %.2f m/s",
+                    current_speed_, publish_speed, target_speed);
+            }
+        }
+
         if (status_log_period_ms_ > 0) {
             // ⚠️ Idx 앞의 L/G는 **어느 배열의 인덱스인지**다. 로컬(L)과 글로벌(G)은 배열이
             //    달라 소스가 바뀌면 번호가 크게 튀는데(실측 L53→G134) 실제 목표점 좌표는
@@ -2120,6 +2178,13 @@ private:
     // 종방향
     double base_max_accel_;
     double ramp_lead_max_ = 2.4;   // 램프 안티와인드업 선행 상한 [m/s], 0이면 비활성
+    bool hfi_launch_guard_enable_ = false;
+    double hfi_launch_speed_cap_ = 0.7;
+    double hfi_launch_exit_speed_ = 0.5;
+    double hfi_launch_standstill_speed_ = 0.1;
+    bool hfi_launch_armed_ = true;
+    bool hfi_launch_active_ = false;
+    unsigned long hfi_launch_release_count_ = 0;
     double base_max_decel_;                  // 명령 속도 하강 rate limit [m/s²]
     double prebrake_decel_ = 1.5;            // 곡률 사전감속용 실측 감속 권한 [m/s²]
     double max_speed_, min_speed_;

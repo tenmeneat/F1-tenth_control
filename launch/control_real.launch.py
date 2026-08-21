@@ -103,7 +103,9 @@ def generate_launch_description():
         #        구성에 그대로 남아, 이득 0인 채로 조용히 실패할 수 있는 표면만 늘린다.
         #     ③ explore는 **연습 전용**이고 아직 실차 순이득이 확인된 적이 없다(0814 두 판
         #        순효과 0). 연습에서 쓸 때만 인자로 켤 것.
-        *common.declare_common_args(sector_scale_enable_default='false'),
+        *common.declare_common_args(
+            sector_scale_enable_default='false',
+            hfi_launch_guard_enable_default='true'),
         odom_topic_arg,
         max_speed_arg,
         max_lateral_accel_arg,
