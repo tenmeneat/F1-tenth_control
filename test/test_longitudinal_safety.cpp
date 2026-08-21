@@ -62,6 +62,7 @@ TEST(HfiLaunchGuard, ReverseMotionCanNeverReleaseForwardLaunch) {
     auto cfg = test_hfi_config();
     cfg.timeout = 1.0;
     cfg.exit_hold = 0.04;
+    cfg.reverse_abort_hold = 0.0;  // 이 테스트는 방향성 해제 조건만 분리 검증한다.
 
     auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
     EXPECT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
@@ -256,8 +257,8 @@ TEST(HfiLaunchGuard, RelatchStandstillDwellResetsOnWheelMotion) {
         d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.0, 0.02);
     }
     ASSERT_FALSE(state.armed);
-    // 목표는 계속 0이어도 VESC가 standstill 문턱을 벗어나면 0.4초 누적을 폐기한다.
-    d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.11, 0.02);
+    // 0.13~0.15 잡음은 유지하지만 실제 exit 문턱(0.20)에 닿으면 누적을 폐기한다.
+    d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.20, 0.02);
     EXPECT_DOUBLE_EQ(state.relatch_elapsed, 0.0);
 
     for (int i = 0; i < 24; ++i) {
@@ -336,6 +337,7 @@ TEST(HfiLaunchGuard, Observed0822CapturesUnderFourSecondsCanRelease) {
     auto cfg = test_hfi_config();
     cfg.timeout = 4.0;
     cfg.exit_hold = 0.1;
+    cfg.no_progress_timeout = 0.0;  // 과거 capture 시간표의 hard-timeout 회귀 검증
     const double observed_release_seconds[] = {
         0.340, 0.480, 0.980, 1.000, 1.040, 1.040, 2.140,
         2.256, 2.860, 3.260, 3.300, 3.380, 3.480};
@@ -366,6 +368,7 @@ TEST(HfiLaunchGuard, ObservedLongCaptureIsCutOffAndRetried) {
     auto cfg = test_hfi_config();
     cfg.timeout = 4.0;
     cfg.exit_hold = 0.1;
+    cfg.no_progress_timeout = 0.0;
 
     auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
     ASSERT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
@@ -375,4 +378,69 @@ TEST(HfiLaunchGuard, ObservedLongCaptureIsCutOffAndRetried) {
     EXPECT_EQ(d.event, fc::HfiLaunchEvent::kRetryScheduled);
     EXPECT_TRUE(d.force_stop);
     EXPECT_TRUE(state.retry_waiting);
+}
+
+TEST(HfiLaunchGuard, StandstillHysteresisIgnoresPoint15Noise) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 4.0;
+    state.armed = false;
+    state.relatch_pending = true;
+
+    fc::HfiLaunchDecision d;
+    for (int i = 0; i < 28; ++i) {
+        const double noise = (i % 3 == 0) ? 0.15 : ((i % 3 == 1) ? 0.13 : 0.0);
+        d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, noise, 0.02);
+    }
+    EXPECT_TRUE(state.armed);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+}
+
+TEST(HfiLaunchGuard, ActualMotionAtPoint20ResetsStandstillDwell) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.standstill_filter_tau = 0.0;
+    state.armed = false;
+    state.relatch_pending = true;
+
+    fc::HfiLaunchDecision d;
+    for (int i = 0; i < 20; ++i)
+        d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.0, 0.02);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.20, 0.02);
+    EXPECT_DOUBLE_EQ(state.relatch_elapsed, 0.0);
+    for (int i = 0; i < 25; ++i)
+        d = fc::update_hfi_launch_guard(state, cfg, false, 0.0, 0.0, 0.02);
+    EXPECT_TRUE(state.armed);
+}
+
+TEST(HfiLaunchGuard, NoProgressRetriesBeforeFourSecondHardTimeout) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 4.0;
+    cfg.no_progress_timeout = 1.2;
+    cfg.no_progress_min_distance = 0.05;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    for (int i = 0; i < 60 && d.event != fc::HfiLaunchEvent::kRetryScheduled; ++i)
+        d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.02, 0.02);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kRetryScheduled);
+    EXPECT_EQ(state.last_failure_reason, fc::HfiLaunchFailureReason::kNoForwardProgress);
+    EXPECT_LT(state.elapsed, 1.3);
+}
+
+TEST(HfiLaunchGuard, ObservedSlowLaunchProgressIsNotAborted) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 4.0;
+    cfg.exit_hold = 0.1;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    for (int i = 0; i < 60; ++i) {
+        d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.093, 0.02);
+        ASSERT_NE(d.event, fc::HfiLaunchEvent::kRetryScheduled);
+    }
+    for (int i = 0; i < 5; ++i)
+        d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.5, 0.02);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
 }

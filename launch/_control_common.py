@@ -513,8 +513,16 @@ def declare_common_args(
             description='실측 속도가 이 값을 넘으면 HFI 정지출발 상한 해제 [m/s]'
         ),
         DeclareLaunchArgument(
-            'hfi_launch_standstill_speed', default_value='0.1',
-            description='VESC 절대속도가 이 값 미만일 때만 완전정지로 판정 [m/s]'
+            'hfi_launch_standstill_speed', default_value='0.12',
+            description='필터된 VESC 절대속도가 이 값 미만이면 정지 상태로 진입 [m/s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_standstill_exit_speed', default_value='0.20',
+            description='VESC 절대속도가 이 값 이상이면 정지 상태를 즉시 해제 [m/s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_standstill_filter_tau', default_value='0.10',
+            description='정지 판정용 VESC 속도 저역통과 시정수 [s]'
         ),
         DeclareLaunchArgument(
             'hfi_launch_timeout', default_value='4.0',
@@ -540,6 +548,22 @@ def declare_common_args(
         DeclareLaunchArgument(
             'hfi_launch_retry_cooldown', default_value='0.5',
             description='시도 실패 뒤 VESC 완전정지를 유지해야 자동 재시도하는 시간 [s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_no_progress_timeout', default_value='1.2',
+            description='이 시간까지 최소 순전진거리를 못 채우면 4초를 기다리지 않고 재시도 [s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_no_progress_min_distance', default_value='0.05',
+            description='HFI 출발 진행 판정 최소 순전진거리 [m]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_reverse_abort_speed', default_value='0.10',
+            description='지속 역회전 조기중단 판정 속도 [m/s]'
+        ),
+        DeclareLaunchArgument(
+            'hfi_launch_reverse_abort_hold', default_value='0.15',
+            description='역회전 속도를 이 시간 연속 관측하면 즉시 재시도 [s]'
         ),
         DeclareLaunchArgument(
             'hfi_launch_max_attempts', default_value='2',
@@ -736,6 +760,8 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'hfi_launch_speed_cap': LaunchConfiguration('hfi_launch_speed_cap'),
             'hfi_launch_exit_speed': LaunchConfiguration('hfi_launch_exit_speed'),
             'hfi_launch_standstill_speed': LaunchConfiguration('hfi_launch_standstill_speed'),
+            'hfi_launch_standstill_exit_speed': LaunchConfiguration('hfi_launch_standstill_exit_speed'),
+            'hfi_launch_standstill_filter_tau': LaunchConfiguration('hfi_launch_standstill_filter_tau'),
             'hfi_launch_timeout': LaunchConfiguration('hfi_launch_timeout'),
             'hfi_launch_exit_hold': LaunchConfiguration('hfi_launch_exit_hold'),
             'hfi_launch_relatch_time': LaunchConfiguration('hfi_launch_relatch_time'),
@@ -744,6 +770,10 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'hfi_launch_moving_bypass_hold':
                 LaunchConfiguration('hfi_launch_moving_bypass_hold'),
             'hfi_launch_retry_cooldown': LaunchConfiguration('hfi_launch_retry_cooldown'),
+            'hfi_launch_no_progress_timeout': LaunchConfiguration('hfi_launch_no_progress_timeout'),
+            'hfi_launch_no_progress_min_distance': LaunchConfiguration('hfi_launch_no_progress_min_distance'),
+            'hfi_launch_reverse_abort_speed': LaunchConfiguration('hfi_launch_reverse_abort_speed'),
+            'hfi_launch_reverse_abort_hold': LaunchConfiguration('hfi_launch_reverse_abort_hold'),
             'hfi_launch_max_attempts': ParameterValue(
                 LaunchConfiguration('hfi_launch_max_attempts'), value_type=int),
             'hfi_launch_speed_topic': LaunchConfiguration('hfi_launch_speed_topic'),

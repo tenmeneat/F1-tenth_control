@@ -30,11 +30,22 @@ enum class HfiLaunchEvent {
     kFailureReset,
 };
 
+enum class HfiLaunchFailureReason {
+    kNone,
+    kTimeout,
+    kNoForwardProgress,
+    kSustainedReverse,
+};
+
 struct HfiLaunchGuardConfig {
     bool enabled = false;
     double speed_cap = 0.7;
     double exit_speed = 0.5;
-    double standstill_speed = 0.1;
+    // 정지 진입/해제 Schmitt trigger. 0822 VESC /odom의 0.13~0.15 m/s 정지 노이즈가
+    // 0.5초 재무장 dwell을 계속 초기화하지 않되, 실제 0.20 m/s 이상 움직임은 즉시 깬다.
+    double standstill_speed = 0.12;
+    double standstill_exit_speed = 0.20;
+    double standstill_filter_tau = 0.10;
     double timeout = 4.0;
     double exit_hold = 0.1;
     double relatch_time = 0.5;
@@ -44,6 +55,12 @@ struct HfiLaunchGuardConfig {
     double moving_bypass_hold = 0.1;
     double retry_cooldown = 0.5;
     unsigned int max_attempts = 2;
+    // 034812 실패는 첫 1.2초 순전진 0.024m, 가장 느린 035120 정상 포착은
+    // 0.111m였다. 전진하지 못하고 제자리에서 덜걱거리는 시도는 hard timeout 전에 끊는다.
+    double no_progress_timeout = 1.2;
+    double no_progress_min_distance = 0.05;
+    double reverse_abort_speed = 0.10;
+    double reverse_abort_hold = 0.15;
 };
 
 struct HfiLaunchGuardState {
@@ -52,17 +69,25 @@ struct HfiLaunchGuardState {
     bool retry_waiting = false;
     bool relatch_pending = false;
     bool failure_latched = false;
+    bool standstill_filter_initialized = false;
+    bool standstill_latched = true;
     double elapsed = 0.0;
     double exit_hold_elapsed = 0.0;
     double relatch_elapsed = 0.0;
     double moving_bypass_elapsed = 0.0;
     double retry_cooldown_elapsed = 0.0;
+    double standstill_filtered_speed = 0.0;
+    double launch_signed_distance = 0.0;
+    double reverse_elapsed = 0.0;
+    HfiLaunchFailureReason last_failure_reason = HfiLaunchFailureReason::kNone;
     unsigned int attempt = 0;
     unsigned long release_count = 0;
     unsigned long moving_bypass_count = 0;
     unsigned long retry_count = 0;
     unsigned long attempt_timeout_count = 0;
     unsigned long failure_count = 0;
+    unsigned long no_progress_abort_count = 0;
+    unsigned long reverse_abort_count = 0;
 };
 
 struct HfiLaunchDecision {
@@ -86,6 +111,12 @@ inline HfiLaunchDecision update_hfi_launch_guard(
         state.relatch_elapsed = 0.0;
         state.moving_bypass_elapsed = 0.0;
         state.retry_cooldown_elapsed = 0.0;
+        state.standstill_filter_initialized = false;
+        state.standstill_latched = true;
+        state.standstill_filtered_speed = 0.0;
+        state.launch_signed_distance = 0.0;
+        state.reverse_elapsed = 0.0;
+        state.last_failure_reason = HfiLaunchFailureReason::kNone;
         state.attempt = 0;
         state.armed = true;
         return decision;
@@ -93,7 +124,34 @@ inline HfiLaunchDecision update_hfi_launch_guard(
 
     const double safe_dt = std::max(0.0, dt);
     const double abs_speed = std::abs(current_speed);
-    const bool standstill = abs_speed < config.standstill_speed;
+    const double standstill_enter = std::max(0.0, config.standstill_speed);
+    const double standstill_exit = std::max(
+        standstill_enter, config.standstill_exit_speed);
+    const double standstill_filter_tau = std::max(0.0, config.standstill_filter_tau);
+    if (!state.standstill_filter_initialized) {
+        state.standstill_filtered_speed = abs_speed;
+        state.standstill_latched = abs_speed < standstill_enter;
+        state.standstill_filter_initialized = true;
+    } else if (safe_dt > 0.0) {
+        const double alpha = standstill_filter_tau > 0.0
+            ? 1.0 - std::exp(-safe_dt / standstill_filter_tau)
+            : 1.0;
+        state.standstill_filtered_speed +=
+            alpha * (abs_speed - state.standstill_filtered_speed);
+        if (state.standstill_latched) {
+            // 실제 exit 이상 움직임은 필터 지연 없이 즉시 정지 판정을 해제한다.
+            if (abs_speed >= standstill_exit ||
+                state.standstill_filtered_speed >= standstill_exit) {
+                state.standstill_latched = false;
+            }
+        } else if (abs_speed < standstill_enter ||
+                   state.standstill_filtered_speed < standstill_enter) {
+            // 0속도 명령 직후 실제 raw 속도가 enter 아래로 들어오면 즉시 dwell을 시작한다.
+            // 이후 0.13~0.15 잡음은 exit(0.20) 미만이므로 dwell을 깨지 않는다.
+            state.standstill_latched = true;
+        }
+    }
+    const bool standstill = state.standstill_latched;
     // 열린 safe-stop 경로는 앞쪽 감속 웨이포인트가 양수여도 말단 vx=0이 플래너의
     // 정지 의도다. launch_allowed=false 동안에는 그 중간 양수값으로 HFI를 재기동하지 않는다.
     const bool reset_requested = disengaged || target_speed <= 0.1 || !launch_allowed;
@@ -118,6 +176,9 @@ inline HfiLaunchDecision update_hfi_launch_guard(
         state.elapsed = 0.0;
         state.exit_hold_elapsed = 0.0;
         state.retry_cooldown_elapsed = 0.0;
+        state.launch_signed_distance = 0.0;
+        state.reverse_elapsed = 0.0;
+        state.last_failure_reason = HfiLaunchFailureReason::kNone;
         state.attempt = 0;
 
         if (moving_forward) {
@@ -144,7 +205,9 @@ inline HfiLaunchDecision update_hfi_launch_guard(
         // 플래너가 closed handoff/creep 경로로 바꿔 launch_allowed=true가 되면 armed 상태에서
         // 정상 HFI 출발을 시작한다. 이 게이트가 없으면 safe-stop의 앞쪽 양수 waypoint만 보고
         // 4초 안전 래치를 조기에 우회할 수 있다.
-        if (!launch_allowed && standstill) decision.force_stop = true;
+        if (!launch_allowed && (standstill || abs_speed < standstill_enter)) {
+            decision.force_stop = true;
+        }
         return decision;
     }
 
@@ -187,6 +250,9 @@ inline HfiLaunchDecision update_hfi_launch_guard(
             state.elapsed = 0.0;
             state.exit_hold_elapsed = 0.0;
             state.retry_cooldown_elapsed = 0.0;
+            state.launch_signed_distance = 0.0;
+            state.reverse_elapsed = 0.0;
+            state.last_failure_reason = HfiLaunchFailureReason::kNone;
             state.attempt = 1;
             decision.force_stop = false;
             decision.constrain_to_cap = true;
@@ -220,6 +286,9 @@ inline HfiLaunchDecision update_hfi_launch_guard(
             state.elapsed = 0.0;
             state.exit_hold_elapsed = 0.0;
             state.retry_cooldown_elapsed = 0.0;
+            state.launch_signed_distance = 0.0;
+            state.reverse_elapsed = 0.0;
+            state.last_failure_reason = HfiLaunchFailureReason::kNone;
             ++state.attempt;
             ++state.retry_count;
             decision.force_stop = false;
@@ -231,6 +300,13 @@ inline HfiLaunchDecision update_hfi_launch_guard(
 
     if (state.active) {
         state.elapsed += safe_dt;
+        state.launch_signed_distance += current_speed * safe_dt;
+        if (config.reverse_abort_speed > 0.0 &&
+            current_speed <= -config.reverse_abort_speed) {
+            state.reverse_elapsed += safe_dt;
+        } else {
+            state.reverse_elapsed = 0.0;
+        }
 
         // 전진 명령이므로 양의 속도만 성공이다. 역방향 -exit_speed는 절대 성공으로
         // 취급하지 않으며, 한 샘플 스파이크가 아니라 exit_hold 연속 유지를 요구한다.
@@ -248,11 +324,26 @@ inline HfiLaunchDecision update_hfi_launch_guard(
             return decision;
         }
 
-        if (config.timeout > 0.0 && state.elapsed >= config.timeout) {
+        const bool sustained_reverse = config.reverse_abort_hold > 0.0 &&
+            state.reverse_elapsed >= config.reverse_abort_hold;
+        const bool no_forward_progress = config.no_progress_timeout > 0.0 &&
+            state.elapsed >= config.no_progress_timeout &&
+            state.launch_signed_distance < config.no_progress_min_distance;
+        const bool hard_timeout = config.timeout > 0.0 && state.elapsed >= config.timeout;
+        if (sustained_reverse || no_forward_progress || hard_timeout) {
             state.active = false;
             state.armed = false;
             state.exit_hold_elapsed = 0.0;
             ++state.attempt_timeout_count;
+            if (sustained_reverse) {
+                state.last_failure_reason = HfiLaunchFailureReason::kSustainedReverse;
+                ++state.reverse_abort_count;
+            } else if (no_forward_progress) {
+                state.last_failure_reason = HfiLaunchFailureReason::kNoForwardProgress;
+                ++state.no_progress_abort_count;
+            } else {
+                state.last_failure_reason = HfiLaunchFailureReason::kTimeout;
+            }
             decision.force_stop = true;
             if (state.attempt < max_attempts) {
                 state.retry_waiting = true;
@@ -275,6 +366,9 @@ inline HfiLaunchDecision update_hfi_launch_guard(
         state.elapsed = 0.0;
         state.exit_hold_elapsed = 0.0;
         state.retry_cooldown_elapsed = 0.0;
+        state.launch_signed_distance = 0.0;
+        state.reverse_elapsed = 0.0;
+        state.last_failure_reason = HfiLaunchFailureReason::kNone;
         state.attempt = 1;
         decision.constrain_to_cap = true;
         decision.event = HfiLaunchEvent::kStarted;

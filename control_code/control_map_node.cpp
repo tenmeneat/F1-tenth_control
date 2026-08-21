@@ -250,8 +250,13 @@ public:
             declare_parameter<double>("hfi_launch_exit_speed", 0.5),
             0.0, hfi_launch_speed_cap_);
         hfi_launch_standstill_speed_ = std::clamp(
-            declare_parameter<double>("hfi_launch_standstill_speed", 0.1),
+            declare_parameter<double>("hfi_launch_standstill_speed", 0.12),
             0.0, hfi_launch_exit_speed_);
+        hfi_launch_standstill_exit_speed_ = std::clamp(
+            declare_parameter<double>("hfi_launch_standstill_exit_speed", 0.20),
+            hfi_launch_standstill_speed_, hfi_launch_exit_speed_);
+        hfi_launch_standstill_filter_tau_ = std::max(
+            0.0, declare_parameter<double>("hfi_launch_standstill_filter_tau", 0.10));
         hfi_launch_timeout_ = std::max(
             0.0, declare_parameter<double>("hfi_launch_timeout", 4.0));
         hfi_launch_exit_hold_ = std::max(
@@ -268,6 +273,14 @@ public:
             0.0, declare_parameter<double>("hfi_launch_moving_bypass_hold", 0.1));
         hfi_launch_retry_cooldown_ = std::max(
             0.0, declare_parameter<double>("hfi_launch_retry_cooldown", 0.5));
+        hfi_launch_no_progress_timeout_ = std::max(
+            0.0, declare_parameter<double>("hfi_launch_no_progress_timeout", 1.2));
+        hfi_launch_no_progress_min_distance_ = std::max(
+            0.0, declare_parameter<double>("hfi_launch_no_progress_min_distance", 0.05));
+        hfi_launch_reverse_abort_speed_ = std::max(
+            0.0, declare_parameter<double>("hfi_launch_reverse_abort_speed", 0.10));
+        hfi_launch_reverse_abort_hold_ = std::max(
+            0.0, declare_parameter<double>("hfi_launch_reverse_abort_hold", 0.15));
         hfi_launch_max_attempts_ = static_cast<unsigned int>(std::max<int64_t>(1,
             declare_parameter<int>("hfi_launch_max_attempts", 2)));
         hfi_launch_speed_topic_ =
@@ -1858,12 +1871,18 @@ private:
             config.speed_cap = hfi_launch_speed_cap_;
             config.exit_speed = hfi_launch_exit_speed_;
             config.standstill_speed = hfi_launch_standstill_speed_;
+            config.standstill_exit_speed = hfi_launch_standstill_exit_speed_;
+            config.standstill_filter_tau = hfi_launch_standstill_filter_tau_;
             config.timeout = hfi_launch_timeout_;
             config.exit_hold = hfi_launch_exit_hold_;
             config.relatch_time = hfi_launch_relatch_time_;
             config.moving_bypass_speed = hfi_launch_moving_bypass_speed_;
             config.moving_bypass_hold = hfi_launch_moving_bypass_hold_;
             config.retry_cooldown = hfi_launch_retry_cooldown_;
+            config.no_progress_timeout = hfi_launch_no_progress_timeout_;
+            config.no_progress_min_distance = hfi_launch_no_progress_min_distance_;
+            config.reverse_abort_speed = hfi_launch_reverse_abort_speed_;
+            config.reverse_abort_hold = hfi_launch_reverse_abort_hold_;
             config.max_attempts = hfi_launch_max_attempts_;
 
             // 일반 engage gate는 미수신/timeout 때 fail-open 호환 동작을 유지하지만, HFI
@@ -1895,7 +1914,7 @@ private:
                 if (hfi_disengaged || target_speed <= 0.1) {
                     (void)f1tenth_control::update_hfi_launch_guard(
                         hfi_launch_state_, config, hfi_disengaged, target_speed,
-                        hfi_launch_standstill_speed_, 0.0, hfi_launch_allowed);
+                        hfi_launch_standstill_exit_speed_, 0.0, hfi_launch_allowed);
                 }
                 const bool speed_required = hfi_launch_state_.active ||
                     hfi_launch_state_.retry_waiting || hfi_launch_state_.relatch_pending ||
@@ -1907,6 +1926,15 @@ private:
                         "HFI 속도원(%s) 미수신/%.3fs stale — 출발 판정 불가, 속도 0 유지",
                         hfi_launch_speed_topic_.c_str(), hfi_speed_age);
                 }
+            }
+
+            const char * hfi_failure_reason = "hard timeout";
+            if (hfi_launch_state_.last_failure_reason ==
+                f1tenth_control::HfiLaunchFailureReason::kNoForwardProgress) {
+                hfi_failure_reason = "no forward progress";
+            } else if (hfi_launch_state_.last_failure_reason ==
+                       f1tenth_control::HfiLaunchFailureReason::kSustainedReverse) {
+                hfi_failure_reason = "sustained reverse";
             }
 
             if (decision.event == f1tenth_control::HfiLaunchEvent::kStarted) {
@@ -1929,19 +1957,23 @@ private:
                     hfi_speed_, hfi_launch_state_.moving_bypass_count);
             } else if (decision.event == f1tenth_control::HfiLaunchEvent::kRetryScheduled) {
                 RCLCPP_WARN(this->get_logger(),
-                    "HFI 정지출발 시도 %u/%u가 %.1fs에 실패 — 속도 0 및 VESC 완전정지 "
-                    "%.1fs 후 제한 재시도",
+                    "HFI 정지출발 시도 %u/%u 조기/제한 실패(%s): %.2fs, 순전진 %.3fm — "
+                    "속도 0 및 VESC 완전정지 %.1fs 후 제한 재시도",
                     hfi_launch_state_.attempt, hfi_launch_max_attempts_,
-                    hfi_launch_timeout_, hfi_launch_retry_cooldown_);
+                    hfi_failure_reason, hfi_launch_state_.elapsed,
+                    hfi_launch_state_.launch_signed_distance, hfi_launch_retry_cooldown_);
             } else if (decision.event == f1tenth_control::HfiLaunchEvent::kRetryStarted) {
                 RCLCPP_WARN(this->get_logger(),
                     "HFI 정지출발 제한 재시도 시작(%u/%u): VESC %.2f m/s",
                     hfi_launch_state_.attempt, hfi_launch_max_attempts_, hfi_speed_);
             } else if (decision.event == f1tenth_control::HfiLaunchEvent::kTimedOut) {
                 RCLCPP_ERROR(this->get_logger(),
-                    "HFI 정지출발 %u회 모두 관통 실패 → 속도 0 실패 래치 (누적 %lu회). "
+                    "HFI 정지출발 %u회 모두 관통 실패(%s, %.2fs, 순전진 %.3fm) → "
+                    "속도 0 실패 래치 (누적 %lu회). "
                     "정지 목표+VESC 완전정지 %.1fs 후에만 재무장",
-                    hfi_launch_max_attempts_, hfi_launch_state_.failure_count,
+                    hfi_launch_max_attempts_, hfi_failure_reason,
+                    hfi_launch_state_.elapsed, hfi_launch_state_.launch_signed_distance,
+                    hfi_launch_state_.failure_count,
                     hfi_launch_relatch_time_);
             } else if (decision.event == f1tenth_control::HfiLaunchEvent::kFailureReset) {
                 RCLCPP_WARN(this->get_logger(),
@@ -1955,10 +1987,11 @@ private:
                 last_target_speed_ = std::min(last_target_speed_, hfi_launch_speed_cap_);
                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
                     "HFI 정지출발 보호 중(%u/%u): VESC %.2f / PF %.2f / 발행 %.2f / "
-                    "목표 %.2f m/s (%.2f/%.1fs)",
+                    "목표 %.2f m/s (%.2f/%.1fs, 순전진 %.3fm)",
                     hfi_launch_state_.attempt, hfi_launch_max_attempts_,
                     hfi_speed_, current_speed_, publish_speed, target_speed,
-                    hfi_launch_state_.elapsed, hfi_launch_timeout_);
+                    hfi_launch_state_.elapsed, hfi_launch_timeout_,
+                    hfi_launch_state_.launch_signed_distance);
             } else if (decision.force_stop) {
                 publish_speed = 0.0;
                 final_speed = 0.0;
@@ -2304,12 +2337,18 @@ private:
     double hfi_launch_speed_cap_ = 0.7;
     double hfi_launch_exit_speed_ = 0.5;
     double hfi_launch_standstill_speed_ = 0.1;
+    double hfi_launch_standstill_exit_speed_ = 0.20;
+    double hfi_launch_standstill_filter_tau_ = 0.10;
     double hfi_launch_timeout_ = 4.0;
     double hfi_launch_exit_hold_ = 0.1;
     double hfi_launch_relatch_time_ = 0.5;
     double hfi_launch_moving_bypass_speed_ = 1.0;
     double hfi_launch_moving_bypass_hold_ = 0.1;
     double hfi_launch_retry_cooldown_ = 0.5;
+    double hfi_launch_no_progress_timeout_ = 1.2;
+    double hfi_launch_no_progress_min_distance_ = 0.05;
+    double hfi_launch_reverse_abort_speed_ = 0.10;
+    double hfi_launch_reverse_abort_hold_ = 0.15;
     unsigned int hfi_launch_max_attempts_ = 2;
     std::string hfi_launch_speed_topic_ = "/odom";
     double hfi_launch_speed_timeout_ = 0.2;
