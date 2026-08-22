@@ -35,7 +35,6 @@ enum class HfiLaunchFailureReason {
     kTimeout,
     kNoForwardProgress,
     kSustainedReverse,
-    kPostReleaseDropout,
 };
 
 struct HfiLaunchGuardConfig {
@@ -51,12 +50,7 @@ struct HfiLaunchGuardConfig {
     double standstill_exit_speed = 0.20;
     double standstill_filter_tau = 0.10;
     double timeout = 4.0;
-    double exit_hold = 0.3;
-    // exit_hold를 통과한 직후 sensorless 동기를 다시 잃는 0822 실차 회귀를 잡는다.
-    // 이 시간 동안 속도가 post_release_min_speed 아래로 떨어지면 성공을 취소하고
-    // 동일한 bounded retry/failure-latch 경로로 보낸다. 0 이하면 감시 비활성.
-    double post_release_monitor_time = 0.5;
-    double post_release_min_speed = 0.20;
+    double exit_hold = 0.1;
     double relatch_time = 0.5;
     // 이미 전진 중인 수동→자율/일시 정지명령 복귀는 정지출발이 아니다. 이 속도를
     // 연속 유지하면 relatch_pending을 우회한다. 0 이하면 우회 비활성.
@@ -78,12 +72,10 @@ struct HfiLaunchGuardState {
     bool retry_waiting = false;
     bool relatch_pending = false;
     bool failure_latched = false;
-    bool post_release_monitoring = false;
     bool standstill_filter_initialized = false;
     bool standstill_latched = true;
     double elapsed = 0.0;
     double exit_hold_elapsed = 0.0;
-    double post_release_elapsed = 0.0;
     double relatch_elapsed = 0.0;
     double moving_bypass_elapsed = 0.0;
     double retry_cooldown_elapsed = 0.0;
@@ -99,7 +91,6 @@ struct HfiLaunchGuardState {
     unsigned long failure_count = 0;
     unsigned long no_progress_abort_count = 0;
     unsigned long reverse_abort_count = 0;
-    unsigned long post_release_dropout_count = 0;
 };
 
 struct HfiLaunchDecision {
@@ -118,10 +109,8 @@ inline HfiLaunchDecision update_hfi_launch_guard(
         state.retry_waiting = false;
         state.relatch_pending = false;
         state.failure_latched = false;
-        state.post_release_monitoring = false;
         state.elapsed = 0.0;
         state.exit_hold_elapsed = 0.0;
-        state.post_release_elapsed = 0.0;
         state.relatch_elapsed = 0.0;
         state.moving_bypass_elapsed = 0.0;
         state.retry_cooldown_elapsed = 0.0;
@@ -187,10 +176,8 @@ inline HfiLaunchDecision update_hfi_launch_guard(
         if (!state.armed || !standstill) state.relatch_pending = true;
         state.active = false;
         state.retry_waiting = false;
-        state.post_release_monitoring = false;
         state.elapsed = 0.0;
         state.exit_hold_elapsed = 0.0;
-        state.post_release_elapsed = 0.0;
         state.retry_cooldown_elapsed = 0.0;
         state.launch_signed_distance = 0.0;
         state.reverse_elapsed = 0.0;
@@ -265,7 +252,6 @@ inline HfiLaunchDecision update_hfi_launch_guard(
             state.active = true;
             state.elapsed = 0.0;
             state.exit_hold_elapsed = 0.0;
-            state.post_release_elapsed = 0.0;
             state.retry_cooldown_elapsed = 0.0;
             state.launch_signed_distance = 0.0;
             state.reverse_elapsed = 0.0;
@@ -336,8 +322,6 @@ inline HfiLaunchDecision update_hfi_launch_guard(
             state.exit_hold_elapsed >= std::max(0.0, config.exit_hold)) {
             state.active = false;
             state.armed = false;
-            state.post_release_monitoring = config.post_release_monitor_time > 0.0;
-            state.post_release_elapsed = 0.0;
             ++state.release_count;
             decision.event = HfiLaunchEvent::kReleased;
             return decision;
@@ -381,37 +365,6 @@ inline HfiLaunchDecision update_hfi_launch_guard(
             return decision;
         }
         decision.constrain_to_cap = true;
-        return decision;
-    }
-
-    // exit_speed/exit_hold를 통과한 뒤에도 짧게 실제 VESC 속도를 감시한다. 0822
-    // run_152508은 +0.5 m/s를 0.14초 유지해 성공 처리됐지만 직후 +0.07 m/s로
-    // 붕괴했고, armed=false 상태라 이후 13k ERPM 명령 중에도 재시도하지 못했다.
-    if (state.post_release_monitoring) {
-        state.post_release_elapsed += safe_dt;
-        if (current_speed < std::max(0.0, config.post_release_min_speed)) {
-            state.post_release_monitoring = false;
-            state.post_release_elapsed = 0.0;
-            state.last_failure_reason = HfiLaunchFailureReason::kPostReleaseDropout;
-            ++state.attempt_timeout_count;
-            ++state.post_release_dropout_count;
-            decision.force_stop = true;
-            if (state.attempt < max_attempts) {
-                state.retry_waiting = true;
-                state.retry_cooldown_elapsed = 0.0;
-                decision.event = HfiLaunchEvent::kRetryScheduled;
-            } else {
-                state.failure_latched = true;
-                ++state.failure_count;
-                decision.event = HfiLaunchEvent::kTimedOut;
-            }
-            return decision;
-        }
-        if (state.post_release_elapsed >=
-            std::max(0.0, config.post_release_monitor_time)) {
-            state.post_release_monitoring = false;
-            state.post_release_elapsed = 0.0;
-        }
         return decision;
     }
 

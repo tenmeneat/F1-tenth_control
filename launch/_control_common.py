@@ -530,16 +530,8 @@ def declare_common_args(
             description='HFI 시도 1회가 exit 조건을 못 채우면 중단하는 시간 [s]. 0이면 timeout 비활성'
         ),
         DeclareLaunchArgument(
-            'hfi_launch_exit_hold', default_value='0.3',
+            'hfi_launch_exit_hold', default_value='0.1',
             description='VESC 전진속도가 exit 이상으로 연속 유지돼야 하는 시간 [s]'
-        ),
-        DeclareLaunchArgument(
-            'hfi_launch_post_release_monitor_time', default_value='0.5',
-            description='HFI 보호 해제 뒤 재탈조를 감시하는 시간 [s]. 0이면 비활성'
-        ),
-        DeclareLaunchArgument(
-            'hfi_launch_post_release_min_speed', default_value='0.20',
-            description='해제 후 감시 중 이 속도 미만이면 포착 실패로 되돌리는 문턱 [m/s]'
         ),
         DeclareLaunchArgument(
             'hfi_launch_relatch_time', default_value='0.5',
@@ -773,10 +765,6 @@ def build_control_map_node(*, odom_topic, max_speed, max_lateral_accel, base_max
             'hfi_launch_standstill_filter_tau': LaunchConfiguration('hfi_launch_standstill_filter_tau'),
             'hfi_launch_timeout': LaunchConfiguration('hfi_launch_timeout'),
             'hfi_launch_exit_hold': LaunchConfiguration('hfi_launch_exit_hold'),
-            'hfi_launch_post_release_monitor_time':
-                LaunchConfiguration('hfi_launch_post_release_monitor_time'),
-            'hfi_launch_post_release_min_speed':
-                LaunchConfiguration('hfi_launch_post_release_min_speed'),
             'hfi_launch_relatch_time': LaunchConfiguration('hfi_launch_relatch_time'),
             'hfi_launch_moving_bypass_speed':
                 LaunchConfiguration('hfi_launch_moving_bypass_speed'),

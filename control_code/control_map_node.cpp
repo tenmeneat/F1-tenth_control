@@ -260,11 +260,7 @@ public:
         hfi_launch_timeout_ = std::max(
             0.0, declare_parameter<double>("hfi_launch_timeout", 4.0));
         hfi_launch_exit_hold_ = std::max(
-            0.0, declare_parameter<double>("hfi_launch_exit_hold", 0.3));
-        hfi_launch_post_release_monitor_time_ = std::max(
-            0.0, declare_parameter<double>("hfi_launch_post_release_monitor_time", 0.5));
-        hfi_launch_post_release_min_speed_ = std::max(
-            0.0, declare_parameter<double>("hfi_launch_post_release_min_speed", 0.20));
+            0.0, declare_parameter<double>("hfi_launch_exit_hold", 0.1));
         hfi_launch_relatch_time_ = std::max(
             0.0, declare_parameter<double>("hfi_launch_relatch_time", 0.5));
         hfi_launch_moving_bypass_speed_ =
@@ -1879,8 +1875,6 @@ private:
             config.standstill_filter_tau = hfi_launch_standstill_filter_tau_;
             config.timeout = hfi_launch_timeout_;
             config.exit_hold = hfi_launch_exit_hold_;
-            config.post_release_monitor_time = hfi_launch_post_release_monitor_time_;
-            config.post_release_min_speed = hfi_launch_post_release_min_speed_;
             config.relatch_time = hfi_launch_relatch_time_;
             config.moving_bypass_speed = hfi_launch_moving_bypass_speed_;
             config.moving_bypass_hold = hfi_launch_moving_bypass_hold_;
@@ -1923,7 +1917,6 @@ private:
                         hfi_launch_standstill_exit_speed_, 0.0, hfi_launch_allowed);
                 }
                 const bool speed_required = hfi_launch_state_.active ||
-                    hfi_launch_state_.post_release_monitoring ||
                     hfi_launch_state_.retry_waiting || hfi_launch_state_.relatch_pending ||
                     hfi_launch_state_.failure_latched ||
                     (hfi_launch_state_.armed && !hfi_disengaged && target_speed > 0.1);
@@ -1942,9 +1935,6 @@ private:
             } else if (hfi_launch_state_.last_failure_reason ==
                        f1tenth_control::HfiLaunchFailureReason::kSustainedReverse) {
                 hfi_failure_reason = "sustained reverse";
-            } else if (hfi_launch_state_.last_failure_reason ==
-                       f1tenth_control::HfiLaunchFailureReason::kPostReleaseDropout) {
-                hfi_failure_reason = "post-release speed dropout";
             }
 
             if (decision.event == f1tenth_control::HfiLaunchEvent::kStarted) {
@@ -1956,11 +1946,9 @@ private:
                     hfi_launch_timeout_);
             } else if (decision.event == f1tenth_control::HfiLaunchEvent::kReleased) {
                 RCLCPP_INFO(this->get_logger(),
-                    "HFI 정지출발 1차 포착: VESC 전진속도 %.2f m/s / %.2fs / 시도 %u "
-                    "— 상한 해제 후 %.2fs 동안 %.2f m/s 미만 재탈조 감시 (누적 %lu회)",
+                    "HFI 정지출발 보호 해제: VESC 전진속도 %.2f m/s / %.2fs / 시도 %u "
+                    "(누적 %lu회)",
                     hfi_speed_, hfi_launch_state_.elapsed, hfi_launch_state_.attempt,
-                    hfi_launch_post_release_monitor_time_,
-                    hfi_launch_post_release_min_speed_,
                     hfi_launch_state_.release_count);
             } else if (decision.event == f1tenth_control::HfiLaunchEvent::kMovingBypass) {
                 RCLCPP_INFO(this->get_logger(),
@@ -2352,9 +2340,7 @@ private:
     double hfi_launch_standstill_exit_speed_ = 0.20;
     double hfi_launch_standstill_filter_tau_ = 0.10;
     double hfi_launch_timeout_ = 4.0;
-    double hfi_launch_exit_hold_ = 0.3;
-    double hfi_launch_post_release_monitor_time_ = 0.5;
-    double hfi_launch_post_release_min_speed_ = 0.20;
+    double hfi_launch_exit_hold_ = 0.1;
     double hfi_launch_relatch_time_ = 0.5;
     double hfi_launch_moving_bypass_speed_ = 0.5;
     double hfi_launch_moving_bypass_hold_ = 0.1;
