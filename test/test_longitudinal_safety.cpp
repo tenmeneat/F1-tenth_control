@@ -29,6 +29,9 @@ fc::HfiLaunchGuardConfig test_hfi_config() {
     cfg.enabled = true;
     cfg.timeout = 0.06;
     cfg.exit_hold = 0.02;
+    // 기존 상태기 단위 테스트는 post-release 단계와 독립적으로 유지한다. 해당 단계는
+    // 아래 전용 회귀 테스트에서 명시적으로 활성화한다.
+    cfg.post_release_monitor_time = 0.0;
     cfg.relatch_time = 0.5;
     cfg.retry_cooldown = 0.04;
     cfg.max_attempts = 2;
@@ -96,6 +99,76 @@ TEST(HfiLaunchGuard, ExitSpeedMustBeContinuous) {
     EXPECT_EQ(d.event, fc::HfiLaunchEvent::kNone);
     d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.5, 0.02);
     EXPECT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
+}
+
+TEST(HfiLaunchGuard, Observed0822ShortCaptureCannotReleaseWithNewDefaultHold) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 4.0;
+    cfg.exit_hold = 0.3;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    // run_0822_152508은 +0.5 m/s 이상이 약 0.14초뿐이었다.
+    for (int i = 0; i < 7; ++i) {
+        d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.52, 0.02);
+        EXPECT_NE(d.event, fc::HfiLaunchEvent::kReleased);
+        EXPECT_TRUE(d.constrain_to_cap);
+    }
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.07, 0.02);
+    EXPECT_NE(d.event, fc::HfiLaunchEvent::kReleased);
+    EXPECT_TRUE(state.active);
+    EXPECT_TRUE(d.constrain_to_cap);
+}
+
+TEST(HfiLaunchGuard, PostReleaseSpeedDropImmediatelySchedulesBoundedRetry) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 1.0;
+    cfg.exit_hold = 0.04;
+    cfg.post_release_monitor_time = 0.5;
+    cfg.post_release_min_speed = 0.20;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.52, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kNone);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.52, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
+    ASSERT_TRUE(state.post_release_monitoring);
+
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.07, 0.02);
+    EXPECT_EQ(d.event, fc::HfiLaunchEvent::kRetryScheduled);
+    EXPECT_TRUE(d.force_stop);
+    EXPECT_TRUE(state.retry_waiting);
+    EXPECT_FALSE(state.post_release_monitoring);
+    EXPECT_EQ(
+        state.last_failure_reason, fc::HfiLaunchFailureReason::kPostReleaseDropout);
+    EXPECT_EQ(state.post_release_dropout_count, 1UL);
+}
+
+TEST(HfiLaunchGuard, StablePostReleaseSpeedCompletesMonitoring) {
+    fc::HfiLaunchGuardState state;
+    auto cfg = test_hfi_config();
+    cfg.timeout = 1.0;
+    cfg.exit_hold = 0.04;
+    cfg.post_release_monitor_time = 0.5;
+    cfg.post_release_min_speed = 0.20;
+
+    auto d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.0, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kStarted);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.52, 0.02);
+    d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.52, 0.02);
+    ASSERT_EQ(d.event, fc::HfiLaunchEvent::kReleased);
+
+    for (int i = 0; i < 25; ++i) {
+        d = fc::update_hfi_launch_guard(state, cfg, false, 2.0, 0.45, 0.02);
+        EXPECT_FALSE(d.force_stop);
+        EXPECT_NE(d.event, fc::HfiLaunchEvent::kRetryScheduled);
+    }
+    EXPECT_FALSE(state.post_release_monitoring);
+    EXPECT_FALSE(state.retry_waiting);
+    EXPECT_EQ(state.post_release_dropout_count, 0UL);
 }
 
 TEST(HfiLaunchGuard, PositiveTargetCompletesGuardedRelatchWithoutDeadlock) {
